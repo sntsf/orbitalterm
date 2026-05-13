@@ -207,13 +207,13 @@ pub async fn connect_rdp(
     let connection = load_connection(&connection_id)?;
     let password = get_saved_password(&connection_id);
 
-    let rdp_bin = crate::rdp::find_rdp_client()?;
-    let mut cmd = std::process::Command::new(&rdp_bin);
-    build_rdp_args(&mut cmd, &connection, password.as_deref());
+    let rdp_client = crate::rdp::find_rdp_client()?;
+    let mut cmd = std::process::Command::new(&rdp_client.binary);
+    build_rdp_args(&mut cmd, &connection, password.as_deref(), rdp_client.is_wayland);
 
     let child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to launch {rdp_bin}: {e}"))?;
+        .map_err(|e| format!("Failed to launch {}: {e}", rdp_client.binary))?;
 
     let session_id = Uuid::new_v4().to_string();
     rdp_sessions.lock().unwrap().insert(session_id.clone(), child);
@@ -247,7 +247,12 @@ pub async fn disconnect_rdp(
     Ok(())
 }
 
-fn build_rdp_args(cmd: &mut std::process::Command, conn: &Connection, password: Option<&str>) {
+fn build_rdp_args(
+    cmd: &mut std::process::Command,
+    conn: &Connection,
+    password: Option<&str>,
+    #[allow(unused_variables)] is_wayland: bool,
+) {
     #[cfg(target_os = "linux")]
     {
         cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
@@ -257,6 +262,9 @@ fn build_rdp_args(cmd: &mut std::process::Command, conn: &Connection, password: 
         }
         cmd.arg("/dynamic-resolution");
         cmd.arg("/cert:ignore");
+
+        // wlfreerdp (Wayland native) doesn't need DISPLAY but may need XDG_RUNTIME_DIR
+        // xfreerdp on Wayland runs via XWayland — no extra flags needed
     }
     #[cfg(target_os = "windows")]
     {
