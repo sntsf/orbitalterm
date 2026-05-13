@@ -1,4 +1,5 @@
 export type ConnectionType = "ssh" | "rdp";
+export type AuthType = "agent" | "password" | "key";
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "error";
 
 export interface Connection {
@@ -8,6 +9,8 @@ export interface Connection {
   host: string;
   port: number;
   username: string;
+  auth_type: AuthType;
+  key_path: string;
   folder_id: string | null;
   notes: string;
   created_at: string;
@@ -27,4 +30,5 @@ export interface Tab {
   connection_name: string;
   connection_type: ConnectionType;
   status: ConnectionStatus;
+  session_id?: string;
 }

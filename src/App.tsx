@@ -1,6 +1,7 @@
 import { Sidebar } from "./components/Sidebar";
 import { TabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/Terminal";
+import { RdpPane } from "./components/RdpPane";
 import { Welcome } from "./components/Welcome";
 import { ConnectionForm } from "./components/ConnectionForm";
 import { useAppStore } from "./store/useAppStore";
@@ -12,34 +13,35 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-full w-full overflow-hidden">
-      {/* Titlebar space */}
       <div className="flex h-full overflow-hidden">
-        {/* Sidebar */}
         <Sidebar />
 
-        {/* Main area */}
         <div className="flex flex-col flex-1 overflow-hidden">
           <TabBar />
 
-          {/* Content */}
-          <div className="flex-1 overflow-hidden bg-[var(--color-bg-base)]">
-            {activeTab ? (
+          <div className="flex-1 overflow-hidden bg-[var(--color-bg-base)] relative">
+            {tabs.length === 0 ? (
+              <Welcome />
+            ) : (
               tabs.map((tab) => (
                 <div
                   key={tab.id}
-                  className={`w-full h-full ${tab.id === activeTabId ? "block" : "hidden"}`}
+                  className={`absolute inset-0 ${tab.id === activeTabId ? "block" : "hidden"}`}
                 >
-                  <TerminalPane tab={tab} />
+                  {tab.connection_type === "ssh" ? (
+                    <TerminalPane tab={tab} />
+                  ) : (
+                    <RdpPane tab={tab} />
+                  )}
                 </div>
               ))
-            ) : (
-              <Welcome />
             )}
+
+            {tabs.length > 0 && !activeTab && <Welcome />}
           </div>
         </div>
       </div>
 
-      {/* Modals */}
       {showConnectionForm && <ConnectionForm />}
     </div>
   );
