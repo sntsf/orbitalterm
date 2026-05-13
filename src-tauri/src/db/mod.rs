@@ -19,10 +19,6 @@ pub fn open() -> Result<Connection> {
 
 fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch("
-        CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS folders (
             id          TEXT PRIMARY KEY NOT NULL,
             name        TEXT NOT NULL,
@@ -37,6 +33,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             host        TEXT NOT NULL,
             port        INTEGER NOT NULL,
             username    TEXT NOT NULL,
+            auth_type   TEXT NOT NULL DEFAULT 'agent',
+            key_path    TEXT NOT NULL DEFAULT '',
             folder_id   TEXT REFERENCES folders(id) ON DELETE SET NULL,
             notes       TEXT NOT NULL DEFAULT '',
             created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -45,5 +43,17 @@ fn migrate(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_connections_folder ON connections(folder_id);
         CREATE INDEX IF NOT EXISTS idx_connections_name   ON connections(name COLLATE NOCASE);
-    ")
+    ")?;
+
+    // Idempotent migrations for existing DBs — errors mean column already exists
+    conn.execute(
+        "ALTER TABLE connections ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'agent'",
+        [],
+    ).ok();
+    conn.execute(
+        "ALTER TABLE connections ADD COLUMN key_path TEXT NOT NULL DEFAULT ''",
+        [],
+    ).ok();
+
+    Ok(())
 }

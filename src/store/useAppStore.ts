@@ -1,22 +1,18 @@
 import { create } from "zustand";
-import type { Connection, Folder, Tab } from "../types";
+import type { Connection, ConnectionStatus, Folder, Tab } from "../types";
 
 interface AppStore {
-  // Sidebar
   connections: Connection[];
   folders: Folder[];
   searchQuery: string;
   selectedConnectionId: string | null;
 
-  // Tabs
   tabs: Tab[];
   activeTabId: string | null;
 
-  // UI state
   showConnectionForm: boolean;
   editingConnection: Connection | null;
 
-  // Actions
   setConnections: (connections: Connection[]) => void;
   setFolders: (folders: Folder[]) => void;
   setSearchQuery: (q: string) => void;
@@ -25,11 +21,15 @@ interface AppStore {
   openTab: (connection: Connection) => void;
   closeTab: (tabId: string) => void;
   setActiveTab: (tabId: string) => void;
+  setTabStatus: (tabId: string, status: ConnectionStatus) => void;
+  setTabSessionId: (tabId: string, sessionId: string) => void;
 
   openConnectionForm: (connection?: Connection) => void;
   closeConnectionForm: () => void;
 
   toggleFolder: (folderId: string) => void;
+
+  getConnectionById: (id: string) => Connection | undefined;
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -77,6 +77,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   setActiveTab: (activeTabId) => set({ activeTabId }),
 
+  setTabStatus: (tabId, status) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, status } : t)),
+    })),
+
+  setTabSessionId: (tabId, sessionId) =>
+    set((state) => ({
+      tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, session_id: sessionId } : t)),
+    })),
+
   openConnectionForm: (connection) =>
     set({ showConnectionForm: true, editingConnection: connection ?? null }),
 
@@ -89,4 +99,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
         f.id === folderId ? { ...f, expanded: !f.expanded } : f
       ),
     })),
+
+  getConnectionById: (id) => get().connections.find((c) => c.id === id),
 }));
