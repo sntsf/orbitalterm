@@ -1,0 +1,36 @@
+[package]
+name = "orbitalterm"
+version = "0.1.0"
+description = "OrbitalTerm - Remote Connection Manager"
+authors = ["OrbitalTerm"]
+edition = "2021"
+
+[lib]
+name = "orbitalterm_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "orbitalterm"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+dirs = "5"
+keyring = "3"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
