@@ -1,0 +1,15 @@
+# Node
+node_modules/
+dist/
+.pnpm-store/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Misc
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example
