@@ -112,8 +112,8 @@ pub fn launch(
     let log_path_thread = log_path.clone();
 
     std::thread::spawn(move || {
-        // Give xfreerdp a moment to render the first frame
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        // Diagnostic delay: test if x11rb GetImage causes xfreerdp3 to disconnect
+        std::thread::sleep(std::time::Duration::from_millis(5000));
 
         let (conn, screen_num) = match RustConnection::connect(Some(&disp_clone)) {
             Ok(r) => r,
