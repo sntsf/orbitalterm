@@ -219,7 +219,7 @@ pub async fn connect_rdp(
 
     let rdp_client = crate::rdp::find_rdp_client()?;
     let mut cmd = std::process::Command::new(&rdp_client.binary);
-    build_rdp_args(&mut cmd, &connection, password.as_deref(), rdp_client.is_wayland);
+    build_rdp_args(&mut cmd, &connection, password.as_deref(), &rdp_client.flavor);
     cmd.stderr(std::process::Stdio::piped());
 
     let mut child = cmd
@@ -295,50 +295,68 @@ fn build_rdp_args(
     cmd: &mut std::process::Command,
     conn: &Connection,
     password: Option<&str>,
-    #[allow(unused_variables)] is_wayland: bool,
+    flavor: &crate::rdp::RdpFlavor,
 ) {
-    #[cfg(target_os = "linux")]
-    {
-        cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
-        cmd.arg(format!("/u:{}", conn.username));
-        if !conn.domain.is_empty() {
-            cmd.arg(format!("/d:{}", conn.domain));
-        }
-        if let Some(p) = password {
-            cmd.arg(format!("/p:{p}"));
-        }
-        cmd.arg("/dynamic-resolution");
-        cmd.arg("/cert:ignore");
-        cmd.arg("/clipboard");
+    use crate::rdp::RdpFlavor;
+
+    if *flavor == RdpFlavor::Remmina {
+        // Remmina accepts a URI: rdp://[user[:pass]@]host[:port]
+        let authority = match password {
+            Some(p) => format!(
+                "{}:{}@{}:{}",
+                urlenccode(&conn.username),
+                urlenccode(p),
+                conn.host,
+                conn.port
+            ),
+            None => format!("{}@{}:{}", urlenccode(&conn.username), conn.host, conn.port),
+        };
+        cmd.arg("-c").arg(format!("rdp://{authority}"));
+        return;
     }
+
+    // FreeRDP (/v: style) — works on Linux, Windows, macOS
+    cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
+    cmd.arg(format!("/u:{}", conn.username));
+    if !conn.domain.is_empty() {
+        cmd.arg(format!("/d:{}", conn.domain));
+    }
+    if let Some(p) = password {
+        cmd.arg(format!("/p:{p}"));
+    }
+    cmd.arg("/dynamic-resolution");
+    cmd.arg("/cert:ignore");
+    cmd.arg("/clipboard");
+
     #[cfg(target_os = "windows")]
-    {
-        cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
-        cmd.arg(format!("/u:{}", conn.username));
-        if !conn.domain.is_empty() {
-            cmd.arg(format!("/d:{}", conn.domain));
-        }
-        if let Some(p) = password {
-            let _ = std::process::Command::new("cmdkey")
-                .args([
-                    &format!("/add:{}", conn.host),
-                    &format!("/user:{}", conn.username),
-                    &format!("/pass:{p}"),
-                ])
-                .status();
-        }
-        cmd.arg("/clipboard");
+    if password.is_some() {
+        // Store credentials in Windows Credential Manager so mstsc picks them up
+        let _ = std::process::Command::new("cmdkey")
+            .args([
+                &format!("/add:{}", conn.host),
+                &format!("/user:{}", conn.username),
+                &format!("/pass:{}", password.unwrap_or("")),
+            ])
+            .status();
     }
-    #[cfg(target_os = "macos")]
-    {
-        cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
-        cmd.arg(format!("/u:{}", conn.username));
-        if !conn.domain.is_empty() {
-            cmd.arg(format!("/d:{}", conn.domain));
-        }
-        if let Some(p) = password {
-            cmd.arg(format!("/p:{p}"));
-        }
-        cmd.arg("/clipboard");
-    }
+}
+
+/// Percent-encode characters that would break a URI user-info component.
+fn urlenccode(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => {
+                vec![c]
+            }
+            other => {
+                let mut buf = [0u8; 4];
+                let bytes = other.encode_utf8(&mut buf);
+                bytes.bytes().flat_map(|b| {
+                    let hi = "0123456789ABCDEF".chars().nth((b >> 4) as usize).unwrap();
+                    let lo = "0123456789ABCDEF".chars().nth((b & 0xf) as usize).unwrap();
+                    vec!['%', hi, lo]
+                }).collect()
+            }
+        })
+        .collect()
 }

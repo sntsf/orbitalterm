@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Monitor, RefreshCw, AlertCircle, CheckCircle } from "lucide-react";
+import { Monitor, RefreshCw, AlertCircle, CheckCircle, PackageOpen } from "lucide-react";
 import { connectRdp, disconnectRdp, rdpStatus } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import type { Tab } from "../../types";
+
+/** Parse the sentinel "NO_RDP_CLIENT:<pkg>" prefix the backend emits. */
+function parseMissingClient(msg: string): { pkg: string; rest: string } | null {
+  const match = msg.match(/^NO_RDP_CLIENT:(\S+)\n([\s\S]*)$/);
+  if (!match) return null;
+  return { pkg: match[1], rest: match[2] };
+}
 
 interface RdpPaneProps {
   tab: Tab;
@@ -117,21 +124,59 @@ export function RdpPane({ tab }: RdpPaneProps) {
         </div>
       )}
 
-      {status === "error" && (
-        <div className="flex flex-col items-center gap-3 max-w-sm">
-          <div className="flex items-start gap-2 text-[var(--color-danger)] text-sm text-left">
-            <AlertCircle size={15} className="shrink-0 mt-0.5" />
-            <span className="whitespace-pre-line">{errorMsg}</span>
+      {status === "error" && (() => {
+        const missing = parseMissingClient(errorMsg);
+        if (missing) {
+          return (
+            <div className="flex flex-col items-center gap-4 max-w-sm text-center">
+              <div className="flex items-center gap-2 text-[var(--color-warning)]">
+                <PackageOpen size={18} />
+                <span className="text-sm font-medium">No RDP client installed</span>
+              </div>
+              <p className="text-xs text-[var(--color-text-muted)] whitespace-pre-line leading-relaxed">
+                {missing.rest.split("\n").slice(1).join("\n")}
+              </p>
+              <div className="flex flex-col gap-2 w-full">
+                <p className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider">
+                  Install command
+                </p>
+                <code
+                  className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-3 py-2 text-xs font-mono text-[var(--color-text-primary)] text-left cursor-pointer select-all"
+                  title="Click to copy"
+                  onClick={() => navigator.clipboard.writeText(`sudo apt install freerdp3-x11`)}
+                >
+                  sudo apt install freerdp3-x11
+                </code>
+                <p className="text-[10px] text-[var(--color-text-muted)]">
+                  After installing, click Retry below.
+                </p>
+              </div>
+              <button
+                onClick={connect}
+                className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
+              >
+                <RefreshCw size={12} />
+                Retry
+              </button>
+            </div>
+          );
+        }
+        return (
+          <div className="flex flex-col items-center gap-3 max-w-sm">
+            <div className="flex items-start gap-2 text-[var(--color-danger)] text-sm text-left">
+              <AlertCircle size={15} className="shrink-0 mt-0.5" />
+              <span className="whitespace-pre-line">{errorMsg}</span>
+            </div>
+            <button
+              onClick={connect}
+              className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
+            >
+              <RefreshCw size={12} />
+              Retry
+            </button>
           </div>
-          <button
-            onClick={connect}
-            className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
-          >
-            <RefreshCw size={12} />
-            Retry
-          </button>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
