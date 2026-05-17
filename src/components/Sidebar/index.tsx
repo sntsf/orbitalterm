@@ -53,6 +53,8 @@ export function Sidebar() {
       key_path: conn.key_path,
       folder_id: conn.folder_id,
       notes: conn.notes,
+      description: conn.description,
+      domain: conn.domain,
     });
     setConnections(await getConnections());
   };

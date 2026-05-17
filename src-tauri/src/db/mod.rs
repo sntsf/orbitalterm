@@ -37,6 +37,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             key_path    TEXT NOT NULL DEFAULT '',
             folder_id   TEXT REFERENCES folders(id) ON DELETE SET NULL,
             notes       TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            domain      TEXT NOT NULL DEFAULT '',
             created_at  TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -52,6 +54,14 @@ fn migrate(conn: &Connection) -> Result<()> {
     ).ok();
     conn.execute(
         "ALTER TABLE connections ADD COLUMN key_path TEXT NOT NULL DEFAULT ''",
+        [],
+    ).ok();
+    conn.execute(
+        "ALTER TABLE connections ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+        [],
+    ).ok();
+    conn.execute(
+        "ALTER TABLE connections ADD COLUMN domain TEXT NOT NULL DEFAULT ''",
         [],
     ).ok();
 

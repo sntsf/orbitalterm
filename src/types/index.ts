@@ -13,6 +13,8 @@ export interface Connection {
   key_path: string;
   folder_id: string | null;
   notes: string;
+  description: string;
+  domain: string;
   created_at: string;
   updated_at: string;
 }

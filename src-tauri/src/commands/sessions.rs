@@ -18,7 +18,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
     let db = db::open().map_err(|e| e.to_string())?;
     db.query_row(
         "SELECT id, name, type, host, port, username, auth_type, key_path,
-                folder_id, notes, created_at, updated_at
+                folder_id, notes, description, domain, created_at, updated_at
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -33,8 +33,10 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 key_path: row.get(7)?,
                 folder_id: row.get(8)?,
                 notes: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
+                description: row.get(10)?,
+                domain: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
             })
         },
     )
@@ -257,18 +259,23 @@ fn build_rdp_args(
     {
         cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
         cmd.arg(format!("/u:{}", conn.username));
+        if !conn.domain.is_empty() {
+            cmd.arg(format!("/d:{}", conn.domain));
+        }
         if let Some(p) = password {
             cmd.arg(format!("/p:{p}"));
         }
         cmd.arg("/dynamic-resolution");
         cmd.arg("/cert:ignore");
-
-        // wlfreerdp (Wayland native) doesn't need DISPLAY but may need XDG_RUNTIME_DIR
-        // xfreerdp on Wayland runs via XWayland — no extra flags needed
+        cmd.arg("/clipboard");
     }
     #[cfg(target_os = "windows")]
     {
         cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
+        cmd.arg(format!("/u:{}", conn.username));
+        if !conn.domain.is_empty() {
+            cmd.arg(format!("/d:{}", conn.domain));
+        }
         if let Some(p) = password {
             let _ = std::process::Command::new("cmdkey")
                 .args([
@@ -278,13 +285,18 @@ fn build_rdp_args(
                 ])
                 .status();
         }
+        cmd.arg("/clipboard");
     }
     #[cfg(target_os = "macos")]
     {
         cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
         cmd.arg(format!("/u:{}", conn.username));
+        if !conn.domain.is_empty() {
+            cmd.arg(format!("/d:{}", conn.domain));
+        }
         if let Some(p) = password {
             cmd.arg(format!("/p:{p}"));
         }
+        cmd.arg("/clipboard");
     }
 }
