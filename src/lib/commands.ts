@@ -75,7 +75,14 @@ export async function disconnectSsh(sessionId: string): Promise<void> {
 
 // ── RDP sessions ─────────────────────────────────────────────────────────────
 
-export async function connectRdp(connectionId: string): Promise<string> {
+export interface RdpConnectResult {
+  session_id: string;
+  embedded: boolean;
+  width: number;
+  height: number;
+}
+
+export async function connectRdp(connectionId: string): Promise<RdpConnectResult> {
   return invoke("connect_rdp", { connectionId });
 }
 
@@ -85,6 +92,24 @@ export async function rdpStatus(sessionId: string): Promise<"connected" | "disco
 
 export async function disconnectRdp(sessionId: string): Promise<void> {
   return invoke("disconnect_rdp", { sessionId });
+}
+
+export async function rdpMouseInput(
+  sessionId: string,
+  eventType: number,
+  button: number,
+  x: number,
+  y: number,
+): Promise<void> {
+  return invoke("rdp_mouse_input", { sessionId, eventType, button, x, y });
+}
+
+export async function rdpKeyInput(
+  sessionId: string,
+  pressed: boolean,
+  key: string,
+): Promise<void> {
+  return invoke("rdp_key_input", { sessionId, pressed, key });
 }
 
 // ── SFTP sessions ─────────────────────────────────────────────────────────────

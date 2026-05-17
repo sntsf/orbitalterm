@@ -5,10 +5,12 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
+use serde::Serialize;
+
 use crate::{
     commands::connections::Connection,
     db,
-    rdp::RdpSessionMap,
+    rdp::{EmbeddedRdpSessionMap, RdpSessionMap},
     ssh::{SshSession, SshSessionMap},
 };
 
@@ -209,66 +211,161 @@ pub async fn disconnect_ssh(
 
 // ── RDP ──────────────────────────────────────────────────────────────────────
 
+#[derive(Serialize)]
+pub struct RdpConnectResult {
+    pub session_id: String,
+    pub embedded: bool,
+    pub width: u16,
+    pub height: u16,
+}
+
 #[tauri::command]
 pub async fn connect_rdp(
+    app: AppHandle,
     rdp_sessions: State<'_, RdpSessionMap>,
+    embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
     connection_id: String,
-) -> Result<String, String> {
+) -> Result<RdpConnectResult, String> {
     let connection = load_connection(&connection_id)?;
     let password = get_saved_password(&connection_id);
 
-    let rdp_client = crate::rdp::find_rdp_client()?;
-    let mut cmd = std::process::Command::new(&rdp_client.binary);
-    build_rdp_args(&mut cmd, &connection, password.as_deref(), rdp_client.is_wayland);
-    cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to launch {}: {e}", rdp_client.binary))?;
-
-    // Wait briefly to detect immediate failures (wrong creds, unreachable host, etc.)
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    if let Ok(Some(exit)) = child.try_wait() {
-        let stderr = child.stderr.take()
-            .map(|mut s| {
-                let mut buf = String::new();
-                let _ = std::io::Read::read_to_string(&mut s, &mut buf);
-                buf
-            })
-            .unwrap_or_default();
-
-        let snippet = stderr.lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(4)
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        return Err(format!(
-            "El cliente RDP cerró inmediatamente (código {}).\n\
-            Verificá:\n\
-            • RDP esté habilitado en la máquina remota\n\
-            • Las credenciales sean correctas\n\
-            • El firewall permita el puerto {}\n\
-            {}",
-            exit.code().unwrap_or(-1),
+    #[cfg(target_os = "linux")]
+    {
+        let session_id = Uuid::new_v4().to_string();
+        let session = crate::rdp::embedded::launch(
+            app,
+            &session_id,
+            &connection.host,
             connection.port,
-            if !snippet.is_empty() { format!("\nDetalle:\n{}", snippet) } else { String::new() }
-        ));
+            &connection.username,
+            &connection.domain,
+            password.as_deref(),
+            1280,
+            800,
+        )?;
+        let width = session.width;
+        let height = session.height;
+        embedded_sessions.lock().unwrap().insert(session_id.clone(), session);
+        return Ok(RdpConnectResult { session_id, embedded: true, width, height });
     }
 
-    // Process is running — drop piped stderr so it doesn't block the child
-    drop(child.stderr.take());
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, embedded_sessions);
+        let rdp_client = crate::rdp::find_rdp_client()?;
+        let mut cmd = std::process::Command::new(&rdp_client.binary);
+        build_rdp_args(&mut cmd, &connection, password.as_deref(), &rdp_client.flavor);
+        cmd.stderr(std::process::Stdio::piped());
 
-    let session_id = Uuid::new_v4().to_string();
-    rdp_sessions.lock().unwrap().insert(session_id.clone(), child);
-    Ok(session_id)
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to launch {}: {e}", rdp_client.binary))?;
+
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        if let Ok(Some(exit)) = child.try_wait() {
+            let stderr = child
+                .stderr
+                .take()
+                .map(|mut s| {
+                    let mut buf = String::new();
+                    let _ = std::io::Read::read_to_string(&mut s, &mut buf);
+                    buf
+                })
+                .unwrap_or_default();
+
+            let snippet = stderr
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .take(4)
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            return Err(format!(
+                "El cliente RDP cerró inmediatamente (código {}).\n\
+                Verificá:\n\
+                • RDP esté habilitado en la máquina remota\n\
+                • Las credenciales sean correctas\n\
+                • El firewall permita el puerto {}\n\
+                {}",
+                exit.code().unwrap_or(-1),
+                connection.port,
+                if !snippet.is_empty() {
+                    format!("\nDetalle:\n{}", snippet)
+                } else {
+                    String::new()
+                }
+            ));
+        }
+
+        drop(child.stderr.take());
+
+        let session_id = Uuid::new_v4().to_string();
+        rdp_sessions.lock().unwrap().insert(session_id.clone(), child);
+        Ok(RdpConnectResult { session_id, embedded: false, width: 0, height: 0 })
+    }
+}
+
+#[tauri::command]
+pub async fn rdp_mouse_input(
+    #[allow(unused_variables)]
+    sessions: State<'_, EmbeddedRdpSessionMap>,
+    #[allow(unused_variables)]
+    session_id: String,
+    #[allow(unused_variables)]
+    event_type: u8,
+    #[allow(unused_variables)]
+    button: u8,
+    #[allow(unused_variables)]
+    x: i16,
+    #[allow(unused_variables)]
+    y: i16,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let display = {
+            let map = sessions.lock().unwrap();
+            map.get(&session_id)
+                .map(|s| s.display.clone())
+                .ok_or_else(|| "Session not found".to_string())?
+        };
+        crate::rdp::embedded::mouse_event(&display, event_type, button, x, y)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn rdp_key_input(
+    #[allow(unused_variables)]
+    sessions: State<'_, EmbeddedRdpSessionMap>,
+    #[allow(unused_variables)]
+    session_id: String,
+    #[allow(unused_variables)]
+    pressed: bool,
+    #[allow(unused_variables)]
+    key: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let display = {
+            let map = sessions.lock().unwrap();
+            map.get(&session_id)
+                .map(|s| s.display.clone())
+                .ok_or_else(|| "Session not found".to_string())?
+        };
+        crate::rdp::embedded::key_event(&display, pressed, &key)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn rdp_status(
     rdp_sessions: State<'_, RdpSessionMap>,
+    embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
     session_id: String,
 ) -> Result<String, String> {
+    if embedded_sessions.lock().unwrap().contains_key(&session_id) {
+        return Ok("connected".into());
+    }
     let mut map = rdp_sessions.lock().unwrap();
     match map.get_mut(&session_id) {
         None => Ok("disconnected".into()),
@@ -283,8 +380,10 @@ pub async fn rdp_status(
 #[tauri::command]
 pub async fn disconnect_rdp(
     rdp_sessions: State<'_, RdpSessionMap>,
+    embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
     session_id: String,
 ) -> Result<(), String> {
+    embedded_sessions.lock().unwrap().remove(&session_id);
     if let Some(mut child) = rdp_sessions.lock().unwrap().remove(&session_id) {
         child.kill().ok();
     }
@@ -295,50 +394,68 @@ fn build_rdp_args(
     cmd: &mut std::process::Command,
     conn: &Connection,
     password: Option<&str>,
-    #[allow(unused_variables)] is_wayland: bool,
+    flavor: &crate::rdp::RdpFlavor,
 ) {
-    #[cfg(target_os = "linux")]
-    {
-        cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
-        cmd.arg(format!("/u:{}", conn.username));
-        if !conn.domain.is_empty() {
-            cmd.arg(format!("/d:{}", conn.domain));
-        }
-        if let Some(p) = password {
-            cmd.arg(format!("/p:{p}"));
-        }
-        cmd.arg("/dynamic-resolution");
-        cmd.arg("/cert:ignore");
-        cmd.arg("/clipboard");
+    use crate::rdp::RdpFlavor;
+
+    if *flavor == RdpFlavor::Remmina {
+        // Remmina accepts a URI: rdp://[user[:pass]@]host[:port]
+        let authority = match password {
+            Some(p) => format!(
+                "{}:{}@{}:{}",
+                urlenccode(&conn.username),
+                urlenccode(p),
+                conn.host,
+                conn.port
+            ),
+            None => format!("{}@{}:{}", urlenccode(&conn.username), conn.host, conn.port),
+        };
+        cmd.arg("-c").arg(format!("rdp://{authority}"));
+        return;
     }
+
+    // FreeRDP (/v: style) — works on Linux, Windows, macOS
+    cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
+    cmd.arg(format!("/u:{}", conn.username));
+    if !conn.domain.is_empty() {
+        cmd.arg(format!("/d:{}", conn.domain));
+    }
+    if let Some(p) = password {
+        cmd.arg(format!("/p:{p}"));
+    }
+    cmd.arg("/dynamic-resolution");
+    cmd.arg("/cert:ignore");
+    cmd.arg("/clipboard");
+
     #[cfg(target_os = "windows")]
-    {
-        cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
-        cmd.arg(format!("/u:{}", conn.username));
-        if !conn.domain.is_empty() {
-            cmd.arg(format!("/d:{}", conn.domain));
-        }
-        if let Some(p) = password {
-            let _ = std::process::Command::new("cmdkey")
-                .args([
-                    &format!("/add:{}", conn.host),
-                    &format!("/user:{}", conn.username),
-                    &format!("/pass:{p}"),
-                ])
-                .status();
-        }
-        cmd.arg("/clipboard");
+    if password.is_some() {
+        // Store credentials in Windows Credential Manager so mstsc picks them up
+        let _ = std::process::Command::new("cmdkey")
+            .args([
+                &format!("/add:{}", conn.host),
+                &format!("/user:{}", conn.username),
+                &format!("/pass:{}", password.unwrap_or("")),
+            ])
+            .status();
     }
-    #[cfg(target_os = "macos")]
-    {
-        cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
-        cmd.arg(format!("/u:{}", conn.username));
-        if !conn.domain.is_empty() {
-            cmd.arg(format!("/d:{}", conn.domain));
-        }
-        if let Some(p) = password {
-            cmd.arg(format!("/p:{p}"));
-        }
-        cmd.arg("/clipboard");
-    }
+}
+
+/// Percent-encode characters that would break a URI user-info component.
+fn urlenccode(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => {
+                vec![c]
+            }
+            other => {
+                let mut buf = [0u8; 4];
+                let bytes = other.encode_utf8(&mut buf);
+                bytes.bytes().flat_map(|b| {
+                    let hi = "0123456789ABCDEF".chars().nth((b >> 4) as usize).unwrap();
+                    let lo = "0123456789ABCDEF".chars().nth((b & 0xf) as usize).unwrap();
+                    vec!['%', hi, lo]
+                }).collect()
+            }
+        })
+        .collect()
 }

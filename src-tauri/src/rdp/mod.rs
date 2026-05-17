@@ -4,9 +4,22 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(target_os = "linux")]
+pub mod embedded;
+
+#[cfg(not(target_os = "linux"))]
+pub mod embedded {
+    pub struct EmbeddedSession {}
+}
+
 pub type RdpSessionMap = Arc<Mutex<HashMap<String, Child>>>;
+pub type EmbeddedRdpSessionMap = Arc<Mutex<HashMap<String, embedded::EmbeddedSession>>>;
 
 pub fn new_rdp_sessions() -> RdpSessionMap {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub fn new_embedded_rdp_sessions() -> EmbeddedRdpSessionMap {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
@@ -18,39 +31,49 @@ fn binary_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub struct RdpClient {
-    pub binary: String,
-    pub is_wayland: bool,
+#[derive(Debug, Clone, PartialEq)]
+pub enum RdpFlavor {
+    FreeRdp,  // xfreerdp3 / xfreerdp  — uses /v: /u: /p: syntax
+    Remmina,  // remmina               — uses rdp://user@host:port URI
 }
 
-/// Detect the best available RDP client for the current environment.
-/// On Linux, prefers native Wayland clients over X11 ones.
+pub struct RdpClient {
+    pub binary: String,
+    pub flavor: RdpFlavor,
+}
+
+/// Detect the best available RDP client.
+/// Priority: xfreerdp3 → xfreerdp → remmina
 pub fn find_rdp_client() -> Result<RdpClient, String> {
     #[cfg(target_os = "linux")]
     {
-        // xfreerdp3/xfreerdp work on both X11 and Wayland (via XWayland).
-        // wlfreerdp3 is deprecated upstream and requires XDG_RUNTIME_DIR which
-        // may not be inherited by the child process — skip it.
         for bin in ["xfreerdp3", "xfreerdp"] {
             if binary_exists(bin) {
-                return Ok(RdpClient { binary: bin.to_string(), is_wayland: false });
+                return Ok(RdpClient { binary: bin.to_string(), flavor: RdpFlavor::FreeRdp });
             }
         }
-
-        Err("No RDP client found.\nInstall with:\n  sudo apt install freerdp3-x11".to_string())
+        if binary_exists("remmina") {
+            return Ok(RdpClient { binary: "remmina".to_string(), flavor: RdpFlavor::Remmina });
+        }
+        Err(
+            "NO_RDP_CLIENT:freerdp3-x11\nNo RDP client found.\n\
+            Install FreeRDP (recommended):\n  sudo apt install freerdp3-x11\n\
+            Or Remmina:\n  sudo apt install remmina remmina-plugin-rdp"
+                .to_string(),
+        )
     }
     #[cfg(target_os = "windows")]
     {
-        Ok(RdpClient { binary: "mstsc.exe".to_string(), is_wayland: false })
+        Ok(RdpClient { binary: "mstsc.exe".to_string(), flavor: RdpFlavor::FreeRdp })
     }
     #[cfg(target_os = "macos")]
     {
         for bin in ["xfreerdp3", "xfreerdp"] {
             if binary_exists(bin) {
-                return Ok(RdpClient { binary: bin.to_string(), is_wayland: false });
+                return Ok(RdpClient { binary: bin.to_string(), flavor: RdpFlavor::FreeRdp });
             }
         }
-        Err("No RDP client found.\nInstall with: brew install freerdp".to_string())
+        Err("NO_RDP_CLIENT:freerdp\nNo RDP client found.\nInstall with: brew install freerdp".to_string())
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {

@@ -10,7 +10,7 @@ use commands::connections::{
 };
 use commands::sessions::{
     connect_rdp, connect_ssh, delete_password, disconnect_rdp, disconnect_ssh, has_password,
-    rdp_status, resize_pty, save_password, send_input,
+    rdp_key_input, rdp_mouse_input, rdp_status, resize_pty, save_password, send_input,
 };
 use commands::sftp::{
     sftp_connect, sftp_delete, sftp_disconnect, sftp_list_dir, sftp_mkdir, sftp_upload,
@@ -23,6 +23,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(ssh::new_ssh_sessions())
         .manage(rdp::new_rdp_sessions())
+        .manage(rdp::new_embedded_rdp_sessions())
         .manage(sftp::new_sftp_sessions())
         .invoke_handler(tauri::generate_handler![
             // connections
@@ -43,6 +44,8 @@ pub fn run() {
             connect_rdp,
             rdp_status,
             disconnect_rdp,
+            rdp_mouse_input,
+            rdp_key_input,
             // passwords
             save_password,
             delete_password,
