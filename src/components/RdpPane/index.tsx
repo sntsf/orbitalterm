@@ -7,6 +7,7 @@ import {
   rdpStatus,
   rdpMouseInput,
   rdpKeyInput,
+  rdpResizeSession,
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import type { Tab } from "../../types";
@@ -32,11 +33,32 @@ interface EmbeddedViewerProps {
   width: number;
   height: number;
   onSessionError: (msg: string) => void;
+  onResize: (w: number, h: number) => void;
 }
 
-function EmbeddedViewer({ sessionId, width, height, onSessionError }: EmbeddedViewerProps) {
+function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: EmbeddedViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Dynamic resize: when the container changes size, resize the RDP session
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const w = Math.max(640, Math.floor(entry.contentRect.width));
+      const h = Math.max(480, Math.floor(entry.contentRect.height));
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        rdpResizeSession(sessionId, w, h).catch(() => {});
+        onResize(w, h);
+      }, 400);
+    });
+    observer.observe(container);
+    return () => { observer.disconnect(); if (timer) clearTimeout(timer); };
+  }, [sessionId, onResize]);
 
   // Frame + error listeners
   useEffect(() => {
@@ -118,7 +140,7 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError }: EmbeddedVi
         width={width}
         height={height}
         tabIndex={0}
-        style={{ cursor: "crosshair", maxWidth: "100%", maxHeight: "100%", outline: "none" }}
+        style={{ cursor: "crosshair", width: "100%", height: "100%", outline: "none", display: "block" }}
         onMouseMove={onMouseMove}
         onMouseDown={onMouseDown}
         onMouseUp={onMouseUp}
@@ -139,6 +161,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
   const [embedded, setEmbedded] = useState(false);
   const [frameSize, setFrameSize] = useState({ width: 1280, height: 800 });
   const sessionIdRef = useRef<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
 
   const connect = async (isRetry = false) => {
@@ -161,7 +184,10 @@ export function RdpPane({ tab }: RdpPaneProps) {
     setTabStatus(tab.id, "connecting");
 
     try {
-      const result = await connectRdp(tab.connection_id);
+      const el = containerRef.current;
+      const w = el ? Math.max(640, Math.floor(el.clientWidth)) : 1280;
+      const h = el ? Math.max(480, Math.floor(el.clientHeight)) : 800;
+      const result = await connectRdp(tab.connection_id, w, h);
       sessionIdRef.current = result.session_id;
       setTabSessionId(tab.id, result.session_id);
       setEmbedded(result.embedded);
@@ -211,6 +237,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
         width={frameSize.width}
         height={frameSize.height}
         onSessionError={(msg) => { setEmbedded(false); setStatus("error"); setErrorMsg(msg); }}
+        onResize={(w, h) => setFrameSize({ width: w, height: h })}
       />
     );
   }
@@ -218,7 +245,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
   const connection = getConnectionById(tab.connection_id);
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-5 text-center px-8 bg-[var(--color-bg-base)]">
+    <div ref={containerRef} className="flex flex-col items-center justify-center h-full gap-5 text-center px-8 bg-[var(--color-bg-base)]">
       <Monitor
         size={52}
         className={

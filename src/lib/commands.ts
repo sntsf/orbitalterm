@@ -82,8 +82,16 @@ export interface RdpConnectResult {
   height: number;
 }
 
-export async function connectRdp(connectionId: string): Promise<RdpConnectResult> {
-  return invoke("connect_rdp", { connectionId });
+export async function connectRdp(
+  connectionId: string,
+  width = 1280,
+  height = 800,
+): Promise<RdpConnectResult> {
+  return invoke("connect_rdp", { connectionId, width, height });
+}
+
+export async function rdpResizeSession(sessionId: string, width: number, height: number): Promise<void> {
+  return invoke("rdp_resize_session", { sessionId, width, height });
 }
 
 export async function rdpStatus(sessionId: string): Promise<"connected" | "disconnected"> {

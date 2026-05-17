@@ -14,6 +14,7 @@ pub struct EmbeddedSession {
     pub display: String,
     pub width: u16,
     pub height: u16,
+    pub dims: Arc<Mutex<(u16, u16)>>,
     pub stop: Arc<AtomicBool>,
     xvfb: std::process::Child,
     xfreerdp: Arc<Mutex<std::process::Child>>,
@@ -51,10 +52,11 @@ pub fn launch(
     let display_num = find_free_display_num();
     let display = format!(":{}", display_num);
 
+    // Start Xvfb at 4K so resize never exceeds the virtual framebuffer.
     let mut xvfb = std::process::Command::new("Xvfb")
         .arg(&display)
         .arg("-screen").arg("0")
-        .arg(format!("{}x{}x24", width, height))
+        .arg("3840x2160x24")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -107,6 +109,9 @@ pub fn launch(
     let xfreerdp = Arc::new(Mutex::new(xfreerdp));
     let xfreerdp_thread = Arc::clone(&xfreerdp);
 
+    let dims = Arc::new(Mutex::new((width, height)));
+    let dims_thread = Arc::clone(&dims);
+
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
     let sid = session_id.to_string();
@@ -149,7 +154,8 @@ pub fn launch(
                 Ok(None) => {}
             }
 
-            if let Ok(b64) = capture_frame_b64(&conn, root, width, height) {
+            let (cw, ch) = *dims_thread.lock().unwrap();
+            if let Ok(b64) = capture_frame_b64(&conn, root, cw, ch) {
                 app.emit(&format!("rdp-frame-{sid}"), b64).ok();
             }
 
@@ -167,7 +173,25 @@ pub fn launch(
         }
     });
 
-    Ok(EmbeddedSession { display, width, height, stop, xvfb, xfreerdp })
+    Ok(EmbeddedSession { display, width, height, dims, stop, xvfb, xfreerdp })
+}
+
+pub fn resize(display: &str, dims: &Arc<Mutex<(u16, u16)>>, width: u16, height: u16) -> Result<(), String> {
+    *dims.lock().unwrap() = (width, height);
+
+    let (conn, screen_num) = RustConnection::connect(Some(display)).map_err(|e| e.to_string())?;
+    let root = conn.setup().roots[screen_num].root;
+
+    let tree = conn.query_tree(root).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
+    for &child in &tree.children {
+        conn.configure_window(child, &ConfigureWindowAux::new()
+            .x(0).y(0)
+            .width(width as u32)
+            .height(height as u32))
+            .ok();
+    }
+    conn.flush().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn read_log_tail(path: &str, max_lines: usize) -> String {
