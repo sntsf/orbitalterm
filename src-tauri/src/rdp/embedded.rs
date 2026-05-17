@@ -122,6 +122,8 @@ pub fn launch(
         };
         let root = conn.setup().roots[screen_num].root;
 
+        let mut keepalive_tick: u32 = 0;
+
         loop {
             if stop_clone.load(Ordering::Relaxed) { break; }
 
@@ -149,6 +151,16 @@ pub fn launch(
 
             if let Ok(b64) = capture_frame_b64(&conn, root, width, height) {
                 app.emit(&format!("rdp-frame-{sid}"), b64).ok();
+            }
+
+            // Keepalive: inject a 1px mouse jitter every ~12s so Windows
+            // does not consider the session idle and disconnect it via RPC.
+            keepalive_tick += 1;
+            if keepalive_tick >= 300 {
+                keepalive_tick = 0;
+                let _ = conn.xtest_fake_input(6, 0, 0, root, 1, 1, 0);
+                let _ = conn.xtest_fake_input(6, 0, 0, root, 0, 0, 0);
+                let _ = conn.flush();
             }
 
             std::thread::sleep(std::time::Duration::from_millis(40));
