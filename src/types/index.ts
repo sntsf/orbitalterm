@@ -1,4 +1,4 @@
-export type ConnectionType = "ssh" | "rdp";
+export type ConnectionType = "ssh" | "rdp" | "vnc" | "ftp" | "sftp";
 export type AuthType = "agent" | "password" | "key";
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "error";
 
@@ -33,4 +33,12 @@ export interface Tab {
   connection_type: ConnectionType;
   status: ConnectionStatus;
   session_id?: string;
+}
+
+export interface SftpEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified: number;
 }

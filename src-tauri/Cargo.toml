@@ -29,6 +29,7 @@ dirs = "5"
 keyring = "3"
 portable-pty = "0.8"
 tempfile = "3"
+ssh2 = "0.9"
 
 [profile.release]
 panic = "abort"
