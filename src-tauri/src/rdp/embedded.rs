@@ -64,19 +64,21 @@ pub fn launch(
 
     let log_path = format!("/tmp/orbitalterm-rdp-{}.log", session_id);
     let log_file = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
+    let log_file2 = log_file.try_clone().map_err(|e| e.to_string())?;
 
     let mut cmd = std::process::Command::new("xfreerdp3");
     cmd.env("DISPLAY", &display);
+    cmd.env_remove("WAYLAND_DISPLAY");
     cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
+    cmd.stdout(log_file2);   // capture stdout too — xfreerdp3 writes INFO to stdout
     cmd.stderr(log_file);
     cmd.arg(format!("/v:{}:{}", host, port));
     cmd.arg(format!("/u:{}", username));
     if !domain.is_empty() { cmd.arg(format!("/d:{}", domain)); }
     cmd.arg(format!("/p:{password}"));
-    cmd.arg(format!("/size:{}x{}", width, height));
+    cmd.arg(format!("/w:{}", width));
+    cmd.arg(format!("/h:{}", height));
     cmd.arg("/cert:ignore");
-    cmd.arg("/clipboard");
     cmd.arg("/gdi:sw");
     cmd.arg("/bpp:32");
 
@@ -112,8 +114,7 @@ pub fn launch(
     let log_path_thread = log_path.clone();
 
     std::thread::spawn(move || {
-        // Diagnostic delay: test if x11rb GetImage causes xfreerdp3 to disconnect
-        std::thread::sleep(std::time::Duration::from_millis(5000));
+        std::thread::sleep(std::time::Duration::from_millis(600));
 
         let (conn, screen_num) = match RustConnection::connect(Some(&disp_clone)) {
             Ok(r) => r,
@@ -127,7 +128,7 @@ pub fn launch(
             // Detect xfreerdp3 exit via try_wait (avoids zombie false-positive from /proc check)
             match xfreerdp_thread.lock().unwrap().try_wait() {
                 Ok(Some(status)) => {
-                    let detail = read_log_tail(&log_path_thread, 6);
+                    let detail = read_log_tail(&log_path_thread, 20);
                     std::fs::remove_file(&log_path_thread).ok();
                     let code = status.code().unwrap_or(-1);
                     let msg = if detail.is_empty() {
