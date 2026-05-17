@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Monitor, RefreshCw, AlertCircle, CheckCircle, PackageOpen } from "lucide-react";
-import { connectRdp, disconnectRdp, rdpStatus } from "../../lib/commands";
+import {
+  connectRdp,
+  disconnectRdp,
+  rdpStatus,
+  rdpMouseInput,
+  rdpKeyInput,
+} from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import type { Tab } from "../../types";
 
-/** Parse the sentinel "NO_RDP_CLIENT:<pkg>" prefix the backend emits. */
 function parseMissingClient(msg: string): { pkg: string; rest: string } | null {
   const match = msg.match(/^NO_RDP_CLIENT:(\S+)\n([\s\S]*)$/);
   if (!match) return null;
@@ -15,9 +21,115 @@ interface RdpPaneProps {
   tab: Tab;
 }
 
+// ── Embedded canvas viewer (Linux) ────────────────────────────────────────────
+
+interface EmbeddedViewerProps {
+  sessionId: string;
+  width: number;
+  height: number;
+}
+
+function EmbeddedViewer({ sessionId, width, height }: EmbeddedViewerProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Frame listener
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    listen<string>(`rdp-frame-${sessionId}`, (event) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const img = new Image();
+      img.onload = () => ctx.drawImage(img, 0, 0);
+      img.src = `data:image/jpeg;base64,${event.payload}`;
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [sessionId]);
+
+  // Coordinate mapping: canvas logical → remote resolution
+  function remoteCoords(e: React.MouseEvent<HTMLCanvasElement>): [number, number] {
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = width / rect.width;
+    const scaleY = height / rect.height;
+    return [
+      Math.round((e.clientX - rect.left) * scaleX),
+      Math.round((e.clientY - rect.top) * scaleY),
+    ];
+  }
+
+  function onMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
+    const [x, y] = remoteCoords(e);
+    rdpMouseInput(sessionId, 6, 0, x, y).catch(() => {});
+  }
+
+  function onMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
+    const [x, y] = remoteCoords(e);
+    // X11 button numbers: 1=left, 2=middle, 3=right
+    const btn = e.button === 0 ? 1 : e.button === 1 ? 2 : 3;
+    rdpMouseInput(sessionId, 4, btn, x, y).catch(() => {});
+  }
+
+  function onMouseUp(e: React.MouseEvent<HTMLCanvasElement>) {
+    const [x, y] = remoteCoords(e);
+    const btn = e.button === 0 ? 1 : e.button === 1 ? 2 : 3;
+    rdpMouseInput(sessionId, 5, btn, x, y).catch(() => {});
+  }
+
+  function onWheel(e: React.WheelEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    const [x, y] = remoteCoords(e as unknown as React.MouseEvent<HTMLCanvasElement>);
+    const btn = e.deltaY < 0 ? 4 : 5;
+    rdpMouseInput(sessionId, 4, btn, x, y).catch(() => {});
+    rdpMouseInput(sessionId, 5, btn, x, y).catch(() => {});
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    rdpKeyInput(sessionId, true, e.key).catch(() => {});
+  }
+
+  function onKeyUp(e: React.KeyboardEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    rdpKeyInput(sessionId, false, e.key).catch(() => {});
+  }
+
+  function onContextMenu(e: React.MouseEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className="flex items-center justify-center w-full h-full bg-black overflow-hidden"
+    >
+      <canvas
+        ref={canvasRef}
+        width={width}
+        height={height}
+        tabIndex={0}
+        style={{ cursor: "crosshair", maxWidth: "100%", maxHeight: "100%", outline: "none" }}
+        onMouseMove={onMouseMove}
+        onMouseDown={onMouseDown}
+        onMouseUp={onMouseUp}
+        onWheel={onWheel}
+        onKeyDown={onKeyDown}
+        onKeyUp={onKeyUp}
+        onContextMenu={onContextMenu}
+      />
+    </div>
+  );
+}
+
+// ── Main RdpPane ──────────────────────────────────────────────────────────────
+
 export function RdpPane({ tab }: RdpPaneProps) {
   const [status, setStatus] = useState<"connecting" | "connected" | "error">("connecting");
   const [errorMsg, setErrorMsg] = useState("");
+  const [embedded, setEmbedded] = useState(false);
+  const [frameSize, setFrameSize] = useState({ width: 1280, height: 800 });
   const sessionIdRef = useRef<string | null>(null);
   const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
 
@@ -26,23 +138,20 @@ export function RdpPane({ tab }: RdpPaneProps) {
     setErrorMsg("");
     setTabStatus(tab.id, "connecting");
 
-    const connection = getConnectionById(tab.connection_id);
-    const label = connection
-      ? `${connection.username}@${connection.host}:${connection.port}`
-      : tab.connection_name;
-
     try {
-      const sessionId = await connectRdp(tab.connection_id);
-      sessionIdRef.current = sessionId;
-      setTabSessionId(tab.id, sessionId);
+      const result = await connectRdp(tab.connection_id);
+      sessionIdRef.current = result.session_id;
+      setTabSessionId(tab.id, result.session_id);
+      setEmbedded(result.embedded);
+      if (result.embedded) {
+        setFrameSize({ width: result.width, height: result.height });
+      }
       setStatus("connected");
       setTabStatus(tab.id, "connected");
     } catch (err) {
       setErrorMsg(String(err));
       setStatus("error");
       setTabStatus(tab.id, "error");
-      // Suppress unused warning
-      void label;
     }
   };
 
@@ -55,9 +164,9 @@ export function RdpPane({ tab }: RdpPaneProps) {
     };
   }, [tab.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Poll rdp_status every 2s to detect when the external window is closed
+  // Poll rdp_status every 2s only for non-embedded (external window) sessions
   useEffect(() => {
-    if (status !== "connected") return;
+    if (status !== "connected" || embedded) return;
     const interval = setInterval(async () => {
       if (!sessionIdRef.current) return;
       try {
@@ -70,7 +179,18 @@ export function RdpPane({ tab }: RdpPaneProps) {
       } catch { /* ignore */ }
     }, 2000);
     return () => clearInterval(interval);
-  }, [status]);
+  }, [status, embedded]);
+
+  // Embedded canvas mode: render canvas immediately after connected
+  if (status === "connected" && embedded && sessionIdRef.current) {
+    return (
+      <EmbeddedViewer
+        sessionId={sessionIdRef.current}
+        width={frameSize.width}
+        height={frameSize.height}
+      />
+    );
+  }
 
   const connection = getConnectionById(tab.connection_id);
 
@@ -104,7 +224,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
         </p>
       )}
 
-      {status === "connected" && (
+      {status === "connected" && !embedded && (
         <div className="flex flex-col items-center gap-3">
           <div className="flex items-center gap-2 text-[var(--color-success)] text-sm">
             <CheckCircle size={15} />

@@ -4,9 +4,22 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(target_os = "linux")]
+pub mod embedded;
+
+#[cfg(not(target_os = "linux"))]
+pub mod embedded {
+    pub struct EmbeddedSession {}
+}
+
 pub type RdpSessionMap = Arc<Mutex<HashMap<String, Child>>>;
+pub type EmbeddedRdpSessionMap = Arc<Mutex<HashMap<String, embedded::EmbeddedSession>>>;
 
 pub fn new_rdp_sessions() -> RdpSessionMap {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub fn new_embedded_rdp_sessions() -> EmbeddedRdpSessionMap {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
