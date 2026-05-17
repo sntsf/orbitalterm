@@ -2,7 +2,6 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
-use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
@@ -63,11 +62,14 @@ pub fn launch(
 
     std::thread::sleep(std::time::Duration::from_millis(400));
 
+    let log_path = format!("/tmp/orbitalterm-rdp-{}.log", session_id);
+    let log_file = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
+
     let mut cmd = std::process::Command::new("xfreerdp3");
     cmd.env("DISPLAY", &display);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::piped());
+    cmd.stderr(log_file);
     cmd.arg(format!("/v:{}:{}", host, port));
     cmd.arg(format!("/u:{}", username));
     if !domain.is_empty() { cmd.arg(format!("/d:{}", domain)); }
@@ -85,16 +87,9 @@ pub fn launch(
     std::thread::sleep(std::time::Duration::from_millis(1200));
 
     if let Ok(Some(exit_status)) = xfreerdp.try_wait() {
-        let stderr_out = xfreerdp.stderr.take()
-            .map(|mut s| { let mut b = String::new(); let _ = s.read_to_string(&mut b); b })
-            .unwrap_or_default();
+        let detail = read_log_tail(&log_path, 5);
+        std::fs::remove_file(&log_path).ok();
         xvfb.kill().ok();
-
-        let detail = stderr_out.lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(5)
-            .collect::<Vec<_>>()
-            .join("\n");
 
         return Err(format!(
             "xfreerdp3 cerró inmediatamente (código {}).\nVerificá:\n\
@@ -107,9 +102,6 @@ pub fn launch(
         ));
     }
 
-    // Drop stderr pipe so it doesn't block the child process
-    drop(xfreerdp.stderr.take());
-
     let xfreerdp = Arc::new(Mutex::new(xfreerdp));
     let xfreerdp_thread = Arc::clone(&xfreerdp);
 
@@ -117,6 +109,7 @@ pub fn launch(
     let stop_clone = Arc::clone(&stop);
     let sid = session_id.to_string();
     let disp_clone = display.clone();
+    let log_path_thread = log_path.clone();
 
     std::thread::spawn(move || {
         // Give xfreerdp a moment to render the first frame
@@ -133,11 +126,20 @@ pub fn launch(
 
             // Detect xfreerdp3 exit via try_wait (avoids zombie false-positive from /proc check)
             match xfreerdp_thread.lock().unwrap().try_wait() {
-                Ok(Some(_)) => {
-                    app.emit(&format!("rdp-error-{sid}"), "La sesión RDP terminó.").ok();
+                Ok(Some(status)) => {
+                    let detail = read_log_tail(&log_path_thread, 6);
+                    std::fs::remove_file(&log_path_thread).ok();
+                    let code = status.code().unwrap_or(-1);
+                    let msg = if detail.is_empty() {
+                        format!("La sesión RDP terminó (código {code}).")
+                    } else {
+                        format!("La sesión RDP terminó (código {code}).\n\n{detail}")
+                    };
+                    app.emit(&format!("rdp-error-{sid}"), msg).ok();
                     break;
                 }
                 Err(_) => {
+                    std::fs::remove_file(&log_path_thread).ok();
                     app.emit(&format!("rdp-error-{sid}"), "La sesión RDP terminó inesperadamente.").ok();
                     break;
                 }
@@ -153,6 +155,20 @@ pub fn launch(
     });
 
     Ok(EmbeddedSession { display, width, height, stop, xvfb, xfreerdp })
+}
+
+fn read_log_tail(path: &str, max_lines: usize) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .rev()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn find_free_display_num() -> u32 {
