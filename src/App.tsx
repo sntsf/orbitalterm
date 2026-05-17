@@ -3,12 +3,10 @@ import { TabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/Terminal";
 import { RdpPane } from "./components/RdpPane";
 import { Welcome } from "./components/Welcome";
-import { ConnectionForm } from "./components/ConnectionForm";
 import { useAppStore } from "./store/useAppStore";
 
 export default function App() {
-  const { tabs, activeTabId, showConnectionForm } = useAppStore();
-
+  const { tabs, activeTabId } = useAppStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
   return (
@@ -36,13 +34,10 @@ export default function App() {
                 </div>
               ))
             )}
-
             {tabs.length > 0 && !activeTab && <Welcome />}
           </div>
         </div>
       </div>
-
-      {showConnectionForm && <ConnectionForm />}
     </div>
   );
 }

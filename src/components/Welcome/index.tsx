@@ -2,10 +2,10 @@ import { Terminal, Monitor, Download } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 
 export function Welcome() {
-  const { openConnectionForm } = useAppStore();
+  const { startNewConnection } = useAppStore();
 
   return (
-    <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8 bg-[var(--color-bg-base)]">
+    <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8 bg-[var(--color-bg-base)] h-full">
       <div>
         <div className="flex items-center justify-center gap-2 mb-2">
           <Terminal size={32} className="text-[var(--color-accent)]" />
@@ -23,14 +23,14 @@ export function Welcome() {
           icon={<Terminal size={18} />}
           title="New SSH"
           desc="Connect to a Linux / Unix server"
-          onClick={() => openConnectionForm()}
+          onClick={startNewConnection}
           accent
         />
         <ActionCard
           icon={<Monitor size={18} />}
           title="New RDP"
           desc="Connect to a Windows server"
-          onClick={() => openConnectionForm()}
+          onClick={startNewConnection}
         />
         <ActionCard
           icon={<Download size={18} />}
@@ -49,11 +49,7 @@ export function Welcome() {
 }
 
 function ActionCard({
-  icon,
-  title,
-  desc,
-  onClick,
-  accent = false,
+  icon, title, desc, onClick, accent = false,
 }: {
   icon: React.ReactNode;
   title: string;
