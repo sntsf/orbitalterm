@@ -222,7 +222,7 @@ pub struct RdpConnectResult {
 #[tauri::command]
 pub async fn connect_rdp(
     app: AppHandle,
-    rdp_sessions: State<'_, RdpSessionMap>,
+    #[allow(unused_variables)] rdp_sessions: State<'_, RdpSessionMap>,
     embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
     connection_id: String,
 ) -> Result<RdpConnectResult, String> {
