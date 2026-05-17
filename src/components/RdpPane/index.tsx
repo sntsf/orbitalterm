@@ -141,7 +141,21 @@ export function RdpPane({ tab }: RdpPaneProps) {
   const sessionIdRef = useRef<string | null>(null);
   const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
 
-  const connect = async () => {
+  const connect = async (isRetry = false) => {
+    // Kill previous session before retrying so Xvfb is freed and Windows
+    // has time to clean up before we create a new session.
+    if (sessionIdRef.current) {
+      await disconnectRdp(sessionIdRef.current).catch(() => {});
+      sessionIdRef.current = null;
+    }
+    if (isRetry) {
+      // Give Windows ~5s to release the session after the previous disconnect.
+      setStatus("connecting");
+      setErrorMsg("");
+      setTabStatus(tab.id, "connecting");
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+
     setStatus("connecting");
     setErrorMsg("");
     setTabStatus(tab.id, "connecting");
@@ -244,7 +258,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
             Reconnect to open a new window.
           </p>
           <button
-            onClick={connect}
+            onClick={() => connect(true)}
             className="flex items-center gap-2 px-3 py-1.5 rounded text-xs border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
           >
             <RefreshCw size={12} />
@@ -296,7 +310,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
                 </p>
               </div>
               <button
-                onClick={connect}
+                onClick={() => connect(true)}
                 className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
               >
                 <RefreshCw size={12} />
@@ -312,7 +326,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
               <span className="whitespace-pre-line">{errorMsg}</span>
             </div>
             <button
-              onClick={connect}
+              onClick={() => connect(true)}
               className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
             >
               <RefreshCw size={12} />
