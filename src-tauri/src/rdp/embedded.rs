@@ -119,7 +119,7 @@ fn capture_frame_b64(
     height: u16,
 ) -> Result<String, String> {
     let reply = conn
-        .get_image(ImageFormat::ZPIXMAP, root, 0, 0, width, height, u32::MAX)
+        .get_image(ImageFormat::Z_PIXMAP, root, 0, 0, width, height, u32::MAX)
         .map_err(|e| e.to_string())?
         .reply()
         .map_err(|e| e.to_string())?;
