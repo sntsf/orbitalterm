@@ -11,6 +11,23 @@ import {
 } from "../../lib/commands";
 import type { AuthType, ConnectionType } from "../../types";
 
+const DEFAULT_PORTS: Record<ConnectionType, number> = {
+  ssh: 22,
+  rdp: 3389,
+  vnc: 5900,
+  ftp: 21,
+  sftp: 22,
+};
+
+// Which auth modes each type supports
+const AUTH_FOR_TYPE: Record<ConnectionType, AuthType[]> = {
+  ssh: ["agent", "password", "key"],
+  sftp: ["agent", "password", "key"],
+  rdp: ["password"],
+  vnc: ["password"],
+  ftp: ["password"],
+};
+
 export function PropertiesPanel() {
   const {
     connections,
@@ -84,8 +101,12 @@ export function PropertiesPanel() {
 
   const handleTypeChange = (t: ConnectionType) => {
     setType(t);
-    setPort(t === "ssh" ? 22 : 3389);
-    if (t === "rdp") setAuthType("password");
+    setPort(DEFAULT_PORTS[t]);
+    const supportedAuth = AUTH_FOR_TYPE[t];
+    // If current authType not supported by new type, switch to first supported
+    if (!supportedAuth.includes(authType)) {
+      setAuthType(supportedAuth[0]);
+    }
   };
 
   const handleSave = async (e?: React.FormEvent) => {
@@ -155,6 +176,12 @@ export function PropertiesPanel() {
     key: "Key File",
   };
 
+  const supportedAuthTypes = AUTH_FOR_TYPE[type];
+  const showAuthSection = supportedAuthTypes.length > 1 || supportedAuthTypes[0] !== "password";
+  const showDomain = type === "rdp";
+  const showPasswordField = authType === "password";
+  const showKeyField = authType === "key";
+
   return (
     <form onSubmit={handleSave} className="flex flex-col h-full overflow-hidden">
       {/* Panel header */}
@@ -189,14 +216,14 @@ export function PropertiesPanel() {
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
         {/* Type toggle */}
         <Row label="Type">
-          <div className="flex gap-1 bg-[var(--color-bg-elevated)] rounded p-0.5">
-            {(["ssh", "rdp"] as ConnectionType[]).map((t) => (
+          <div className="flex gap-1 bg-[var(--color-bg-elevated)] rounded p-0.5 flex-wrap">
+            {(["ssh", "rdp", "vnc", "ftp", "sftp"] as ConnectionType[]).map((t) => (
               <button
                 key={t}
                 type="button"
                 onClick={() => handleTypeChange(t)}
                 className={[
-                  "flex-1 py-0.5 rounded text-[10px] uppercase font-medium transition-colors",
+                  "flex-1 min-w-0 py-0.5 rounded text-[10px] uppercase font-medium transition-colors",
                   type === t
                     ? "bg-[var(--color-accent)] text-white"
                     : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]",
@@ -228,11 +255,11 @@ export function PropertiesPanel() {
           <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="root" className={inp} />
         </Row>
 
-        {/* Auth — SSH only */}
-        {type === "ssh" && (
+        {/* Auth — SSH and SFTP support all 3; others only password */}
+        {showAuthSection && (
           <Row label="Autent.">
             <div className="flex gap-1 bg-[var(--color-bg-elevated)] rounded p-0.5">
-              {(["agent", "password", "key"] as AuthType[]).map((a) => (
+              {supportedAuthTypes.map((a) => (
                 <button
                   key={a}
                   type="button"
@@ -251,13 +278,13 @@ export function PropertiesPanel() {
           </Row>
         )}
 
-        {authType === "key" && (
+        {showKeyField && (
           <Row label="Llave SSH">
             <input value={keyPath} onChange={(e) => setKeyPath(e.target.value)} placeholder="~/.ssh/id_rsa" className={inp} />
           </Row>
         )}
 
-        {authType === "password" && (
+        {showPasswordField && (
           <Row label="Contraseña">
             <div className="relative">
               <input
@@ -278,7 +305,7 @@ export function PropertiesPanel() {
           </Row>
         )}
 
-        {type === "rdp" && (
+        {showDomain && (
           <Row label="Dominio">
             <input
               value={domain}
