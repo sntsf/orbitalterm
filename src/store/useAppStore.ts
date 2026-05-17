@@ -6,17 +6,17 @@ interface AppStore {
   folders: Folder[];
   searchQuery: string;
   selectedConnectionId: string | null;
+  isCreatingNew: boolean;
 
   tabs: Tab[];
   activeTabId: string | null;
-
-  showConnectionForm: boolean;
-  editingConnection: Connection | null;
 
   setConnections: (connections: Connection[]) => void;
   setFolders: (folders: Folder[]) => void;
   setSearchQuery: (q: string) => void;
   selectConnection: (id: string | null) => void;
+  setIsCreatingNew: (v: boolean) => void;
+  startNewConnection: () => void;
 
   openTab: (connection: Connection) => void;
   closeTab: (tabId: string) => void;
@@ -24,11 +24,7 @@ interface AppStore {
   setTabStatus: (tabId: string, status: ConnectionStatus) => void;
   setTabSessionId: (tabId: string, sessionId: string) => void;
 
-  openConnectionForm: (connection?: Connection) => void;
-  closeConnectionForm: () => void;
-
   toggleFolder: (folderId: string) => void;
-
   getConnectionById: (id: string) => Connection | undefined;
 }
 
@@ -37,15 +33,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
   folders: [],
   searchQuery: "",
   selectedConnectionId: null,
+  isCreatingNew: false,
   tabs: [],
   activeTabId: null,
-  showConnectionForm: false,
-  editingConnection: null,
 
   setConnections: (connections) => set({ connections }),
   setFolders: (folders) => set({ folders }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
-  selectConnection: (selectedConnectionId) => set({ selectedConnectionId }),
+
+  selectConnection: (selectedConnectionId) =>
+    set({ selectedConnectionId, isCreatingNew: false }),
+
+  setIsCreatingNew: (isCreatingNew) => set({ isCreatingNew }),
+
+  startNewConnection: () =>
+    set({ isCreatingNew: true, selectedConnectionId: null }),
 
   openTab: (connection) => {
     const { tabs } = get();
@@ -86,12 +88,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set((state) => ({
       tabs: state.tabs.map((t) => (t.id === tabId ? { ...t, session_id: sessionId } : t)),
     })),
-
-  openConnectionForm: (connection) =>
-    set({ showConnectionForm: true, editingConnection: connection ?? null }),
-
-  closeConnectionForm: () =>
-    set({ showConnectionForm: false, editingConnection: null }),
 
   toggleFolder: (folderId) =>
     set((state) => ({
