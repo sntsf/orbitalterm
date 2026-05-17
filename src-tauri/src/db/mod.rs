@@ -45,6 +45,11 @@ fn migrate(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_connections_folder ON connections(folder_id);
         CREATE INDEX IF NOT EXISTS idx_connections_name   ON connections(name COLLATE NOCASE);
+
+        CREATE TABLE IF NOT EXISTS passwords (
+            connection_id TEXT PRIMARY KEY NOT NULL,
+            password      TEXT NOT NULL
+        );
     ")?;
 
     // Idempotent migrations for existing DBs — errors mean column already exists

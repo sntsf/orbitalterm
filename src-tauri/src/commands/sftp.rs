@@ -49,7 +49,6 @@ pub async fn sftp_connect(
                 .map_err(|e| format!("Key auth failed: {e}"))?;
         }
         "password" => {
-            // Load from keyring
             let password = crate::commands::sessions::get_saved_password_pub(&connection_id)
                 .ok_or("No saved password found")?;
             session

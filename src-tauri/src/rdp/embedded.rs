@@ -39,6 +39,16 @@ pub fn launch(
     width: u16,
     height: u16,
 ) -> Result<EmbeddedSession, String> {
+    // Embedded mode can't show interactive prompts — require a saved password
+    let password = match password {
+        Some(p) => p,
+        None => return Err(
+            "NO_PASSWORD\nNo hay contraseña guardada para esta conexión.\n\
+             Seleccioná la conexión → Propiedades → ingresá y guardá la contraseña."
+                .to_string(),
+        ),
+    };
+
     let display_num = find_free_display_num();
     let display = format!(":{}", display_num);
 
@@ -55,13 +65,13 @@ pub fn launch(
 
     let mut cmd = std::process::Command::new("xfreerdp3");
     cmd.env("DISPLAY", &display);
-    cmd.stdin(std::process::Stdio::null()); // prevent interactive password prompts
+    cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::piped()); // capture for early-exit detection
+    cmd.stderr(std::process::Stdio::piped());
     cmd.arg(format!("/v:{}:{}", host, port));
     cmd.arg(format!("/u:{}", username));
     if !domain.is_empty() { cmd.arg(format!("/d:{}", domain)); }
-    if let Some(p) = password { cmd.arg(format!("/p:{p}")); }
+    cmd.arg(format!("/p:{password}"));
     cmd.arg(format!("/size:{}x{}", width, height));
     cmd.arg("/cert:ignore");
     cmd.arg("/clipboard");

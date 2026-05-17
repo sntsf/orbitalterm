@@ -17,6 +17,10 @@ function parseMissingClient(msg: string): { pkg: string; rest: string } | null {
   return { pkg: match[1], rest: match[2] };
 }
 
+function isMissingPassword(msg: string): boolean {
+  return msg.startsWith("NO_PASSWORD\n");
+}
+
 interface RdpPaneProps {
   tab: Tab;
 }
@@ -250,6 +254,21 @@ export function RdpPane({ tab }: RdpPaneProps) {
       )}
 
       {status === "error" && (() => {
+        if (isMissingPassword(errorMsg)) {
+          return (
+            <div className="flex flex-col items-center gap-3 max-w-sm text-center">
+              <AlertCircle size={28} className="text-[var(--color-warning)]" />
+              <p className="text-sm font-medium text-[var(--color-text-primary)]">
+                Contraseña no guardada
+              </p>
+              <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                Para conectarte en modo embebido necesitás guardar la contraseña.
+                Cerrá esta pestaña, seleccioná la conexión en el sidebar,
+                ingresá la contraseña en Propiedades y guardá.
+              </p>
+            </div>
+          );
+        }
         const missing = parseMissingClient(errorMsg);
         if (missing) {
           return (

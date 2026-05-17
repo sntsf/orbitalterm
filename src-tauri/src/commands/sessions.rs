@@ -45,14 +45,15 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
     .map_err(|e| e.to_string())
 }
 
-// ── Keyring helpers ──────────────────────────────────────────────────────────
-
-fn kr_entry(connection_id: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new("orbitalterm", connection_id).map_err(|e| e.to_string())
-}
+// ── Password storage (SQLite) ─────────────────────────────────────────────────
 
 fn get_saved_password(connection_id: &str) -> Option<String> {
-    kr_entry(connection_id).ok()?.get_password().ok()
+    let db = db::open().ok()?;
+    db.query_row(
+        "SELECT password FROM passwords WHERE connection_id = ?1",
+        params![connection_id],
+        |row| row.get(0),
+    ).ok()
 }
 
 pub fn get_saved_password_pub(connection_id: &str) -> Option<String> {
@@ -61,23 +62,33 @@ pub fn get_saved_password_pub(connection_id: &str) -> Option<String> {
 
 #[tauri::command]
 pub async fn save_password(connection_id: String, password: String) -> Result<(), String> {
-    kr_entry(&connection_id)?.set_password(&password).map_err(|e| e.to_string())
+    let db = db::open().map_err(|e| e.to_string())?;
+    db.execute(
+        "INSERT OR REPLACE INTO passwords (connection_id, password) VALUES (?1, ?2)",
+        params![connection_id, password],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn delete_password(connection_id: String) -> Result<(), String> {
-    kr_entry(&connection_id)?
-        .delete_credential()
-        .map_err(|e| e.to_string())
+    let db = db::open().map_err(|e| e.to_string())?;
+    db.execute(
+        "DELETE FROM passwords WHERE connection_id = ?1",
+        params![connection_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn has_password(connection_id: String) -> Result<bool, String> {
-    match kr_entry(&connection_id)?.get_password() {
-        Ok(_) => Ok(true),
-        Err(keyring::Error::NoEntry) => Ok(false),
-        Err(e) => Err(e.to_string()),
-    }
+    let db = db::open().map_err(|e| e.to_string())?;
+    let count: i64 = db.query_row(
+        "SELECT COUNT(*) FROM passwords WHERE connection_id = ?1",
+        params![connection_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    Ok(count > 0)
 }
 
 // ── SSH ──────────────────────────────────────────────────────────────────────
