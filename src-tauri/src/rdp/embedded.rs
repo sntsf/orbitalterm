@@ -2,6 +2,7 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -41,41 +42,64 @@ pub fn launch(
     let display_num = find_free_display_num();
     let display = format!(":{}", display_num);
 
-    let xvfb = std::process::Command::new("Xvfb")
+    let mut xvfb = std::process::Command::new("Xvfb")
         .arg(&display)
-        .arg("-screen")
-        .arg("0")
+        .arg("-screen").arg("0")
         .arg(format!("{}x{}x24", width, height))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| {
-            format!("NO_XVFB\nXvfb no encontrado: {e}\nInstalar con: sudo apt install xvfb")
-        })?;
+        .map_err(|e| format!("NO_XVFB\nXvfb no encontrado: {e}\nInstalar con: sudo apt install xvfb"))?;
 
     std::thread::sleep(std::time::Duration::from_millis(400));
 
     let mut cmd = std::process::Command::new("xfreerdp3");
     cmd.env("DISPLAY", &display);
+    cmd.stdin(std::process::Stdio::null()); // prevent interactive password prompts
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::piped()); // capture for early-exit detection
     cmd.arg(format!("/v:{}:{}", host, port));
     cmd.arg(format!("/u:{}", username));
-    if !domain.is_empty() {
-        cmd.arg(format!("/d:{}", domain));
-    }
-    if let Some(p) = password {
-        cmd.arg(format!("/p:{p}"));
-    }
+    if !domain.is_empty() { cmd.arg(format!("/d:{}", domain)); }
+    if let Some(p) = password { cmd.arg(format!("/p:{p}")); }
     cmd.arg(format!("/size:{}x{}", width, height));
     cmd.arg("/cert:ignore");
     cmd.arg("/clipboard");
     cmd.arg("/gdi:sw");
     cmd.arg("/bpp:24");
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
 
-    let xfreerdp = cmd
-        .spawn()
+    let mut xfreerdp = cmd.spawn()
         .map_err(|e| format!("Failed to launch xfreerdp3: {e}"))?;
+
+    // Wait for initial auth, then verify xfreerdp3 is still alive
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
+    if let Ok(Some(exit_status)) = xfreerdp.try_wait() {
+        let stderr_out = xfreerdp.stderr.take()
+            .map(|mut s| { let mut b = String::new(); let _ = s.read_to_string(&mut b); b })
+            .unwrap_or_default();
+        xvfb.kill().ok();
+
+        let detail = stderr_out.lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(5)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        return Err(format!(
+            "xfreerdp3 cerró inmediatamente (código {}).\nVerificá:\n\
+            • Credenciales correctas (guardá la contraseña en Propiedades)\n\
+            • RDP habilitado en el servidor\n\
+            • Firewall permite el puerto {}{}",
+            exit_status.code().unwrap_or(-1),
+            port,
+            if !detail.is_empty() { format!("\n\nDetalle:\n{detail}") } else { String::new() }
+        ));
+    }
+
+    // Drop stderr pipe so it doesn't block the child process
+    drop(xfreerdp.stderr.take());
+    let xfreerdp_pid = xfreerdp.id();
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
@@ -83,22 +107,28 @@ pub fn launch(
     let disp_clone = display.clone();
 
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(1800));
+        // Give xfreerdp a moment to render the first frame
+        std::thread::sleep(std::time::Duration::from_millis(600));
+
         let (conn, screen_num) = match RustConnection::connect(Some(&disp_clone)) {
             Ok(r) => r,
-            Err(e) => {
-                eprintln!("x11rb connect: {e}");
-                return;
-            }
+            Err(e) => { eprintln!("x11rb connect: {e}"); return; }
         };
         let root = conn.setup().roots[screen_num].root;
+
         loop {
-            if stop_clone.load(Ordering::Relaxed) {
+            if stop_clone.load(Ordering::Relaxed) { break; }
+
+            // Detect xfreerdp3 crash via /proc/<pid>
+            if !std::path::Path::new(&format!("/proc/{}", xfreerdp_pid)).exists() {
+                app.emit(&format!("rdp-error-{sid}"), "La sesión RDP terminó inesperadamente.").ok();
                 break;
             }
+
             if let Ok(b64) = capture_frame_b64(&conn, root, width, height) {
                 app.emit(&format!("rdp-frame-{sid}"), b64).ok();
             }
+
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
     });
@@ -112,12 +142,7 @@ fn find_free_display_num() -> u32 {
         .unwrap_or(100)
 }
 
-fn capture_frame_b64(
-    conn: &RustConnection,
-    root: u32,
-    width: u16,
-    height: u16,
-) -> Result<String, String> {
+fn capture_frame_b64(conn: &RustConnection, root: u32, width: u16, height: u16) -> Result<String, String> {
     let reply = conn
         .get_image(ImageFormat::Z_PIXMAP, root, 0, 0, width, height, u32::MAX)
         .map_err(|e| e.to_string())?
@@ -128,9 +153,9 @@ fn capture_frame_b64(
     let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
     for px in raw.chunks(4) {
         if px.len() == 4 {
-            rgb.push(px[2]);
-            rgb.push(px[1]);
-            rgb.push(px[0]);
+            rgb.push(px[2]); // R (Xvfb stores BGRX)
+            rgb.push(px[1]); // G
+            rgb.push(px[0]); // B
         }
     }
 
@@ -142,27 +167,17 @@ fn capture_frame_b64(
     Ok(BASE64.encode(&out))
 }
 
-pub fn mouse_event(
-    display: &str,
-    event_type: u8,
-    button: u8,
-    x: i16,
-    y: i16,
-) -> Result<(), String> {
-    let (conn, screen_num) =
-        RustConnection::connect(Some(display)).map_err(|e| e.to_string())?;
+pub fn mouse_event(display: &str, event_type: u8, button: u8, x: i16, y: i16) -> Result<(), String> {
+    let (conn, screen_num) = RustConnection::connect(Some(display)).map_err(|e| e.to_string())?;
     let root = conn.setup().roots[screen_num].root;
     conn.xtest_fake_input(event_type, button, 0, root, x, y, 0)
-        .map_err(|e| e.to_string())?
-        .check()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?.check().map_err(|e| e.to_string())?;
     conn.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub fn key_event(display: &str, pressed: bool, key: &str) -> Result<(), String> {
-    let (conn, screen_num) =
-        RustConnection::connect(Some(display)).map_err(|e| e.to_string())?;
+    let (conn, screen_num) = RustConnection::connect(Some(display)).map_err(|e| e.to_string())?;
     let root = conn.setup().roots[screen_num].root;
 
     let keysym = match js_key_to_keysym(key) {
@@ -170,32 +185,16 @@ pub fn key_event(display: &str, pressed: bool, key: &str) -> Result<(), String> 
         None => return Ok(()),
     };
 
-    let first = 8u8;
-    let count = 248u8;
-    let mapping = conn
-        .get_keyboard_mapping(first, count)
-        .map_err(|e| e.to_string())?
-        .reply()
-        .map_err(|e| e.to_string())?;
+    let mapping = conn.get_keyboard_mapping(8u8, 248u8)
+        .map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
     let per = mapping.keysyms_per_keycode as usize;
-    let keycode = mapping
-        .keysyms
-        .chunks(per)
-        .enumerate()
-        .find_map(|(i, syms)| {
-            if syms.contains(&keysym) {
-                Some((i as u8) + first)
-            } else {
-                None
-            }
-        })
+    let keycode = mapping.keysyms.chunks(per).enumerate()
+        .find_map(|(i, syms)| if syms.contains(&keysym) { Some((i as u8) + 8) } else { None })
         .ok_or_else(|| format!("No keycode for keysym {keysym:#x}"))?;
 
     let event_type = if pressed { 2u8 } else { 3u8 };
     conn.xtest_fake_input(event_type, keycode, 0, root, 0, 0, 0)
-        .map_err(|e| e.to_string())?
-        .check()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?.check().map_err(|e| e.to_string())?;
     conn.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -217,18 +216,9 @@ fn js_key_to_keysym(key: &str) -> Option<u32> {
         "ArrowUp" => 0xff52,
         "ArrowRight" => 0xff53,
         "ArrowDown" => 0xff54,
-        "F1" => 0xffbe,
-        "F2" => 0xffbf,
-        "F3" => 0xffc0,
-        "F4" => 0xffc1,
-        "F5" => 0xffc2,
-        "F6" => 0xffc3,
-        "F7" => 0xffc4,
-        "F8" => 0xffc5,
-        "F9" => 0xffc6,
-        "F10" => 0xffc7,
-        "F11" => 0xffc8,
-        "F12" => 0xffc9,
+        "F1"  => 0xffbe, "F2"  => 0xffbf, "F3"  => 0xffc0, "F4"  => 0xffc1,
+        "F5"  => 0xffc2, "F6"  => 0xffc3, "F7"  => 0xffc4, "F8"  => 0xffc5,
+        "F9"  => 0xffc6, "F10" => 0xffc7, "F11" => 0xffc8, "F12" => 0xffc9,
         "Control" | "ControlLeft" | "ControlRight" => 0xffe3,
         "Alt" | "AltLeft" => 0xffe9,
         "AltRight" => 0xffea,
