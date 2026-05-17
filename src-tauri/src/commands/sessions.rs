@@ -390,6 +390,7 @@ pub async fn disconnect_rdp(
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 fn build_rdp_args(
     cmd: &mut std::process::Command,
     conn: &Connection,
@@ -440,7 +441,7 @@ fn build_rdp_args(
     }
 }
 
-/// Percent-encode characters that would break a URI user-info component.
+#[cfg(not(target_os = "linux"))]
 fn urlenccode(s: &str) -> String {
     s.chars()
         .flat_map(|c| match c {

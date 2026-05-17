@@ -27,15 +27,16 @@ interface EmbeddedViewerProps {
   sessionId: string;
   width: number;
   height: number;
+  onSessionError: (msg: string) => void;
 }
 
-function EmbeddedViewer({ sessionId, width, height }: EmbeddedViewerProps) {
+function EmbeddedViewer({ sessionId, width, height, onSessionError }: EmbeddedViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Frame listener
+  // Frame + error listeners
   useEffect(() => {
-    let unlisten: UnlistenFn | undefined;
+    const unlistens: UnlistenFn[] = [];
     listen<string>(`rdp-frame-${sessionId}`, (event) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
@@ -44,9 +45,12 @@ function EmbeddedViewer({ sessionId, width, height }: EmbeddedViewerProps) {
       const img = new Image();
       img.onload = () => ctx.drawImage(img, 0, 0);
       img.src = `data:image/jpeg;base64,${event.payload}`;
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
-  }, [sessionId]);
+    }).then((fn) => unlistens.push(fn));
+    listen<string>(`rdp-error-${sessionId}`, (event) => {
+      onSessionError(event.payload);
+    }).then((fn) => unlistens.push(fn));
+    return () => { unlistens.forEach((fn) => fn()); };
+  }, [sessionId, onSessionError]);
 
   // Coordinate mapping: canvas logical → remote resolution
   function remoteCoords(e: React.MouseEvent<HTMLCanvasElement>): [number, number] {
@@ -188,6 +192,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
         sessionId={sessionIdRef.current}
         width={frameSize.width}
         height={frameSize.height}
+        onSessionError={(msg) => { setEmbedded(false); setStatus("error"); setErrorMsg(msg); }}
       />
     );
   }

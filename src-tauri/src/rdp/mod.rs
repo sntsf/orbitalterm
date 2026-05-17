@@ -23,6 +23,7 @@ pub fn new_embedded_rdp_sessions() -> EmbeddedRdpSessionMap {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+#[cfg(not(target_os = "linux"))]
 fn binary_exists(name: &str) -> bool {
     std::process::Command::new("which")
         .arg(name)
@@ -31,19 +32,20 @@ fn binary_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(not(target_os = "linux"))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum RdpFlavor {
     FreeRdp,  // xfreerdp3 / xfreerdp  — uses /v: /u: /p: syntax
     Remmina,  // remmina               — uses rdp://user@host:port URI
 }
 
+#[cfg(not(target_os = "linux"))]
 pub struct RdpClient {
     pub binary: String,
     pub flavor: RdpFlavor,
 }
 
-/// Detect the best available RDP client.
-/// Priority: xfreerdp3 → xfreerdp → remmina
+#[cfg(not(target_os = "linux"))]
 pub fn find_rdp_client() -> Result<RdpClient, String> {
     #[cfg(target_os = "linux")]
     {
