@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Monitor, RefreshCw, AlertCircle, CheckCircle } from "lucide-react";
-import { connectRdp, disconnectRdp } from "../../lib/commands";
+import { connectRdp, disconnectRdp, rdpStatus } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import type { Tab } from "../../types";
 
@@ -47,6 +47,23 @@ export function RdpPane({ tab }: RdpPaneProps) {
       }
     };
   }, [tab.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll rdp_status every 2s to detect when the external window is closed
+  useEffect(() => {
+    if (status !== "connected") return;
+    const interval = setInterval(async () => {
+      if (!sessionIdRef.current) return;
+      try {
+        const s = await rdpStatus(sessionIdRef.current);
+        if (s === "disconnected") {
+          setStatus("error");
+          setErrorMsg("La sesión RDP terminó. La ventana fue cerrada o se perdió la conexión.");
+          clearInterval(interval);
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [status]);
 
   const connection = getConnectionById(tab.connection_id);
 

@@ -138,9 +138,13 @@ pub async fn connect_ssh(
                     if !password_injected {
                         if let Some(ref pass) = saved_password {
                             let lower = data.to_lowercase();
-                            if lower.contains("password:") || lower.contains("password for") {
+                            if lower.contains("password:") || lower.contains("password for")
+                                || lower.contains("passphrase for")
+                            {
                                 if let Ok(mut w) = writer_ref.lock() {
-                                    let _ = writeln!(w, "{}", pass);
+                                    // PTY raw mode: Enter key is \r, not \n
+                                    let _ = write!(w, "{}\r", pass);
+                                    let _ = w.flush();
                                     password_injected = true;
                                 }
                             }
@@ -216,10 +220,44 @@ pub async fn connect_rdp(
     let rdp_client = crate::rdp::find_rdp_client()?;
     let mut cmd = std::process::Command::new(&rdp_client.binary);
     build_rdp_args(&mut cmd, &connection, password.as_deref(), rdp_client.is_wayland);
+    cmd.stderr(std::process::Stdio::piped());
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to launch {}: {e}", rdp_client.binary))?;
+
+    // Wait briefly to detect immediate failures (wrong creds, unreachable host, etc.)
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    if let Ok(Some(exit)) = child.try_wait() {
+        let stderr = child.stderr.take()
+            .map(|mut s| {
+                let mut buf = String::new();
+                let _ = std::io::Read::read_to_string(&mut s, &mut buf);
+                buf
+            })
+            .unwrap_or_default();
+
+        let snippet = stderr.lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(4)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        return Err(format!(
+            "El cliente RDP cerró inmediatamente (código {}).\n\
+            Verificá:\n\
+            • RDP esté habilitado en la máquina remota\n\
+            • Las credenciales sean correctas\n\
+            • El firewall permita el puerto {}\n\
+            {}",
+            exit.code().unwrap_or(-1),
+            connection.port,
+            if !snippet.is_empty() { format!("\nDetalle:\n{}", snippet) } else { String::new() }
+        ));
+    }
+
+    // Process is running — drop piped stderr so it doesn't block the child
+    drop(child.stderr.take());
 
     let session_id = Uuid::new_v4().to_string();
     rdp_sessions.lock().unwrap().insert(session_id.clone(), child);
