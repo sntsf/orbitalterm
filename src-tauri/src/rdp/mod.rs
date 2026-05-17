@@ -28,35 +28,16 @@ pub struct RdpClient {
 pub fn find_rdp_client() -> Result<RdpClient, String> {
     #[cfg(target_os = "linux")]
     {
-        // Check if we're running under Wayland
-        let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
-            || std::env::var("XDG_SESSION_TYPE")
-                .map(|v| v == "wayland")
-                .unwrap_or(false);
-
-        if is_wayland {
-            // Prefer native Wayland clients
-            for bin in ["wlfreerdp3", "wlfreerdp"] {
-                if binary_exists(bin) {
-                    return Ok(RdpClient { binary: bin.to_string(), is_wayland: true });
-                }
-            }
-        }
-
-        // Fall back to X11 clients (run via XWayland if needed)
+        // xfreerdp3/xfreerdp work on both X11 and Wayland (via XWayland).
+        // wlfreerdp3 is deprecated upstream and requires XDG_RUNTIME_DIR which
+        // may not be inherited by the child process — skip it.
         for bin in ["xfreerdp3", "xfreerdp"] {
             if binary_exists(bin) {
                 return Ok(RdpClient { binary: bin.to_string(), is_wayland: false });
             }
         }
 
-        let install_hint = if is_wayland {
-            "sudo apt install freerdp3-wayland freerdp3-x11"
-        } else {
-            "sudo apt install freerdp3-x11"
-        };
-
-        Err(format!("No RDP client found.\nInstall with: {install_hint}"))
+        Err("No RDP client found.\nInstall with:\n  sudo apt install freerdp3-x11".to_string())
     }
     #[cfg(target_os = "windows")]
     {
