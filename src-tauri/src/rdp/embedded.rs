@@ -79,7 +79,6 @@ pub fn launch(
     cmd.arg("/clipboard");
     cmd.arg("/gdi:sw");
     cmd.arg("/bpp:32");
-    cmd.arg("/admin");
 
     let mut xfreerdp = cmd.spawn()
         .map_err(|e| format!("Failed to launch xfreerdp3: {e}"))?;
