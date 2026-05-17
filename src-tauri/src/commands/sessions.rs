@@ -236,12 +236,16 @@ pub async fn connect_rdp(
     #[allow(unused_variables)] rdp_sessions: State<'_, RdpSessionMap>,
     embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
     connection_id: String,
+    width: Option<u16>,
+    height: Option<u16>,
 ) -> Result<RdpConnectResult, String> {
     let connection = load_connection(&connection_id)?;
     let password = get_saved_password(&connection_id);
 
     #[cfg(target_os = "linux")]
     {
+        let w = width.unwrap_or(1280).max(640);
+        let h = height.unwrap_or(800).max(480);
         let session_id = Uuid::new_v4().to_string();
         let session = crate::rdp::embedded::launch(
             app,
@@ -251,8 +255,8 @@ pub async fn connect_rdp(
             &connection.username,
             &connection.domain,
             password.as_deref(),
-            1280,
-            800,
+            w,
+            h,
         )?;
         let width = session.width;
         let height = session.height;
@@ -398,6 +402,24 @@ pub async fn disconnect_rdp(
     if let Some(mut child) = rdp_sessions.lock().unwrap().remove(&session_id) {
         child.kill().ok();
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn rdp_resize_session(
+    embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
+    session_id: String,
+    width: u16,
+    height: u16,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let map = embedded_sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            crate::rdp::embedded::resize(&session.display, &session.dims, width, height)?;
+        }
+    }
+    let _ = (embedded_sessions, session_id, width, height);
     Ok(())
 }
 

@@ -10,7 +10,8 @@ use commands::connections::{
 };
 use commands::sessions::{
     connect_rdp, connect_ssh, delete_password, disconnect_rdp, disconnect_ssh, has_password,
-    rdp_key_input, rdp_mouse_input, rdp_status, resize_pty, save_password, send_input,
+    rdp_key_input, rdp_mouse_input, rdp_resize_session, rdp_status, resize_pty, save_password,
+    send_input,
 };
 use commands::sftp::{
     sftp_connect, sftp_delete, sftp_disconnect, sftp_list_dir, sftp_mkdir, sftp_upload,
@@ -46,6 +47,7 @@ pub fn run() {
             disconnect_rdp,
             rdp_mouse_input,
             rdp_key_input,
+            rdp_resize_session,
             // passwords
             save_password,
             delete_password,
