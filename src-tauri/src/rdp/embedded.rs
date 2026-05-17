@@ -78,7 +78,9 @@ pub fn launch(
     cmd.arg("/cert:ignore");
     cmd.arg("/clipboard");
     cmd.arg("/gdi:sw");
-    cmd.arg("/bpp:24");
+    cmd.arg("/bpp:32");
+    cmd.arg("+auto-reconnect");
+    cmd.arg("/reconnect-cookie");
 
     let mut xfreerdp = cmd.spawn()
         .map_err(|e| format!("Failed to launch xfreerdp3: {e}"))?;
