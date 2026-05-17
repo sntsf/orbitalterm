@@ -4,7 +4,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
@@ -17,13 +17,13 @@ pub struct EmbeddedSession {
     pub height: u16,
     pub stop: Arc<AtomicBool>,
     xvfb: std::process::Child,
-    xfreerdp: std::process::Child,
+    xfreerdp: Arc<Mutex<std::process::Child>>,
 }
 
 impl Drop for EmbeddedSession {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.xfreerdp.kill().ok();
+        self.xfreerdp.lock().unwrap().kill().ok();
         self.xvfb.kill().ok();
     }
 }
@@ -109,7 +109,9 @@ pub fn launch(
 
     // Drop stderr pipe so it doesn't block the child process
     drop(xfreerdp.stderr.take());
-    let xfreerdp_pid = xfreerdp.id();
+
+    let xfreerdp = Arc::new(Mutex::new(xfreerdp));
+    let xfreerdp_thread = Arc::clone(&xfreerdp);
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
@@ -129,10 +131,17 @@ pub fn launch(
         loop {
             if stop_clone.load(Ordering::Relaxed) { break; }
 
-            // Detect xfreerdp3 crash via /proc/<pid>
-            if !std::path::Path::new(&format!("/proc/{}", xfreerdp_pid)).exists() {
-                app.emit(&format!("rdp-error-{sid}"), "La sesión RDP terminó inesperadamente.").ok();
-                break;
+            // Detect xfreerdp3 exit via try_wait (avoids zombie false-positive from /proc check)
+            match xfreerdp_thread.lock().unwrap().try_wait() {
+                Ok(Some(_)) => {
+                    app.emit(&format!("rdp-error-{sid}"), "La sesión RDP terminó.").ok();
+                    break;
+                }
+                Err(_) => {
+                    app.emit(&format!("rdp-error-{sid}"), "La sesión RDP terminó inesperadamente.").ok();
+                    break;
+                }
+                Ok(None) => {}
             }
 
             if let Ok(b64) = capture_frame_b64(&conn, root, width, height) {
