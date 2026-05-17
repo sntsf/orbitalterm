@@ -83,6 +83,12 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         });
         cleanups.push(unlistenClosed);
 
+        // Copy-on-select (like PuTTY): selecting text copies it automatically
+        term.onSelectionChange(() => {
+          const sel = term.getSelection();
+          if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+        });
+
         // Forward keystrokes to SSH
         term.onData((data) => {
           if (sessionIdRef.current) {

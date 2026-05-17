@@ -27,10 +27,12 @@ export function PropertiesPanel() {
 
   // Form state
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [type, setType] = useState<ConnectionType>("ssh");
   const [host, setHost] = useState("");
   const [port, setPort] = useState(22);
   const [username, setUsername] = useState("");
+  const [domain, setDomain] = useState("");
   const [authType, setAuthType] = useState<AuthType>("agent");
   const [keyPath, setKeyPath] = useState("");
   const [password, setPassword] = useState("");
@@ -45,10 +47,12 @@ export function PropertiesPanel() {
   useEffect(() => {
     if (existing) {
       setName(existing.name);
+      setDescription(existing.description);
       setType(existing.type);
       setHost(existing.host);
       setPort(existing.port);
       setUsername(existing.username);
+      setDomain(existing.domain);
       setAuthType(existing.auth_type);
       setKeyPath(existing.key_path);
       setFolderId(existing.folder_id ?? "");
@@ -62,10 +66,12 @@ export function PropertiesPanel() {
       }
     } else if (isCreatingNew) {
       setName("");
+      setDescription("");
       setType("ssh");
       setHost("");
       setPort(22);
       setUsername("");
+      setDomain("");
       setAuthType("agent");
       setKeyPath("");
       setPassword("");
@@ -93,10 +99,12 @@ export function PropertiesPanel() {
     try {
       const payload = {
         name: name.trim(),
+        description: description.trim(),
         type,
         host: host.trim(),
         port,
         username: username.trim(),
+        domain: domain.trim(),
         auth_type: authType,
         key_path: keyPath.trim(),
         folder_id: folderId || null,
@@ -200,25 +208,29 @@ export function PropertiesPanel() {
           </div>
         </Row>
 
-        <Row label="Name">
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="My Server" className={inp} />
+        <Row label="Nombre">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Mi Servidor" className={inp} />
+        </Row>
+
+        <Row label="Descripción">
+          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Descripción opcional" className={inp} />
         </Row>
 
         <Row label="Host / IP">
           <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.10" className={inp} />
         </Row>
 
-        <Row label="Port">
+        <Row label="Puerto">
           <input type="number" value={port} onChange={(e) => setPort(Number(e.target.value))} className={inp} />
         </Row>
 
-        <Row label="Username">
+        <Row label="Usuario">
           <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="root" className={inp} />
         </Row>
 
         {/* Auth — SSH only */}
         {type === "ssh" && (
-          <Row label="Auth">
+          <Row label="Autent.">
             <div className="flex gap-1 bg-[var(--color-bg-elevated)] rounded p-0.5">
               {(["agent", "password", "key"] as AuthType[]).map((a) => (
                 <button
@@ -240,19 +252,19 @@ export function PropertiesPanel() {
         )}
 
         {authType === "key" && (
-          <Row label="Key Path">
+          <Row label="Llave SSH">
             <input value={keyPath} onChange={(e) => setKeyPath(e.target.value)} placeholder="~/.ssh/id_rsa" className={inp} />
           </Row>
         )}
 
         {authType === "password" && (
-          <Row label="Password">
+          <Row label="Contraseña">
             <div className="relative">
               <input
                 type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={hasSaved ? "●●●●●● (saved)" : "Enter password"}
+                placeholder={hasSaved ? "●●●●●● (guardada)" : "Ingresar contraseña"}
                 className={inp + " pr-7"}
               />
               <button
@@ -266,19 +278,30 @@ export function PropertiesPanel() {
           </Row>
         )}
 
-        <Row label="Folder">
+        {type === "rdp" && (
+          <Row label="Dominio">
+            <input
+              value={domain}
+              onChange={(e) => setDomain(e.target.value)}
+              placeholder="WORKGROUP o dominio AD"
+              className={inp}
+            />
+          </Row>
+        )}
+
+        <Row label="Carpeta">
           <select value={folderId} onChange={(e) => setFolderId(e.target.value)} className={inp}>
-            <option value="">— None —</option>
+            <option value="">— Ninguna —</option>
             {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
           </select>
         </Row>
 
-        <Row label="Notes">
+        <Row label="Notas">
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             rows={2}
-            placeholder="Optional notes…"
+            placeholder="Notas opcionales…"
             className={inp + " resize-none"}
           />
         </Row>
