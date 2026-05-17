@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Connection, Folder } from "../types";
+import type { Connection, Folder, SftpEntry } from "../types";
 
 // ── Connections ──────────────────────────────────────────────────────────────
 
@@ -85,4 +85,38 @@ export async function rdpStatus(sessionId: string): Promise<"connected" | "disco
 
 export async function disconnectRdp(sessionId: string): Promise<void> {
   return invoke("disconnect_rdp", { sessionId });
+}
+
+// ── SFTP sessions ─────────────────────────────────────────────────────────────
+
+export async function sftpConnect(connectionId: string): Promise<string> {
+  return invoke("sftp_connect", { connectionId });
+}
+
+export async function sftpListDir(sessionId: string, path: string): Promise<SftpEntry[]> {
+  return invoke("sftp_list_dir", { sessionId, path });
+}
+
+export async function sftpUpload(
+  sessionId: string,
+  localPath: string,
+  remotePath: string,
+): Promise<void> {
+  return invoke("sftp_upload", { sessionId, localPath, remotePath });
+}
+
+export async function sftpMkdir(sessionId: string, path: string): Promise<void> {
+  return invoke("sftp_mkdir", { sessionId, path });
+}
+
+export async function sftpDelete(
+  sessionId: string,
+  path: string,
+  isDir: boolean,
+): Promise<void> {
+  return invoke("sftp_delete", { sessionId, path, isDir });
+}
+
+export async function sftpDisconnect(sessionId: string): Promise<void> {
+  return invoke("sftp_disconnect", { sessionId });
 }

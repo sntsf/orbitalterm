@@ -53,6 +53,10 @@ fn get_saved_password(connection_id: &str) -> Option<String> {
     kr_entry(connection_id).ok()?.get_password().ok()
 }
 
+pub fn get_saved_password_pub(connection_id: &str) -> Option<String> {
+    get_saved_password(connection_id)
+}
+
 #[tauri::command]
 pub async fn save_password(connection_id: String, password: String) -> Result<(), String> {
     kr_entry(&connection_id)?.set_password(&password).map_err(|e| e.to_string())

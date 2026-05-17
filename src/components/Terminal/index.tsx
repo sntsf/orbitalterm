@@ -1,11 +1,13 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
-import { connectSsh, disconnectSsh, resizePty, sendInput } from "../../lib/commands";
+import { HardDrive } from "lucide-react";
+import { connectSsh, disconnectSsh, resizePty, sendInput, sftpDisconnect } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
+import { SftpBrowser } from "../SftpBrowser";
 import type { Tab } from "../../types";
 
 interface TerminalPaneProps {
@@ -15,7 +17,62 @@ interface TerminalPaneProps {
 export function TerminalPane({ tab }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
   const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
+
+  // SFTP panel state
+  const [showSftp, setShowSftp] = useState(false);
+  const [sftpSessionId, setSftpSessionId] = useState<string | null>(null);
+  const [sftpWidth, setSftpWidth] = useState(35); // percentage
+
+  // Drag handle state
+  const draggingDivider = useRef(false);
+  const dividerStartX = useRef(0);
+  const dividerStartWidth = useRef(35);
+  const containerDivRef = useRef<HTMLDivElement>(null);
+
+  const onDividerMouseDown = (e: React.MouseEvent) => {
+    draggingDivider.current = true;
+    dividerStartX.current = e.clientX;
+    dividerStartWidth.current = sftpWidth;
+
+    const onMove = (ev: MouseEvent) => {
+      if (!draggingDivider.current || !containerDivRef.current) return;
+      const totalWidth = containerDivRef.current.getBoundingClientRect().width;
+      const delta = dividerStartX.current - ev.clientX;
+      const deltaPercent = (delta / totalWidth) * 100;
+      const newWidth = Math.max(20, Math.min(60, dividerStartWidth.current + deltaPercent));
+      setSftpWidth(newWidth);
+    };
+    const onUp = () => {
+      draggingDivider.current = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      // Re-fit terminal after resize
+      fitAddonRef.current?.fit();
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  const handleSftpConnect = useCallback((sid: string) => {
+    setSftpSessionId(sid);
+  }, []);
+
+  const toggleSftp = () => {
+    setShowSftp((v) => {
+      if (v) {
+        // Closing sftp panel — disconnect
+        if (sftpSessionId) {
+          sftpDisconnect(sftpSessionId).catch(console.error);
+          setSftpSessionId(null);
+        }
+      }
+      return !v;
+    });
+    // Re-fit after toggle
+    setTimeout(() => fitAddonRef.current?.fit(), 50);
+  };
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -45,6 +102,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
     });
 
     const fitAddon = new FitAddon();
+    fitAddonRef.current = fitAddon;
     term.loadAddon(fitAddon);
     term.loadAddon(new WebLinksAddon());
     term.open(containerRef.current);
@@ -123,11 +181,69 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
       ro.disconnect();
       cleanups.forEach((fn) => fn());
       term.dispose();
+      fitAddonRef.current = null;
       if (sessionIdRef.current) {
         disconnectSsh(sessionIdRef.current).catch(console.error);
       }
     };
   }, [tab.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return <div ref={containerRef} className="w-full h-full" style={{ padding: "4px" }} />;
+  // Cleanup SFTP on unmount
+  useEffect(() => {
+    return () => {
+      if (sftpSessionId) {
+        sftpDisconnect(sftpSessionId).catch(console.error);
+      }
+    };
+  }, [sftpSessionId]);
+
+  const connection = getConnectionById(tab.connection_id);
+
+  return (
+    <div ref={containerDivRef} className="flex w-full h-full overflow-hidden relative">
+      {/* Terminal pane */}
+      <div
+        className="flex flex-col overflow-hidden"
+        style={{ width: showSftp ? `${100 - sftpWidth}%` : "100%" }}
+      >
+        {/* Toggle button */}
+        <div className="absolute top-1 right-1 z-10">
+          <button
+            onClick={toggleSftp}
+            title={showSftp ? "Hide SFTP panel" : "Show SFTP panel"}
+            className={`p-1 rounded transition-colors ${
+              showSftp
+                ? "bg-[var(--color-accent)] text-white"
+                : "bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+            }`}
+          >
+            <HardDrive size={13} />
+          </button>
+        </div>
+        <div ref={containerRef} className="w-full h-full" style={{ padding: "4px" }} />
+      </div>
+
+      {/* Drag handle */}
+      {showSftp && (
+        <div
+          onMouseDown={onDividerMouseDown}
+          className="w-1 cursor-col-resize bg-[var(--color-border)] hover:bg-[var(--color-accent)] transition-colors shrink-0"
+        />
+      )}
+
+      {/* SFTP panel */}
+      {showSftp && (
+        <div
+          className="overflow-hidden shrink-0"
+          style={{ width: `${sftpWidth}%` }}
+        >
+          <SftpBrowser
+            sessionId={sftpSessionId}
+            connectionId={connection?.id ?? tab.connection_id}
+            onConnect={handleSftpConnect}
+          />
+        </div>
+      )}
+    </div>
+  );
 }

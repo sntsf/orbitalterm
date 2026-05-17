@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Plus, Search, FolderOpen, Folder, Monitor, Terminal,
-  Copy, Trash2, Plug, FolderPlus,
+  Plus, Search, FolderOpen, Folder, Terminal,
+  Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
-import { getConnections, getFolders, deleteConnection, saveConnection } from "../../lib/commands";
+import {
+  getConnections, getFolders, deleteConnection, saveConnection,
+  saveFolder, deleteFolder, getFolders as refetchFolders,
+} from "../../lib/commands";
 import { ContextMenu, useContextMenu } from "../ContextMenu";
 import { PropertiesPanel } from "../PropertiesPanel";
+import { TuxIcon, WindowsIcon, VncIcon, FtpIcon, SftpIcon } from "../ConnectionIcons";
 import type { Connection, Folder as FolderType } from "../../types";
 
 export function Sidebar() {
@@ -25,10 +29,34 @@ export function Sidebar() {
   const startY = useRef(0);
   const startH = useRef(0);
 
+  // Inline folder creation state
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+
+  // Folder rename state
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
+  const [renameFolderName, setRenameFolderName] = useState("");
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     getConnections().then(setConnections).catch(console.error);
     getFolders().then(setFolders).catch(console.error);
   }, []);
+
+  useEffect(() => {
+    if (creatingFolder && folderInputRef.current) {
+      folderInputRef.current.focus();
+    }
+  }, [creatingFolder]);
+
+  useEffect(() => {
+    if (renamingFolderId && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [renamingFolderId]);
 
   const filtered = searchQuery
     ? connections.filter(
@@ -40,6 +68,86 @@ export function Sidebar() {
 
   const rootConns = filtered.filter((c) => !c.folder_id);
   const folderConns = (folderId: string) => filtered.filter((c) => c.folder_id === folderId);
+
+  // Start creating a root folder
+  const startCreateFolder = (parentId: string | null = null) => {
+    setNewFolderName("");
+    setNewFolderParentId(parentId);
+    setCreatingFolder(true);
+  };
+
+  const confirmCreateFolder = async () => {
+    const name = newFolderName.trim();
+    if (name) {
+      try {
+        await saveFolder(name, newFolderParentId);
+        setFolders(await refetchFolders());
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    setCreatingFolder(false);
+    setNewFolderName("");
+    setNewFolderParentId(null);
+  };
+
+  const cancelCreateFolder = () => {
+    setCreatingFolder(false);
+    setNewFolderName("");
+    setNewFolderParentId(null);
+  };
+
+  // Folder rename handlers
+  const startRenameFolder = (folder: FolderType) => {
+    setRenamingFolderId(folder.id);
+    setRenameFolderName(folder.name);
+  };
+
+  const confirmRenameFolder = async () => {
+    // Note: save_folder with same id would be update; but our backend only has save_folder
+    // We use a workaround: delete and recreate isn't ideal, so we just skip for now
+    // and close the rename UI. A proper rename command would be needed for persistence.
+    setRenamingFolderId(null);
+    setRenameFolderName("");
+  };
+
+  const cancelRenameFolder = () => {
+    setRenamingFolderId(null);
+    setRenameFolderName("");
+  };
+
+  // Remove a folder and refresh
+  const removeFolder = async (folder: FolderType) => {
+    try {
+      await deleteFolder(folder.id);
+      setFolders(await refetchFolders());
+      setConnections(await getConnections());
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Folder context menu
+  const folderMenu = (e: React.MouseEvent, folder: FolderType) =>
+    openMenu(e, [
+      {
+        label: "New subfolder",
+        icon: <FolderPlus size={12} />,
+        action: () => startCreateFolder(folder.id),
+      },
+      {
+        label: "Rename",
+        icon: <Edit2 size={12} />,
+        action: () => startRenameFolder(folder),
+      },
+      { separator: true },
+      {
+        label: "Delete",
+        icon: <Trash2 size={12} />,
+        action: () => removeFolder(folder),
+        danger: true,
+      },
+    ]);
 
   // Duplicate a connection
   const duplicate = async (conn: Connection) => {
@@ -122,7 +230,7 @@ export function Sidebar() {
             <Plus size={14} />
           </button>
           <button
-            onClick={() => {}}
+            onClick={() => startCreateFolder(null)}
             className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
             title="New folder"
           >
@@ -155,10 +263,34 @@ export function Sidebar() {
             onOpen={openTab}
             onToggle={() => toggleFolder(folder.id)}
             onContextMenu={connMenu}
+            onFolderContextMenu={folderMenu}
             selectedId={selectedConnectionId}
             onSelect={selectConnection}
+            isRenaming={renamingFolderId === folder.id}
+            renameName={renameFolderName}
+            onRenameChange={setRenameFolderName}
+            onRenameConfirm={confirmRenameFolder}
+            onRenameCancel={cancelRenameFolder}
+            renameInputRef={renamingFolderId === folder.id ? renameInputRef : undefined}
+            creatingSubfolder={creatingFolder && newFolderParentId === folder.id}
+            subfoldersNewName={creatingFolder && newFolderParentId === folder.id ? newFolderName : ""}
+            onSubfolderNameChange={setNewFolderName}
+            onSubfolderConfirm={confirmCreateFolder}
+            onSubfolderCancel={cancelCreateFolder}
+            subfolderInputRef={creatingFolder && newFolderParentId === folder.id ? folderInputRef : undefined}
           />
         ))}
+
+        {/* Inline root folder creation */}
+        {creatingFolder && newFolderParentId === null && (
+          <InlineFolderInput
+            value={newFolderName}
+            onChange={setNewFolderName}
+            onConfirm={confirmCreateFolder}
+            onCancel={cancelCreateFolder}
+            inputRef={folderInputRef}
+          />
+        )}
 
         {rootConns.map((conn) => (
           <ConnItem
@@ -206,39 +338,118 @@ export function Sidebar() {
   );
 }
 
+function InlineFolderInput({
+  value, onChange, onConfirm, onCancel, inputRef, indent = false,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+  inputRef?: React.RefObject<HTMLInputElement>;
+  indent?: boolean;
+}) {
+  return (
+    <div className={`flex items-center gap-2 px-3 py-1 ${indent ? "pl-8" : "pl-3"}`}>
+      <FolderInputIcon size={13} className="text-[var(--color-text-muted)] shrink-0" />
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onConfirm();
+          if (e.key === "Escape") onCancel();
+        }}
+        onBlur={onCancel}
+        placeholder="Folder name…"
+        className="flex-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-2 py-0.5 text-xs text-[var(--color-text-primary)] outline-none"
+      />
+    </div>
+  );
+}
+
 function FolderItem({
-  folder, connections, onOpen, onToggle, onContextMenu, selectedId, onSelect,
+  folder, connections, onOpen, onToggle, onContextMenu, onFolderContextMenu,
+  selectedId, onSelect,
+  isRenaming, renameName, onRenameChange, onRenameConfirm, onRenameCancel, renameInputRef,
+  creatingSubfolder, subfoldersNewName, onSubfolderNameChange, onSubfolderConfirm,
+  onSubfolderCancel, subfolderInputRef,
 }: {
   folder: FolderType;
   connections: Connection[];
   onOpen: (c: Connection) => void;
   onToggle: () => void;
   onContextMenu: (e: React.MouseEvent, c: Connection) => void;
+  onFolderContextMenu: (e: React.MouseEvent, f: FolderType) => void;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  isRenaming: boolean;
+  renameName: string;
+  onRenameChange: (v: string) => void;
+  onRenameConfirm: () => void;
+  onRenameCancel: () => void;
+  renameInputRef?: React.RefObject<HTMLInputElement>;
+  creatingSubfolder: boolean;
+  subfoldersNewName: string;
+  onSubfolderNameChange: (v: string) => void;
+  onSubfolderConfirm: () => void;
+  onSubfolderCancel: () => void;
+  subfolderInputRef?: React.RefObject<HTMLInputElement>;
 }) {
   const Icon = folder.expanded ? FolderOpen : Folder;
   return (
     <div>
-      <button
-        onClick={onToggle}
-        className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
-      >
-        <Icon size={13} />
-        <span className="text-xs truncate">{folder.name}</span>
-      </button>
-      {folder.expanded &&
-        connections.map((conn) => (
-          <ConnItem
-            key={conn.id}
-            conn={conn}
-            selected={selectedId === conn.id}
-            onSelect={() => onSelect(conn.id)}
-            onOpen={() => onOpen(conn)}
-            onContextMenu={(e) => onContextMenu(e, conn)}
-            indent
+      {isRenaming ? (
+        <div className="flex items-center gap-2 px-3 py-1">
+          <Icon size={13} className="text-[var(--color-text-muted)] shrink-0" />
+          <input
+            ref={renameInputRef}
+            type="text"
+            value={renameName}
+            onChange={(e) => onRenameChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onRenameConfirm();
+              if (e.key === "Escape") onRenameCancel();
+            }}
+            onBlur={onRenameCancel}
+            className="flex-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-2 py-0.5 text-xs text-[var(--color-text-primary)] outline-none"
           />
-        ))}
+        </div>
+      ) : (
+        <button
+          onClick={onToggle}
+          onContextMenu={(e) => onFolderContextMenu(e, folder)}
+          className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
+        >
+          <Icon size={13} />
+          <span className="text-xs truncate flex-1 text-left">{folder.name}</span>
+        </button>
+      )}
+      {folder.expanded && (
+        <>
+          {creatingSubfolder && (
+            <InlineFolderInput
+              value={subfoldersNewName}
+              onChange={onSubfolderNameChange}
+              onConfirm={onSubfolderConfirm}
+              onCancel={onSubfolderCancel}
+              inputRef={subfolderInputRef}
+              indent
+            />
+          )}
+          {connections.map((conn) => (
+            <ConnItem
+              key={conn.id}
+              conn={conn}
+              selected={selectedId === conn.id}
+              onSelect={() => onSelect(conn.id)}
+              onOpen={() => onOpen(conn)}
+              onContextMenu={(e) => onContextMenu(e, conn)}
+              indent
+            />
+          ))}
+        </>
+      )}
     </div>
   );
 }
@@ -253,7 +464,25 @@ function ConnItem({
   onContextMenu: (e: React.MouseEvent) => void;
   indent?: boolean;
 }) {
-  const isSSH = conn.type === "ssh";
+  const typeColors: Record<string, string> = {
+    ssh: "text-[var(--color-success)] bg-[var(--color-success)]/10",
+    rdp: "text-[var(--color-accent)] bg-[var(--color-accent)]/10",
+    vnc: "text-purple-400 bg-purple-400/10",
+    ftp: "text-yellow-400 bg-yellow-400/10",
+    sftp: "text-cyan-400 bg-cyan-400/10",
+  };
+
+  const TypeIcon = () => {
+    switch (conn.type) {
+      case "ssh": return <TuxIcon size={12} className="shrink-0" />;
+      case "rdp": return <WindowsIcon size={12} className="shrink-0" />;
+      case "vnc": return <VncIcon size={12} className="shrink-0" />;
+      case "ftp": return <FtpIcon size={12} className="shrink-0" />;
+      case "sftp": return <SftpIcon size={12} className="shrink-0" />;
+      default: return <TuxIcon size={12} className="shrink-0" />;
+    }
+  };
+
   return (
     <button
       onClick={onSelect}
@@ -267,17 +496,11 @@ function ConnItem({
           : "hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]",
       ].join(" ")}
     >
-      {isSSH ? (
-        <Terminal size={12} className="shrink-0" />
-      ) : (
-        <Monitor size={12} className="shrink-0" />
-      )}
+      <TypeIcon />
       <span className="text-xs truncate flex-1">{conn.name}</span>
       <span
         className={`text-[9px] uppercase font-semibold px-1 rounded ${
-          isSSH
-            ? "text-[var(--color-success)] bg-[var(--color-success)]/10"
-            : "text-[var(--color-accent)] bg-[var(--color-accent)]/10"
+          typeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"
         }`}
       >
         {conn.type}
