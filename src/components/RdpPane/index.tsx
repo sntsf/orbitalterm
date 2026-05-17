@@ -133,14 +133,14 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
   return (
     <div
       ref={containerRef}
-      className="flex items-center justify-center w-full h-full bg-black overflow-hidden"
+      className="relative w-full h-full bg-black overflow-hidden"
     >
       <canvas
         ref={canvasRef}
         width={width}
         height={height}
         tabIndex={0}
-        style={{ cursor: "crosshair", width: "100%", height: "100%", outline: "none", display: "block" }}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", cursor: "crosshair", outline: "none", display: "block" }}
         onMouseMove={onMouseMove}
         onMouseDown={onMouseDown}
         onMouseUp={onMouseUp}
