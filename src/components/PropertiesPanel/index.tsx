@@ -204,16 +204,13 @@ export function PropertiesPanel() {
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="My Server" className={inp} />
         </Row>
 
-        <div className="grid grid-cols-3 gap-1.5">
-          <div className="col-span-2">
-            <Row label="Host / IP">
-              <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.10" className={inp} />
-            </Row>
-          </div>
-          <Row label="Port">
-            <input type="number" value={port} onChange={(e) => setPort(Number(e.target.value))} className={inp} />
-          </Row>
-        </div>
+        <Row label="Host / IP">
+          <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.10" className={inp} />
+        </Row>
+
+        <Row label="Port">
+          <input type="number" value={port} onChange={(e) => setPort(Number(e.target.value))} className={inp} />
+        </Row>
 
         <Row label="Username">
           <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="root" className={inp} />
