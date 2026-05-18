@@ -38,6 +38,7 @@ pub fn launch(
     password: Option<&str>,
     width: u16,
     height: u16,
+    admin_mode: bool,
 ) -> Result<EmbeddedSession, String> {
     // Embedded mode can't show interactive prompts — require a saved password
     let password = match password {
@@ -122,6 +123,11 @@ pub fn launch(
     cmd.arg("/gdi:sw");
     cmd.arg("/bpp:32");
     cmd.arg("+clipboard");
+    // /admin: connect to the administrative/console session, bypassing the
+    // single-session limit on Windows non-Server when an existing session exists.
+    if admin_mode {
+        cmd.arg("/admin");
+    }
 
     let mut xfreerdp = cmd.spawn()
         .map_err(|e| format!("Failed to launch xfreerdp3: {e}"))?;
@@ -181,10 +187,19 @@ pub fn launch(
             // Detect xfreerdp3 exit via try_wait (avoids zombie false-positive from /proc check)
             match xfreerdp_thread.lock().unwrap().try_wait() {
                 Ok(Some(status)) => {
+                    let is_conflict = detect_session_conflict(&log_path_thread);
                     let detail = read_log_tail(&log_path_thread, 20);
                     std::fs::remove_file(&log_path_thread).ok();
                     let code = status.code().unwrap_or(-1);
-                    let msg = if detail.is_empty() {
+                    let msg = if is_conflict {
+                        "SESSION_CONFLICT\n\
+                         Hay una sesión RDP activa en este equipo. Windows notificó al \
+                         usuario existente, pero rechazó la conexión o el tiempo de \
+                         espera expiró.\n\
+                         Podés pedirle al usuario que cierre su sesión, o usar \
+                         Forzar conexión para desconectarlo automáticamente."
+                            .to_string()
+                    } else if detail.is_empty() {
                         format!("La sesión RDP terminó (código {code}).")
                     } else {
                         format!("La sesión RDP terminó (código {code}).\n\n{detail}")
@@ -238,6 +253,17 @@ pub fn resize(display: &str, dims: &Arc<Mutex<(u16, u16)>>, width: u16, height: 
     }
     conn.flush().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn detect_session_conflict(log_path: &str) -> bool {
+    let log = std::fs::read_to_string(log_path).unwrap_or_default();
+    // Windows sends LOGON_MSG_SESSION_CONTINUE when a session already exists,
+    // then ERRINFO_RPC_INITIATED_DISCONNECT if the existing user denies takeover.
+    (log.contains("LOGON_MSG_SESSION_CONTINUE")
+        || log.contains("LOGON_TYPE_RECONNECT"))
+        && (log.contains("ERRINFO_RPC_INITIATED_DISCONNECT")
+            || log.contains("ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION")
+            || log.contains("ERRINFO_SESSION_TAKEN_OVER"))
 }
 
 fn read_log_tail(path: &str, max_lines: usize) -> String {

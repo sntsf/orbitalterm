@@ -238,6 +238,7 @@ pub async fn connect_rdp(
     connection_id: String,
     width: Option<u16>,
     height: Option<u16>,
+    admin_mode: Option<bool>,
 ) -> Result<RdpConnectResult, String> {
     let connection = load_connection(&connection_id)?;
     let password = get_saved_password(&connection_id);
@@ -257,6 +258,7 @@ pub async fn connect_rdp(
             password.as_deref(),
             w,
             h,
+            admin_mode.unwrap_or(false),
         )?;
         let width = session.width;
         let height = session.height;

@@ -86,8 +86,9 @@ export async function connectRdp(
   connectionId: string,
   width = 1280,
   height = 800,
+  adminMode = false,
 ): Promise<RdpConnectResult> {
-  return invoke("connect_rdp", { connectionId, width, height });
+  return invoke("connect_rdp", { connectionId, width, height, adminMode });
 }
 
 export async function rdpResizeSession(sessionId: string, width: number, height: number): Promise<void> {
