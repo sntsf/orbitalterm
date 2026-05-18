@@ -74,9 +74,16 @@ pub fn launch(
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(log_file2);   // capture stdout too — xfreerdp3 writes INFO to stdout
     cmd.stderr(log_file);
+    // .\username means "local account on this machine" — strip the prefix and
+    // omit /d: so xfreerdp3 authenticates via NTLM without a domain.
+    let (clean_user, effective_domain) = if username.starts_with(".\\") || username.starts_with("./") {
+        (&username[2..], "")
+    } else {
+        (username, domain)
+    };
     cmd.arg(format!("/v:{}:{}", host, port));
-    cmd.arg(format!("/u:{}", username));
-    if !domain.is_empty() { cmd.arg(format!("/d:{}", domain)); }
+    cmd.arg(format!("/u:{}", clean_user));
+    if !effective_domain.is_empty() { cmd.arg(format!("/d:{}", effective_domain)); }
     cmd.arg(format!("/p:{password}"));
     cmd.arg(format!("/w:{}", width));
     cmd.arg(format!("/h:{}", height));
