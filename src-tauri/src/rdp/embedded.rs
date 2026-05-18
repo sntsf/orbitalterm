@@ -411,8 +411,10 @@ fn capture_frame_b64(conn: &RustConnection, root: u32, width: u16, height: u16) 
 }
 
 pub fn mouse_event(conn: &RustConnection, root: u32, event_type: u8, button: u8, x: i16, y: i16) -> Result<(), String> {
+    // Fire-and-forget: no .check() because concurrent mouse-move events from multiple
+    // async tasks would deadlock competing on x11rb's shared reply-reader mutex.
     conn.xtest_fake_input(event_type, button, 0, root, x, y, 0)
-        .map_err(|e| e.to_string())?.check().map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
     conn.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -430,7 +432,7 @@ pub fn key_event(conn: &RustConnection, root: u32, kb_map: &HashMap<u32, u8>, pr
 
     let event_type = if pressed { 2u8 } else { 3u8 };
     conn.xtest_fake_input(event_type, keycode, 0, root, 0, 0, 0)
-        .map_err(|e| e.to_string())?.check().map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
     conn.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
