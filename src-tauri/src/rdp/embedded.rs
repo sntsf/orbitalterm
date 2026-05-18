@@ -138,9 +138,18 @@ pub fn launch(
     cmd.arg("/gdi:sw");
     cmd.arg("/bpp:32");
     cmd.arg("+clipboard");
-    // /admin: connect to the administrative/console session, bypassing the
-    // single-session limit on Windows non-Server when an existing session exists.
-    if admin_mode {
+    // Use /admin (administrative/console session) for local account connections:
+    // - no domain (.\user or just user with no domain field)
+    // - domain is an IP address
+    // - domain is a plain hostname (not an FQDN)
+    // On Windows workstations only one RDP session is allowed, and local account
+    // connections routinely leave ghost disconnected sessions that cause
+    // ERRINFO_RPC_INITIATED_DISCONNECT on the next attempt. /admin bypasses the
+    // session queue entirely by taking the console session directly.
+    // For FQDN domains (lab.local, corp.example.com) we keep normal mode so
+    // Kerberos / Group Policy behaves as expected.
+    let local_account = effective_domain.is_empty() || domain_is_ip || domain_is_hostname;
+    if admin_mode || local_account {
         cmd.arg("/admin");
     }
 
