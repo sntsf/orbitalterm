@@ -405,6 +405,36 @@ pub async fn disconnect_rdp(
     Ok(())
 }
 
+/// Read the user's real Linux clipboard (called from the canvas Ctrl+V handler).
+#[tauri::command]
+pub async fn rdp_get_linux_clipboard() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return Ok(crate::rdp::embedded::read_linux_clipboard().unwrap_or_default());
+    }
+    #[allow(unreachable_code)]
+    Ok(String::new())
+}
+
+/// Write text to the Xvfb clipboard so xfreerdp3's cliprdr can serve it to Windows.
+#[tauri::command]
+pub async fn rdp_set_clipboard(
+    #[allow(unused_variables)] embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
+    #[allow(unused_variables)] session_id: String,
+    #[allow(unused_variables)] text: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let display = embedded_sessions.lock().unwrap()
+            .get(&session_id)
+            .map(|s| s.display.clone());
+        if let Some(display) = display {
+            crate::rdp::embedded::set_clipboard(&display, &text)?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn rdp_resize_session(
     embedded_sessions: State<'_, EmbeddedRdpSessionMap>,

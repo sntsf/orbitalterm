@@ -120,6 +120,14 @@ export async function rdpKeyInput(
   return invoke("rdp_key_input", { sessionId, pressed, key });
 }
 
+export async function rdpGetLinuxClipboard(): Promise<string> {
+  return invoke("rdp_get_linux_clipboard");
+}
+
+export async function rdpSetClipboard(sessionId: string, text: string): Promise<void> {
+  return invoke("rdp_set_clipboard", { sessionId, text });
+}
+
 // ── SFTP sessions ─────────────────────────────────────────────────────────────
 
 export async function sftpConnect(connectionId: string): Promise<string> {

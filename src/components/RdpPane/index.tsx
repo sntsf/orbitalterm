@@ -8,6 +8,8 @@ import {
   rdpMouseInput,
   rdpKeyInput,
   rdpResizeSession,
+  rdpGetLinuxClipboard,
+  rdpSetClipboard,
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import type { Tab } from "../../types";
@@ -118,11 +120,32 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
 
   function onKeyDown(e: React.KeyboardEvent<HTMLCanvasElement>) {
     e.preventDefault();
+    // Ctrl+V: sync Linux clipboard → Xvfb first so cliprdr can offer it to Windows,
+    // then send V after a short delay for the cliprdr negotiation to complete.
+    if (e.ctrlKey && e.key === "v") {
+      rdpGetLinuxClipboard()
+        .then(async (text) => {
+          if (text) {
+            await rdpSetClipboard(sessionId, text).catch(() => {});
+            // Give xfreerdp3 time to detect the new clipboard owner and send
+            // CB_FORMAT_LIST_PDU to Windows before we forward the V keypress.
+            await new Promise((r) => setTimeout(r, 300));
+          }
+          rdpKeyInput(sessionId, true, "v").catch(() => {});
+          rdpKeyInput(sessionId, false, "v").catch(() => {});
+        })
+        .catch(() => {
+          rdpKeyInput(sessionId, true, "v").catch(() => {});
+        });
+      return;
+    }
     rdpKeyInput(sessionId, true, e.key).catch(() => {});
   }
 
   function onKeyUp(e: React.KeyboardEvent<HTMLCanvasElement>) {
     e.preventDefault();
+    // V keyup is already sent inside the async Ctrl+V handler above.
+    if (e.ctrlKey && e.key === "v") return;
     rdpKeyInput(sessionId, false, e.key).catch(() => {});
   }
 

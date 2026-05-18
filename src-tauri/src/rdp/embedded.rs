@@ -318,50 +318,35 @@ fn js_key_to_keysym(key: &str) -> Option<u32> {
 
 // ── Clipboard bridge ──────────────────────────────────────────────────────────
 //
-// xfreerdp3 (+clipboard) syncs the Xvfb X11 clipboard ↔ Windows via cliprdr.
-// But Xvfb is an isolated display — it can't see the user's real desktop clipboard.
-// This bridge polls both sides every 500 ms and mirrors changes.
+// Two-direction clipboard support:
+//   Linux → Windows: handled on-demand via rdp_set_clipboard called from the
+//                    frontend when the user presses Ctrl+V in the canvas.
+//   Windows → Linux: polled every 500 ms; xfreerdp3 (+clipboard / cliprdr)
+//                    writes Windows clipboard to Xvfb X11 clipboard automatically.
 //
-// Requirements (Ubuntu): sudo apt install xclip wl-clipboard
+// Requirements: sudo apt install xclip wl-clipboard
 
-fn start_clipboard_bridge(xvfb_display: String, stop: Arc<AtomicBool>) {
-    std::thread::spawn(move || {
-        let mut last_linux = String::new();
-        let mut last_xvfb  = String::new();
-        let mut xclip_owner: Option<std::process::Child> = None;
-
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                if let Some(mut c) = xclip_owner { c.kill().ok(); c.wait().ok(); }
-                break;
-            }
-
-            // Linux → Xvfb: push real clipboard into the virtual display so
-            // xfreerdp3's cliprdr can offer it to Windows.
-            if let Some(cur) = read_linux_clipboard() {
-                if !cur.is_empty() && cur != last_linux {
-                    write_xvfb_clipboard(&xvfb_display, &cur, &mut xclip_owner);
-                    last_xvfb  = cur.clone();
-                    last_linux = cur;
-                }
-            }
-
-            // Xvfb → Linux: pull Windows clipboard (placed there by cliprdr)
-            // back into the real display so the user can paste in Linux apps.
-            if let Some(cur) = read_xvfb_clipboard(&xvfb_display) {
-                if !cur.is_empty() && cur != last_xvfb {
-                    write_linux_clipboard(&cur);
-                    last_linux = cur.clone();
-                    last_xvfb  = cur;
-                }
-            }
-
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-    });
+/// Set the clipboard on the Xvfb virtual display so xfreerdp3's cliprdr
+/// can offer the content to Windows. Called just before Ctrl+V is forwarded.
+pub fn set_clipboard(display: &str, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut c = std::process::Command::new("xclip")
+        .args(["-display", display, "-selection", "clipboard", "-loops", "-1"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| "xclip not found — run: sudo apt install xclip".to_string())?;
+    if let Some(mut s) = c.stdin.take() {
+        s.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    // Don't wait — xclip stays alive on the Xvfb display serving clipboard
+    // requests until Xvfb is killed at session end (which cleans it up).
+    Ok(())
 }
 
-fn read_linux_clipboard() -> Option<String> {
+/// Read the user's real Linux clipboard (Wayland or X11/XWayland).
+pub fn read_linux_clipboard() -> Option<String> {
     // Prefer wl-paste (Wayland-native)
     let out = std::process::Command::new("wl-paste")
         .args(["--no-newline", "--type", "text/plain"])
@@ -384,10 +369,30 @@ fn read_linux_clipboard() -> Option<String> {
     if out.status.success() { String::from_utf8(out.stdout).ok() } else { None }
 }
 
+fn start_clipboard_bridge(xvfb_display: String, stop: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        let mut last_xvfb = String::new();
+
+        loop {
+            if stop.load(Ordering::Relaxed) { break; }
+
+            // Windows → Linux: xfreerdp3 cliprdr puts Windows clipboard into Xvfb.
+            // We poll it here and push to the real display so the user can paste
+            // in Linux apps after copying something in the Windows session.
+            if let Some(cur) = read_xvfb_clipboard(&xvfb_display) {
+                if !cur.is_empty() && cur != last_xvfb {
+                    write_linux_clipboard(&cur);
+                    last_xvfb = cur;
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+}
+
 fn write_linux_clipboard(text: &str) {
     use std::io::Write;
-    // Try wl-copy (Wayland). wl-copy stays alive in the background to serve
-    // the selection; it exits when another owner claims the clipboard.
     if let Ok(mut c) = std::process::Command::new("wl-copy")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -395,10 +400,8 @@ fn write_linux_clipboard(text: &str) {
         .spawn()
     {
         if let Some(mut s) = c.stdin.take() { let _ = s.write_all(text.as_bytes()); }
-        // Don't wait — let wl-copy run in background as clipboard owner.
         return;
     }
-    // Fallback: xclip on the user's real DISPLAY
     let display = std::env::var("DISPLAY").unwrap_or_default();
     if display.is_empty() { return; }
     if let Ok(mut c) = std::process::Command::new("xclip")
@@ -419,20 +422,4 @@ fn read_xvfb_clipboard(display: &str) -> Option<String> {
         .stderr(std::process::Stdio::null())
         .output().ok()?;
     if out.status.success() { String::from_utf8(out.stdout).ok() } else { None }
-}
-
-fn write_xvfb_clipboard(display: &str, text: &str, owner: &mut Option<std::process::Child>) {
-    use std::io::Write;
-    // Kill the previous xclip so it releases clipboard ownership on the virtual display,
-    // then spawn a new one with -loops -1 so it keeps serving the selection indefinitely.
-    if let Some(mut old) = owner.take() { old.kill().ok(); old.wait().ok(); }
-    let Ok(mut c) = std::process::Command::new("xclip")
-        .args(["-display", display, "-selection", "clipboard", "-loops", "-1"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    else { return; };
-    if let Some(mut s) = c.stdin.take() { let _ = s.write_all(text.as_bytes()); }
-    *owner = Some(c);
 }
