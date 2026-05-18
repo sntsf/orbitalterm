@@ -5,11 +5,17 @@ use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, SyncSender};
 use tauri::{AppHandle, Emitter};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::protocol::xtest::ConnectionExt as XTestExt;
 use x11rb::rust_connection::RustConnection;
+
+pub enum InputEvent {
+    Mouse { event_type: u8, button: u8, x: i16, y: i16 },
+    Key { pressed: bool, key: String },
+}
 
 pub struct EmbeddedSession {
     pub display: String,
@@ -17,12 +23,9 @@ pub struct EmbeddedSession {
     pub height: u16,
     pub dims: Arc<Mutex<(u16, u16)>>,
     pub stop: Arc<AtomicBool>,
-    /// Persistent connection for input injection — avoids the per-event
-    /// connect overhead that was causing visible click/key latency.
-    pub input_conn: Arc<RustConnection>,
-    pub input_root: u32,
-    /// Keysym → keycode map built once from get_keyboard_mapping.
-    pub kb_map: Arc<HashMap<u32, u8>>,
+    /// Channel to the dedicated input thread — send() is instant and never
+    /// blocks the async runtime; all X11 I/O stays on that thread.
+    pub input_tx: SyncSender<InputEvent>,
     xvfb: std::process::Child,
     xfreerdp: Arc<Mutex<std::process::Child>>,
 }
@@ -199,27 +202,52 @@ pub fn launch(
         ));
     }
 
-    // Persistent X11 connection used only for input events. Building it once
-    // here avoids the per-event connect overhead that caused visible latency.
-    let (input_conn_raw, input_screen_num) = RustConnection::connect(Some(&display))
-        .map_err(|e| { xvfb.kill().ok(); xfreerdp.kill().ok(); format!("X11 input connect: {e}") })?;
-    let input_root = input_conn_raw.setup().roots[input_screen_num].root;
-    let kb_reply = input_conn_raw
-        .get_keyboard_mapping(8u8, 248u8)
-        .map_err(|e| { xvfb.kill().ok(); xfreerdp.kill().ok(); e.to_string() })?
-        .reply()
-        .map_err(|e| { xvfb.kill().ok(); xfreerdp.kill().ok(); e.to_string() })?;
-    let per = kb_reply.keysyms_per_keycode as usize;
-    let kb_map: HashMap<u32, u8> = kb_reply
-        .keysyms
-        .chunks(per)
-        .enumerate()
-        .flat_map(|(i, syms)| {
-            syms.iter().filter(|&&s| s != 0).map(move |&s| (s, (i as u8) + 8))
-        })
-        .collect();
-    let input_conn = Arc::new(input_conn_raw);
-    let kb_map = Arc::new(kb_map);
+    // Dedicated input thread: owns its own X11 connection so it never
+    // competes with the frame-capture thread or blocks the async runtime.
+    // The async command handlers just try_send() and return immediately.
+    let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(256);
+    let input_display = display.clone();
+    std::thread::spawn(move || {
+        let (conn, screen_num) = match RustConnection::connect(Some(&input_display)) {
+            Ok(r) => r,
+            Err(e) => { eprintln!("rdp input thread: x11rb connect: {e}"); return; }
+        };
+        let root = conn.setup().roots[screen_num].root;
+        let kb_map: HashMap<u32, u8> = match conn
+            .get_keyboard_mapping(8u8, 248u8)
+            .ok()
+            .and_then(|c| c.reply().ok())
+        {
+            Some(m) => {
+                let per = m.keysyms_per_keycode as usize;
+                m.keysyms.chunks(per).enumerate()
+                    .flat_map(|(i, syms)| {
+                        syms.iter().filter(|&&s| s != 0).map(move |&s| (s, (i as u8) + 8))
+                    })
+                    .collect()
+            }
+            None => { eprintln!("rdp input thread: get_keyboard_mapping failed"); return; }
+        };
+
+        while let Ok(ev) = input_rx.recv() {
+            match ev {
+                InputEvent::Mouse { event_type, button, x, y } => {
+                    let _ = conn.xtest_fake_input(event_type, button, 0, root, x, y, 0);
+                    let _ = conn.flush();
+                }
+                InputEvent::Key { pressed, key } => {
+                    if let Some(ks) = js_key_to_keysym(&key) {
+                        if let Some(&kc) = kb_map.get(&ks) {
+                            let ev_type = if pressed { 2u8 } else { 3u8 };
+                            let _ = conn.xtest_fake_input(ev_type, kc, 0, root, 0, 0, 0);
+                            let _ = conn.flush();
+                        }
+                    }
+                }
+            }
+        }
+        // Sender dropped (session ended) → loop exits, thread terminates.
+    });
 
     let xfreerdp = Arc::new(Mutex::new(xfreerdp));
     let xfreerdp_thread = Arc::clone(&xfreerdp);
@@ -327,7 +355,7 @@ pub fn launch(
         }
     });
 
-    Ok(EmbeddedSession { display, width, height, dims, stop, input_conn, input_root, kb_map, xvfb, xfreerdp })
+    Ok(EmbeddedSession { display, width, height, dims, stop, input_tx, xvfb, xfreerdp })
 }
 
 pub fn resize(display: &str, dims: &Arc<Mutex<(u16, u16)>>, width: u16, height: u16) -> Result<(), String> {
@@ -410,32 +438,6 @@ fn capture_frame_b64(conn: &RustConnection, root: u32, width: u16, height: u16) 
     Ok(BASE64.encode(&out))
 }
 
-pub fn mouse_event(conn: &RustConnection, root: u32, event_type: u8, button: u8, x: i16, y: i16) -> Result<(), String> {
-    // Fire-and-forget: no .check() because concurrent mouse-move events from multiple
-    // async tasks would deadlock competing on x11rb's shared reply-reader mutex.
-    conn.xtest_fake_input(event_type, button, 0, root, x, y, 0)
-        .map_err(|e| e.to_string())?;
-    conn.flush().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-pub fn key_event(conn: &RustConnection, root: u32, kb_map: &HashMap<u32, u8>, pressed: bool, key: &str) -> Result<(), String> {
-    let keysym = match js_key_to_keysym(key) {
-        Some(k) => k,
-        None => return Ok(()),
-    };
-
-    let keycode = kb_map
-        .get(&keysym)
-        .copied()
-        .ok_or_else(|| format!("No keycode for keysym {keysym:#x}"))?;
-
-    let event_type = if pressed { 2u8 } else { 3u8 };
-    conn.xtest_fake_input(event_type, keycode, 0, root, 0, 0, 0)
-        .map_err(|e| e.to_string())?;
-    conn.flush().map_err(|e| e.to_string())?;
-    Ok(())
-}
 
 fn js_key_to_keysym(key: &str) -> Option<u32> {
     Some(match key {

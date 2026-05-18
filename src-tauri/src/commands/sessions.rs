@@ -340,13 +340,13 @@ pub async fn rdp_mouse_input(
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let (conn, root) = {
+        let tx = {
             let map = sessions.lock().unwrap();
-            map.get(&session_id)
-                .map(|s| (Arc::clone(&s.input_conn), s.input_root))
-                .ok_or_else(|| "Session not found".to_string())?
+            map.get(&session_id).map(|s| s.input_tx.clone())
         };
-        crate::rdp::embedded::mouse_event(&conn, root, event_type, button, x, y)?;
+        if let Some(tx) = tx {
+            tx.try_send(crate::rdp::embedded::InputEvent::Mouse { event_type, button, x, y }).ok();
+        }
     }
     Ok(())
 }
@@ -364,13 +364,13 @@ pub async fn rdp_key_input(
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let (conn, root, kb_map) = {
+        let tx = {
             let map = sessions.lock().unwrap();
-            map.get(&session_id)
-                .map(|s| (Arc::clone(&s.input_conn), s.input_root, Arc::clone(&s.kb_map)))
-                .ok_or_else(|| "Session not found".to_string())?
+            map.get(&session_id).map(|s| s.input_tx.clone())
         };
-        crate::rdp::embedded::key_event(&conn, root, &kb_map, pressed, &key)?;
+        if let Some(tx) = tx {
+            tx.try_send(crate::rdp::embedded::InputEvent::Key { pressed, key }).ok();
+        }
     }
     Ok(())
 }
