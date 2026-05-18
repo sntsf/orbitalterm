@@ -43,6 +43,69 @@ impl Drop for EmbeddedSession {
     }
 }
 
+/// All parameters needed to spawn xfreerdp3, kept so the monitor thread
+/// can restart with /admin without going back through the frontend.
+#[derive(Clone)]
+struct ConnParams {
+    host: String,
+    port: i64,
+    clean_user: String,
+    effective_domain: String,
+    domain_is_ip: bool,
+    domain_is_hostname: bool,
+    password: String,
+    width: u16,
+    height: u16,
+}
+
+fn spawn_xfreerdp(
+    params: &ConnParams,
+    display: &str,
+    log_path: &str,
+    admin_mode: bool,
+) -> Result<std::process::Child, String> {
+    let log_file = std::fs::File::create(log_path).map_err(|e| e.to_string())?;
+    let log_file2 = log_file.try_clone().map_err(|e| e.to_string())?;
+
+    let mut cmd = std::process::Command::new("xfreerdp3");
+    cmd.env("DISPLAY", display);
+    cmd.env_remove("WAYLAND_DISPLAY");
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(log_file2);
+    cmd.stderr(log_file);
+
+    cmd.arg(format!("/v:{}:{}", params.host, params.port));
+    cmd.arg(format!("/u:{}", params.clean_user));
+
+    if params.domain_is_ip {
+        let krb5_conf = "/tmp/orbitalterm-nokrb.conf";
+        let _ = std::fs::write(krb5_conf,
+            "[libdefaults]\n    dns_lookup_kdc = false\n    dns_lookup_realm = false\n");
+        cmd.env("KRB5_CONFIG", krb5_conf);
+    } else if params.domain_is_hostname {
+        cmd.arg(format!("/d:{}", params.effective_domain));
+        let krb5_conf = "/tmp/orbitalterm-nokrb.conf";
+        let _ = std::fs::write(krb5_conf,
+            "[libdefaults]\n    dns_lookup_kdc = false\n    dns_lookup_realm = false\n");
+        cmd.env("KRB5_CONFIG", krb5_conf);
+    } else if !params.effective_domain.is_empty() {
+        cmd.arg(format!("/d:{}", params.effective_domain));
+    }
+
+    cmd.arg(format!("/p:{}", params.password));
+    cmd.arg(format!("/w:{}", params.width));
+    cmd.arg(format!("/h:{}", params.height));
+    cmd.arg("/cert:ignore");
+    cmd.arg("/gdi:sw");
+    cmd.arg("/bpp:32");
+    cmd.arg("+clipboard");
+    if admin_mode {
+        cmd.arg("/admin");
+    }
+
+    cmd.spawn().map_err(|e| format!("Failed to launch xfreerdp3: {e}"))
+}
+
 pub fn launch(
     app: AppHandle,
     session_id: &str,
@@ -80,74 +143,35 @@ pub fn launch(
 
     std::thread::sleep(std::time::Duration::from_millis(400));
 
-    let log_path = format!("/tmp/orbitalterm-rdp-{}.log", session_id);
-    let log_file = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
-    let log_file2 = log_file.try_clone().map_err(|e| e.to_string())?;
-
-    let mut cmd = std::process::Command::new("xfreerdp3");
-    cmd.env("DISPLAY", &display);
-    cmd.env_remove("WAYLAND_DISPLAY");
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(log_file2);   // capture stdout too — xfreerdp3 writes INFO to stdout
-    cmd.stderr(log_file);
     // .\username means "local account on this machine" — strip the prefix and
     // omit /d: so xfreerdp3 authenticates via NTLM without a domain.
     let (clean_user, effective_domain) = if username.starts_with(".\\") || username.starts_with("./") {
-        (&username[2..], "")
+        (username[2..].to_string(), String::new())
     } else {
-        (username, domain)
+        (username.to_string(), domain.to_string())
     };
 
-    // Detect domain type to determine how to pass credentials to xfreerdp3.
     let domain_is_ip = !effective_domain.is_empty()
         && effective_domain.chars().all(|c| c.is_ascii_digit() || c == '.');
     let domain_is_hostname = !effective_domain.is_empty()
         && !effective_domain.contains('.')
         && !domain_is_ip;
 
-    cmd.arg(format!("/v:{}:{}", host, port));
-    cmd.arg(format!("/u:{}", clean_user));
+    let params = ConnParams {
+        host: host.to_string(),
+        port,
+        clean_user,
+        effective_domain,
+        domain_is_ip,
+        domain_is_hostname,
+        password: password.to_string(),
+        width,
+        height,
+    };
 
-    if domain_is_ip {
-        // IP as domain (e.g. 192.168.18.92) is NOT a valid NTLM domain name.
-        // Passing /d:IP causes Windows to try to resolve the IP as a domain
-        // context in NTLM, which hangs for 9s and then times out.
-        // Solution: omit /d: entirely — NTLM without domain hits local accounts.
-        // Also disable Kerberos DNS discovery to avoid spurious KDC lookups.
-        let krb5_conf = "/tmp/orbitalterm-nokrb.conf";
-        let _ = std::fs::write(krb5_conf,
-            "[libdefaults]\n    dns_lookup_kdc = false\n    dns_lookup_realm = false\n");
-        cmd.env("KRB5_CONFIG", krb5_conf);
-    } else if domain_is_hostname {
-        // Plain hostname (e.g. SERVER01) — pass as domain but disable KDC DNS
-        // lookup because a hostname can't be a Kerberos realm.
-        cmd.arg(format!("/d:{}", effective_domain));
-        let krb5_conf = "/tmp/orbitalterm-nokrb.conf";
-        let _ = std::fs::write(krb5_conf,
-            "[libdefaults]\n    dns_lookup_kdc = false\n    dns_lookup_realm = false\n");
-        cmd.env("KRB5_CONFIG", krb5_conf);
-    } else if !effective_domain.is_empty() {
-        // FQDN like "lab.local" — normal NLA with Kerberos/NTLM fallback.
-        cmd.arg(format!("/d:{}", effective_domain));
-    }
-
-    cmd.arg(format!("/p:{password}"));
-    cmd.arg(format!("/w:{}", width));
-    cmd.arg(format!("/h:{}", height));
-    cmd.arg("/cert:ignore");
-    cmd.arg("/gdi:sw");
-    cmd.arg("/bpp:32");
-    cmd.arg("+clipboard");
-    // /admin: administrative/console session — only when explicitly requested.
-    // Requires the account to have local administrator rights on the target machine.
-    // Bypasses the disconnected-session queue on Windows workstations, but will
-    // be rejected with access denied for non-admin local accounts.
-    if admin_mode {
-        cmd.arg("/admin");
-    }
-
-    let mut xfreerdp = cmd.spawn()
-        .map_err(|e| format!("Failed to launch xfreerdp3: {e}"))?;
+    let log_path = format!("/tmp/orbitalterm-rdp-{}.log", session_id);
+    let mut xfreerdp = spawn_xfreerdp(&params, &display, &log_path, admin_mode)
+        .map_err(|e| { xvfb.kill().ok(); e })?;
 
     // Wait for initial auth, then verify xfreerdp3 is still alive
     std::thread::sleep(std::time::Duration::from_millis(1200));
@@ -179,6 +203,8 @@ pub fn launch(
     let sid = session_id.to_string();
     let disp_clone = display.clone();
     let log_path_thread = log_path.clone();
+    let params_thread = params.clone();
+    let initial_admin_mode = admin_mode;
 
     // Clipboard bridge: sync between the user's real display and the Xvfb virtual display.
     // xfreerdp3 (with +clipboard) bridges Xvfb X11 clipboard ↔ Windows RDP clipboard.
@@ -197,7 +223,9 @@ pub fn launch(
         let root = conn.setup().roots[screen_num].root;
 
         let mut keepalive_tick: u32 = 0;
-        let session_start = std::time::Instant::now();
+        let mut session_start = std::time::Instant::now();
+        let mut current_log = log_path_thread;
+        let mut admin_retried = initial_admin_mode; // if already admin, no retry needed
 
         loop {
             if stop_clone.load(Ordering::Relaxed) { break; }
@@ -206,17 +234,36 @@ pub fn launch(
             match xfreerdp_thread.lock().unwrap().try_wait() {
                 Ok(Some(status)) => {
                     let elapsed = session_start.elapsed().as_secs();
-                    let is_conflict = detect_session_conflict(&log_path_thread, elapsed);
-                    let detail = read_log_tail(&log_path_thread, 20);
-                    std::fs::remove_file(&log_path_thread).ok();
+                    let is_conflict = detect_session_conflict(&current_log, elapsed);
+
+                    // Auto-retry with /admin once, entirely within the backend.
+                    // The canvas briefly goes black and then resumes — no frontend
+                    // involvement means no React closure or infinite-loop risk.
+                    if is_conflict && !admin_retried {
+                        admin_retried = true;
+                        std::fs::remove_file(&current_log).ok();
+                        let new_log = format!("{}.admin", current_log);
+                        match spawn_xfreerdp(&params_thread, &disp_clone, &new_log, true) {
+                            Ok(new_proc) => {
+                                *xfreerdp_thread.lock().unwrap() = new_proc;
+                                current_log = new_log;
+                                session_start = std::time::Instant::now();
+                                // Give new process a moment to start before resuming loop
+                                std::thread::sleep(std::time::Duration::from_millis(800));
+                                continue;
+                            }
+                            Err(e) => {
+                                app.emit(&format!("rdp-error-{sid}"),
+                                    format!("No se pudo iniciar sesión admin: {e}")).ok();
+                                break;
+                            }
+                        }
+                    }
+
+                    let detail = read_log_tail(&current_log, 20);
+                    std::fs::remove_file(&current_log).ok();
                     let code = status.code().unwrap_or(-1);
-                    let msg = if is_conflict {
-                        "SESSION_CONFLICT\n\
-                         La sesión fue interrumpida por Windows (sesión ocupada o fantasma).\n\
-                         Esto ocurre cuando hay una sesión previa sin cerrar en el servidor.\n\
-                         Usá Forzar conexión para tomar la sesión directamente."
-                            .to_string()
-                    } else if detail.is_empty() {
+                    let msg = if detail.is_empty() {
                         format!("La sesión RDP terminó (código {code}).")
                     } else {
                         format!("La sesión RDP terminó (código {code}).\n\n{detail}")
