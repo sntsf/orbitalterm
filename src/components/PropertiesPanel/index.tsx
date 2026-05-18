@@ -56,6 +56,7 @@ export function PropertiesPanel() {
   const [showPassword, setShowPassword] = useState(false);
   const [hasSaved, setHasSaved] = useState(false);
   const [folderId, setFolderId] = useState("");
+  const [rdpAdmin, setRdpAdmin] = useState(false);
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -70,6 +71,7 @@ export function PropertiesPanel() {
       setPort(existing.port);
       setUsername(existing.username);
       setDomain(existing.domain);
+      setRdpAdmin(existing.rdp_admin ?? false);
       setAuthType(existing.auth_type);
       setKeyPath(existing.key_path);
       setFolderId(existing.folder_id ?? "");
@@ -89,6 +91,7 @@ export function PropertiesPanel() {
       setPort(22);
       setUsername("");
       setDomain("");
+      setRdpAdmin(false);
       setAuthType("agent");
       setKeyPath("");
       setPassword("");
@@ -126,6 +129,7 @@ export function PropertiesPanel() {
         port,
         username: username.trim(),
         domain: domain.trim(),
+        rdp_admin: rdpAdmin,
         auth_type: authType,
         key_path: keyPath.trim(),
         folder_id: folderId || null,
@@ -179,6 +183,7 @@ export function PropertiesPanel() {
   const supportedAuthTypes = AUTH_FOR_TYPE[type];
   const showAuthSection = supportedAuthTypes.length > 1 || supportedAuthTypes[0] !== "password";
   const showDomain = type === "rdp";
+  const showRdpAdmin = type === "rdp";
   const showPasswordField = authType === "password";
   const showKeyField = authType === "key";
 
@@ -313,6 +318,22 @@ export function PropertiesPanel() {
               placeholder="WORKGROUP o dominio AD"
               className={inp}
             />
+          </Row>
+        )}
+
+        {showRdpAdmin && (
+          <Row label="Sesión">
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={rdpAdmin}
+                onChange={(e) => setRdpAdmin(e.target.checked)}
+                className="accent-[var(--color-accent)]"
+              />
+              <span className="text-xs text-[var(--color-text-muted)]">
+                Sesión admin <span className="text-[10px]">(requiere cuenta administrador)</span>
+              </span>
+            </label>
           </Row>
         )}
 

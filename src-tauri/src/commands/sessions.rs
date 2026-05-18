@@ -258,7 +258,7 @@ pub async fn connect_rdp(
             password.as_deref(),
             w,
             h,
-            admin_mode.unwrap_or(false),
+            connection.rdp_admin || admin_mode.unwrap_or(false),
         )?;
         let width = session.width;
         let height = session.height;

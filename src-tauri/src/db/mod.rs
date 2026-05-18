@@ -69,6 +69,10 @@ fn migrate(conn: &Connection) -> Result<()> {
         "ALTER TABLE connections ADD COLUMN domain TEXT NOT NULL DEFAULT ''",
         [],
     ).ok();
+    conn.execute(
+        "ALTER TABLE connections ADD COLUMN rdp_admin INTEGER NOT NULL DEFAULT 0",
+        [],
+    ).ok();
 
     // Schema version migration: remove restrictive CHECK(type IN ('ssh','rdp'))
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL DEFAULT 0);")?;
