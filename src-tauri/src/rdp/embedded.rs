@@ -81,22 +81,43 @@ pub fn launch(
     } else {
         (username, domain)
     };
+
+    // Detect domain type to determine how to pass credentials to xfreerdp3.
+    let domain_is_ip = !effective_domain.is_empty()
+        && effective_domain.chars().all(|c| c.is_ascii_digit() || c == '.');
+    let domain_is_hostname = !effective_domain.is_empty()
+        && !effective_domain.contains('.')
+        && !domain_is_ip;
+
     cmd.arg(format!("/v:{}:{}", host, port));
     cmd.arg(format!("/u:{}", clean_user));
-    if !effective_domain.is_empty() { cmd.arg(format!("/d:{}", effective_domain)); }
+
+    if domain_is_ip {
+        // IP as domain (e.g. 192.168.18.92) is NOT a valid NTLM domain name.
+        // Passing /d:IP causes Windows to try to resolve the IP as a domain
+        // context in NTLM, which hangs for 9s and then times out.
+        // Solution: omit /d: entirely — NTLM without domain hits local accounts.
+        // Also disable Kerberos DNS discovery to avoid spurious KDC lookups.
+        let krb5_conf = "/tmp/orbitalterm-nokrb.conf";
+        let _ = std::fs::write(krb5_conf,
+            "[libdefaults]\n    dns_lookup_kdc = false\n    dns_lookup_realm = false\n");
+        cmd.env("KRB5_CONFIG", krb5_conf);
+    } else if domain_is_hostname {
+        // Plain hostname (e.g. SERVER01) — pass as domain but disable KDC DNS
+        // lookup because a hostname can't be a Kerberos realm.
+        cmd.arg(format!("/d:{}", effective_domain));
+        let krb5_conf = "/tmp/orbitalterm-nokrb.conf";
+        let _ = std::fs::write(krb5_conf,
+            "[libdefaults]\n    dns_lookup_kdc = false\n    dns_lookup_realm = false\n");
+        cmd.env("KRB5_CONFIG", krb5_conf);
+    } else if !effective_domain.is_empty() {
+        // FQDN like "lab.local" — normal NLA with Kerberos/NTLM fallback.
+        cmd.arg(format!("/d:{}", effective_domain));
+    }
+
     cmd.arg(format!("/p:{password}"));
     cmd.arg(format!("/w:{}", width));
     cmd.arg(format!("/h:{}", height));
-    // When domain is an IP address or plain hostname (no dots), the Kerberos
-    // DNS lookup for that "realm" takes ~9s to time out, causing NLA activation
-    // timeout before xfreerdp3 can fall back to NTLM.
-    // Fix: point KRB5_CONFIG to /dev/null so libkrb5 reads an empty config,
-    // finds no default realm, and fails instantly → immediate NTLM fallback.
-    let domain_is_local = !effective_domain.is_empty() && (
-        effective_domain.chars().all(|c| c.is_ascii_digit() || c == '.') // IP
-        || !effective_domain.contains('.')  // plain hostname e.g. "SERVER01"
-    );
-    if domain_is_local { cmd.env("KRB5_CONFIG", "/dev/null"); }
     cmd.arg("/cert:ignore");
     cmd.arg("/gdi:sw");
     cmd.arg("/bpp:32");
