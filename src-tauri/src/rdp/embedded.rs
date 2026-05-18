@@ -23,7 +23,22 @@ pub struct EmbeddedSession {
 impl Drop for EmbeddedSession {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.xfreerdp.lock().unwrap().kill().ok();
+        let mut proc = self.xfreerdp.lock().unwrap();
+        // SIGTERM first so xfreerdp3 can send a proper RDP Disconnect PDU to
+        // the server. Without this, Windows leaves a ghost disconnected session
+        // that causes ERRINFO_RPC_INITIATED_DISCONNECT on the next connect.
+        let _ = std::process::Command::new("kill")
+            .args(["-s", "TERM", &proc.id().to_string()])
+            .status();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        while proc.try_wait().ok().flatten().is_none() {
+            if std::time::Instant::now() >= deadline {
+                proc.kill().ok();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        drop(proc);
         self.xvfb.kill().ok();
     }
 }
@@ -180,6 +195,7 @@ pub fn launch(
         let root = conn.setup().roots[screen_num].root;
 
         let mut keepalive_tick: u32 = 0;
+        let session_start = std::time::Instant::now();
 
         loop {
             if stop_clone.load(Ordering::Relaxed) { break; }
@@ -187,17 +203,16 @@ pub fn launch(
             // Detect xfreerdp3 exit via try_wait (avoids zombie false-positive from /proc check)
             match xfreerdp_thread.lock().unwrap().try_wait() {
                 Ok(Some(status)) => {
-                    let is_conflict = detect_session_conflict(&log_path_thread);
+                    let elapsed = session_start.elapsed().as_secs();
+                    let is_conflict = detect_session_conflict(&log_path_thread, elapsed);
                     let detail = read_log_tail(&log_path_thread, 20);
                     std::fs::remove_file(&log_path_thread).ok();
                     let code = status.code().unwrap_or(-1);
                     let msg = if is_conflict {
                         "SESSION_CONFLICT\n\
-                         Hay una sesión RDP activa en este equipo. Windows notificó al \
-                         usuario existente, pero rechazó la conexión o el tiempo de \
-                         espera expiró.\n\
-                         Podés pedirle al usuario que cierre su sesión, o usar \
-                         Forzar conexión para desconectarlo automáticamente."
+                         La sesión fue interrumpida por Windows (sesión ocupada o fantasma).\n\
+                         Esto ocurre cuando hay una sesión previa sin cerrar en el servidor.\n\
+                         Usá Forzar conexión para tomar la sesión directamente."
                             .to_string()
                     } else if detail.is_empty() {
                         format!("La sesión RDP terminó (código {code}).")
@@ -255,15 +270,21 @@ pub fn resize(display: &str, dims: &Arc<Mutex<(u16, u16)>>, width: u16, height: 
     Ok(())
 }
 
-fn detect_session_conflict(log_path: &str) -> bool {
+fn detect_session_conflict(log_path: &str, elapsed_secs: u64) -> bool {
     let log = std::fs::read_to_string(log_path).unwrap_or_default();
-    // Windows sends LOGON_MSG_SESSION_CONTINUE when a session already exists,
-    // then ERRINFO_RPC_INITIATED_DISCONNECT if the existing user denies takeover.
-    (log.contains("LOGON_MSG_SESSION_CONTINUE")
+    // Case 1: explicit session-continue + RPC disconnect (existing user denied takeover).
+    let explicit = (log.contains("LOGON_MSG_SESSION_CONTINUE")
         || log.contains("LOGON_TYPE_RECONNECT"))
         && (log.contains("ERRINFO_RPC_INITIATED_DISCONNECT")
             || log.contains("ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION")
-            || log.contains("ERRINFO_SESSION_TAKEN_OVER"))
+            || log.contains("ERRINFO_SESSION_TAKEN_OVER"));
+    // Case 2: RPC-initiated disconnect within the first 20 s without a
+    // user-visible reason — almost always a ghost/conflicting session on
+    // Windows workstations. Using /admin bypasses this.
+    let fast_rpc = elapsed_secs < 20
+        && log.contains("ERRINFO_RPC_INITIATED_DISCONNECT")
+        && !log.contains("ERRINFO_LOGOFF_BY_USER");
+    explicit || fast_rpc
 }
 
 fn read_log_tail(path: &str, max_lines: usize) -> String {
