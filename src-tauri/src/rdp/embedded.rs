@@ -2,6 +2,7 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
@@ -16,6 +17,12 @@ pub struct EmbeddedSession {
     pub height: u16,
     pub dims: Arc<Mutex<(u16, u16)>>,
     pub stop: Arc<AtomicBool>,
+    /// Persistent connection for input injection — avoids the per-event
+    /// connect overhead that was causing visible click/key latency.
+    pub input_conn: Arc<RustConnection>,
+    pub input_root: u32,
+    /// Keysym → keycode map built once from get_keyboard_mapping.
+    pub kb_map: Arc<HashMap<u32, u8>>,
     xvfb: std::process::Child,
     xfreerdp: Arc<Mutex<std::process::Child>>,
 }
@@ -192,6 +199,28 @@ pub fn launch(
         ));
     }
 
+    // Persistent X11 connection used only for input events. Building it once
+    // here avoids the per-event connect overhead that caused visible latency.
+    let (input_conn_raw, input_screen_num) = RustConnection::connect(Some(&display))
+        .map_err(|e| { xvfb.kill().ok(); xfreerdp.kill().ok(); format!("X11 input connect: {e}") })?;
+    let input_root = input_conn_raw.setup().roots[input_screen_num].root;
+    let kb_reply = input_conn_raw
+        .get_keyboard_mapping(8u8, 248u8)
+        .map_err(|e| { xvfb.kill().ok(); xfreerdp.kill().ok(); e.to_string() })?
+        .reply()
+        .map_err(|e| { xvfb.kill().ok(); xfreerdp.kill().ok(); e.to_string() })?;
+    let per = kb_reply.keysyms_per_keycode as usize;
+    let kb_map: HashMap<u32, u8> = kb_reply
+        .keysyms
+        .chunks(per)
+        .enumerate()
+        .flat_map(|(i, syms)| {
+            syms.iter().filter(|&&s| s != 0).map(move |&s| (s, (i as u8) + 8))
+        })
+        .collect();
+    let input_conn = Arc::new(input_conn_raw);
+    let kb_map = Arc::new(kb_map);
+
     let xfreerdp = Arc::new(Mutex::new(xfreerdp));
     let xfreerdp_thread = Arc::clone(&xfreerdp);
 
@@ -298,7 +327,7 @@ pub fn launch(
         }
     });
 
-    Ok(EmbeddedSession { display, width, height, dims, stop, xvfb, xfreerdp })
+    Ok(EmbeddedSession { display, width, height, dims, stop, input_conn, input_root, kb_map, xvfb, xfreerdp })
 }
 
 pub fn resize(display: &str, dims: &Arc<Mutex<(u16, u16)>>, width: u16, height: u16) -> Result<(), String> {
@@ -381,29 +410,22 @@ fn capture_frame_b64(conn: &RustConnection, root: u32, width: u16, height: u16) 
     Ok(BASE64.encode(&out))
 }
 
-pub fn mouse_event(display: &str, event_type: u8, button: u8, x: i16, y: i16) -> Result<(), String> {
-    let (conn, screen_num) = RustConnection::connect(Some(display)).map_err(|e| e.to_string())?;
-    let root = conn.setup().roots[screen_num].root;
+pub fn mouse_event(conn: &RustConnection, root: u32, event_type: u8, button: u8, x: i16, y: i16) -> Result<(), String> {
     conn.xtest_fake_input(event_type, button, 0, root, x, y, 0)
         .map_err(|e| e.to_string())?.check().map_err(|e| e.to_string())?;
     conn.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
-pub fn key_event(display: &str, pressed: bool, key: &str) -> Result<(), String> {
-    let (conn, screen_num) = RustConnection::connect(Some(display)).map_err(|e| e.to_string())?;
-    let root = conn.setup().roots[screen_num].root;
-
+pub fn key_event(conn: &RustConnection, root: u32, kb_map: &HashMap<u32, u8>, pressed: bool, key: &str) -> Result<(), String> {
     let keysym = match js_key_to_keysym(key) {
         Some(k) => k,
         None => return Ok(()),
     };
 
-    let mapping = conn.get_keyboard_mapping(8u8, 248u8)
-        .map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
-    let per = mapping.keysyms_per_keycode as usize;
-    let keycode = mapping.keysyms.chunks(per).enumerate()
-        .find_map(|(i, syms)| if syms.contains(&keysym) { Some((i as u8) + 8) } else { None })
+    let keycode = kb_map
+        .get(&keysym)
+        .copied()
         .ok_or_else(|| format!("No keycode for keysym {keysym:#x}"))?;
 
     let event_type = if pressed { 2u8 } else { 3u8 };
