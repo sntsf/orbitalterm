@@ -87,13 +87,16 @@ pub fn launch(
     cmd.arg(format!("/p:{password}"));
     cmd.arg(format!("/w:{}", width));
     cmd.arg(format!("/h:{}", height));
-    // When domain is an IP address or plain hostname (no dots), Kerberos lookup
-    // times out before NLA can fall back to NTLM. Force NTLM directly.
-    let domain_needs_ntlm = !effective_domain.is_empty() && (
+    // When domain is an IP address or plain hostname (no dots), the Kerberos
+    // DNS lookup for that "realm" takes ~9s to time out, causing NLA activation
+    // timeout before xfreerdp3 can fall back to NTLM.
+    // Fix: point KRB5_CONFIG to /dev/null so libkrb5 reads an empty config,
+    // finds no default realm, and fails instantly → immediate NTLM fallback.
+    let domain_is_local = !effective_domain.is_empty() && (
         effective_domain.chars().all(|c| c.is_ascii_digit() || c == '.') // IP
         || !effective_domain.contains('.')  // plain hostname e.g. "SERVER01"
     );
-    if domain_needs_ntlm { cmd.arg("/sec:ntlm"); }
+    if domain_is_local { cmd.env("KRB5_CONFIG", "/dev/null"); }
     cmd.arg("/cert:ignore");
     cmd.arg("/gdi:sw");
     cmd.arg("/bpp:32");
