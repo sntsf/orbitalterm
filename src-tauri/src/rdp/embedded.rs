@@ -123,6 +123,11 @@ pub fn launch(
     cmd.arg("/gdi:sw");
     cmd.arg("/bpp:32");
     cmd.arg("+clipboard");
+    // Disable the Display Control Virtual Channel (disp). xfreerdp3 loads it
+    // automatically via drdynvc even without +dynamic-resolution, and when
+    // there is an existing session on a Windows workstation the server rejects
+    // the channel open and immediately disconnects (ERRINFO_RPC_INITIATED_DISCONNECT).
+    cmd.arg("-disp");
     // /admin: connect to the administrative/console session, bypassing the
     // single-session limit on Windows non-Server when an existing session exists.
     if admin_mode {
