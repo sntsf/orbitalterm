@@ -187,10 +187,12 @@ export function RdpPane({ tab }: RdpPaneProps) {
   const [embedded, setEmbedded] = useState(false);
   const [frameSize, setFrameSize] = useState({ width: 1280, height: 800 });
   const sessionIdRef = useRef<string | null>(null);
+  const adminRetryDoneRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
 
   const connect = async (isRetry = false, adminMode = false) => {
+    if (!adminMode) adminRetryDoneRef.current = false;
     // Kill previous session before retrying so Xvfb is freed and Windows
     // has time to clean up before we create a new session.
     if (sessionIdRef.current) {
@@ -264,8 +266,9 @@ export function RdpPane({ tab }: RdpPaneProps) {
         height={frameSize.height}
         onSessionError={(msg) => {
           setEmbedded(false);
-          if (isSessionConflict(msg)) {
-            // Auto-retry with /admin — no intermediate screen shown to the user.
+          if (isSessionConflict(msg) && !adminRetryDoneRef.current) {
+            // Auto-retry with /admin once — no intermediate screen shown to the user.
+            adminRetryDoneRef.current = true;
             connect(false, true);
           } else {
             setStatus("error");
