@@ -184,10 +184,10 @@ pub fn launch(
                 app.emit(&format!("rdp-frame-{sid}"), b64).ok();
             }
 
-            // Keepalive: inject a 1px mouse jitter every ~12s so Windows
-            // does not consider the session idle and disconnect it via RPC.
+            // Keepalive: inject a 1px mouse jitter every ~3s so Windows
+            // does not consider the session idle and disconnect it.
             keepalive_tick += 1;
-            if keepalive_tick >= 300 {
+            if keepalive_tick >= 75 {
                 keepalive_tick = 0;
                 let _ = conn.xtest_fake_input(6, 0, 0, root, 1, 1, 0);
                 let _ = conn.xtest_fake_input(6, 0, 0, root, 0, 0, 0);
