@@ -27,7 +27,6 @@ function isMissingPassword(msg: string): boolean {
 function isSessionConflict(msg: string): boolean {
   return msg.startsWith("SESSION_CONFLICT\n");
 }
-
 interface RdpPaneProps {
   tab: Tab;
 }
@@ -263,7 +262,16 @@ export function RdpPane({ tab }: RdpPaneProps) {
         sessionId={sessionIdRef.current}
         width={frameSize.width}
         height={frameSize.height}
-        onSessionError={(msg) => { setEmbedded(false); setStatus("error"); setErrorMsg(msg); }}
+        onSessionError={(msg) => {
+          setEmbedded(false);
+          if (isSessionConflict(msg)) {
+            // Auto-retry with /admin — no intermediate screen shown to the user.
+            connect(false, true);
+          } else {
+            setStatus("error");
+            setErrorMsg(msg);
+          }
+        }}
         onResize={(w, h) => setFrameSize({ width: w, height: h })}
       />
     );
@@ -322,36 +330,6 @@ export function RdpPane({ tab }: RdpPaneProps) {
       )}
 
       {status === "error" && (() => {
-        if (isSessionConflict(errorMsg)) {
-          const detail = errorMsg.slice("SESSION_CONFLICT\n".length);
-          return (
-            <div className="flex flex-col items-center gap-4 max-w-sm text-center">
-              <div className="flex items-center gap-2 text-[var(--color-warning)]">
-                <AlertCircle size={18} />
-                <span className="text-sm font-medium">Sesión ocupada</span>
-              </div>
-              <p className="text-xs text-[var(--color-text-muted)] whitespace-pre-line leading-relaxed">
-                {detail}
-              </p>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => connect(true)}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded text-xs border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
-                >
-                  <RefreshCw size={12} />
-                  Reintentar
-                </button>
-                <button
-                  onClick={() => connect(true, true)}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
-                >
-                  <Monitor size={12} />
-                  Forzar conexión
-                </button>
-              </div>
-            </div>
-          );
-        }
         if (isMissingPassword(errorMsg)) {
           return (
             <div className="flex flex-col items-center gap-3 max-w-sm text-center">
