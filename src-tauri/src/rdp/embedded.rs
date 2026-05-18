@@ -272,7 +272,7 @@ pub fn launch(
                     break;
                 }
                 Err(_) => {
-                    std::fs::remove_file(&log_path_thread).ok();
+                    std::fs::remove_file(&current_log).ok();
                     app.emit(&format!("rdp-error-{sid}"), "La sesión RDP terminó inesperadamente.").ok();
                     break;
                 }
