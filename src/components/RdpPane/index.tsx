@@ -229,6 +229,19 @@ export function RdpPane({ tab }: RdpPaneProps) {
     setErrorMsg("");
     setTabStatus(tab.id, "connecting");
 
+    // Yield ONE event-loop turn before calling the backend.
+    // React 18 StrictMode double-invokes useEffect within a single scheduler
+    // task.  By awaiting a 0-ms timeout here, we let that scheduler task
+    // finish (including the cleanup gen-bump and the second effect's gen
+    // increment) BEFORE we issue the expensive Tauri IPC call.  The gen
+    // check below then catches the stale call and aborts it without ever
+    // touching the Rust backend.  Skip this yield for user-initiated retries
+    // which already have their own 5-second delay.
+    if (!isRetry) {
+      await new Promise<void>((r) => setTimeout(r, 0));
+      if (gen !== connectGenRef.current) return;
+    }
+
     try {
       const el = containerRef.current;
       const w = el ? Math.max(640, Math.floor(el.clientWidth)) : 1280;
