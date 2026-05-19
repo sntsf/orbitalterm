@@ -249,7 +249,7 @@ pub async fn connect_rdp(
         let w = width.unwrap_or(1280).max(640);
         let h = height.unwrap_or(800).max(480);
         let session_id = Uuid::new_v4().to_string();
-        let session = crate::rdp::embedded::launch(
+        let session = crate::rdp::freerdp::launch(
             app,
             &session_id,
             &connection.host,
@@ -330,22 +330,17 @@ pub async fn rdp_mouse_input(
     #[allow(unused_variables)]
     session_id: String,
     #[allow(unused_variables)]
-    event_type: u8,
+    flags: u16,
     #[allow(unused_variables)]
-    button: u8,
+    x: u16,
     #[allow(unused_variables)]
-    x: i16,
-    #[allow(unused_variables)]
-    y: i16,
+    y: u16,
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let display = {
-            let map = sessions.lock().unwrap();
-            map.get(&session_id).map(|s| s.display.clone())
-        };
-        if let Some(display) = display {
-            crate::rdp::embedded::mouse_event(&display, event_type, button, x, y)?;
+        let map = sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            session.send_mouse(flags, x, y);
         }
     }
     Ok(())
@@ -360,16 +355,13 @@ pub async fn rdp_key_input(
     #[allow(unused_variables)]
     pressed: bool,
     #[allow(unused_variables)]
-    key: String,
+    code: String,
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let display = {
-            let map = sessions.lock().unwrap();
-            map.get(&session_id).map(|s| s.display.clone())
-        };
-        if let Some(display) = display {
-            crate::rdp::embedded::key_event(&display, pressed, &key)?;
+        let map = sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            session.send_key(pressed, &code);
         }
     }
     Ok(())
@@ -413,13 +405,13 @@ pub async fn disconnect_rdp(
 pub async fn rdp_get_linux_clipboard() -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
-        return Ok(crate::rdp::embedded::read_linux_clipboard().unwrap_or_default());
+        return Ok(read_linux_clipboard().unwrap_or_default());
     }
     #[allow(unreachable_code)]
     Ok(String::new())
 }
 
-/// Write text to the Xvfb clipboard so xfreerdp3's cliprdr can serve it to Windows.
+/// Push text to the RDP remote clipboard via the cliprdr virtual channel.
 #[tauri::command]
 pub async fn rdp_set_clipboard(
     #[allow(unused_variables)] embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
@@ -428,14 +420,35 @@ pub async fn rdp_set_clipboard(
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let display = embedded_sessions.lock().unwrap()
-            .get(&session_id)
-            .map(|s| s.display.clone());
-        if let Some(display) = display {
-            crate::rdp::embedded::set_clipboard(&display, &text)?;
+        let map = embedded_sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            session.set_clipboard(&text);
         }
     }
     Ok(())
+}
+
+/// Read the user's real Linux clipboard (Wayland-native, falls back to X11).
+#[cfg(target_os = "linux")]
+fn read_linux_clipboard() -> Option<String> {
+    let out = std::process::Command::new("wl-paste")
+        .args(["--no-newline", "--type", "text/plain"])
+        .stderr(std::process::Stdio::null())
+        .output();
+    if let Ok(o) = out {
+        if o.status.success() {
+            if let Ok(s) = String::from_utf8(o.stdout) {
+                if !s.is_empty() { return Some(s); }
+            }
+        }
+    }
+    let display = std::env::var("DISPLAY").unwrap_or_default();
+    if display.is_empty() { return None; }
+    let out = std::process::Command::new("xclip")
+        .args(["-display", &display, "-selection", "clipboard", "-o"])
+        .stderr(std::process::Stdio::null())
+        .output().ok()?;
+    if out.status.success() { String::from_utf8(out.stdout).ok() } else { None }
 }
 
 #[tauri::command]
@@ -449,7 +462,7 @@ pub async fn rdp_resize_session(
     {
         let map = embedded_sessions.lock().unwrap();
         if let Some(session) = map.get(&session_id) {
-            crate::rdp::embedded::resize(&session.display, &session.dims, width, height)?;
+            session.resize(width, height);
         }
     }
     let _ = (embedded_sessions, session_id, width, height);

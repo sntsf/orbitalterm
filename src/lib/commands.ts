@@ -105,20 +105,19 @@ export async function disconnectRdp(sessionId: string): Promise<void> {
 
 export async function rdpMouseInput(
   sessionId: string,
-  eventType: number,
-  button: number,
+  flags: number,
   x: number,
   y: number,
 ): Promise<void> {
-  return invoke("rdp_mouse_input", { sessionId, eventType, button, x, y });
+  return invoke("rdp_mouse_input", { sessionId, flags, x, y });
 }
 
 export async function rdpKeyInput(
   sessionId: string,
   pressed: boolean,
-  key: string,
+  code: string,
 ): Promise<void> {
-  return invoke("rdp_key_input", { sessionId, pressed, key });
+  return invoke("rdp_key_input", { sessionId, pressed, code });
 }
 
 export async function rdpGetLinuxClipboard(): Promise<string> {

@@ -92,61 +92,71 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
     ];
   }
 
+  // RDP PTR_FLAGS constants
+  const PTR_MOVE   = 0x0800;
+  const PTR_DOWN   = 0x8000;
+  const PTR_BTN1   = 0x1000; // left
+  const PTR_BTN2   = 0x2000; // right
+  const PTR_BTN3   = 0x4000; // middle
+  const PTR_WHEEL  = 0x0200;
+  const PTR_WHEEL_NEG = 0x0100;
+
   function onMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
     const [x, y] = remoteCoords(e);
-    rdpMouseInput(sessionId, 6, 0, x, y).catch(() => {});
+    rdpMouseInput(sessionId, PTR_MOVE, x, y).catch(() => {});
   }
 
   function onMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
     const [x, y] = remoteCoords(e);
-    // X11 button numbers: 1=left, 2=middle, 3=right
-    const btn = e.button === 0 ? 1 : e.button === 1 ? 2 : 3;
-    rdpMouseInput(sessionId, 4, btn, x, y).catch(() => {});
+    const btn = e.button === 0 ? PTR_BTN1 : e.button === 1 ? PTR_BTN3 : PTR_BTN2;
+    rdpMouseInput(sessionId, btn | PTR_DOWN, x, y).catch(() => {});
   }
 
   function onMouseUp(e: React.MouseEvent<HTMLCanvasElement>) {
     const [x, y] = remoteCoords(e);
-    const btn = e.button === 0 ? 1 : e.button === 1 ? 2 : 3;
-    rdpMouseInput(sessionId, 5, btn, x, y).catch(() => {});
+    const btn = e.button === 0 ? PTR_BTN1 : e.button === 1 ? PTR_BTN3 : PTR_BTN2;
+    rdpMouseInput(sessionId, btn, x, y).catch(() => {});
   }
 
   function onWheel(e: React.WheelEvent<HTMLCanvasElement>) {
     e.preventDefault();
     const [x, y] = remoteCoords(e as unknown as React.MouseEvent<HTMLCanvasElement>);
-    const btn = e.deltaY < 0 ? 4 : 5;
-    rdpMouseInput(sessionId, 4, btn, x, y).catch(() => {});
-    rdpMouseInput(sessionId, 5, btn, x, y).catch(() => {});
+    // Clamp magnitude to 0–255 (fits in low byte of PTR_FLAGS)
+    const magnitude = Math.min(255, Math.round(Math.abs(e.deltaY)));
+    const flags = e.deltaY < 0
+      ? PTR_WHEEL | magnitude
+      : PTR_WHEEL | PTR_WHEEL_NEG | magnitude;
+    rdpMouseInput(sessionId, flags, x, y).catch(() => {});
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLCanvasElement>) {
     e.preventDefault();
-    // Ctrl+V: sync Linux clipboard → Xvfb first so cliprdr can offer it to Windows,
-    // then send V after a short delay for the cliprdr negotiation to complete.
-    if (e.ctrlKey && e.key === "v") {
+    // Ctrl+V: read Linux clipboard → push to RDP cliprdr, then forward the keystroke.
+    if (e.ctrlKey && e.code === "KeyV") {
       rdpGetLinuxClipboard()
         .then(async (text) => {
           if (text) {
             await rdpSetClipboard(sessionId, text).catch(() => {});
-            // Give xfreerdp3 time to detect the new clipboard owner and send
-            // CB_FORMAT_LIST_PDU to Windows before we forward the V keypress.
-            await new Promise((r) => setTimeout(r, 300));
+            // Brief delay lets the cliprdr CB_FORMAT_LIST_PDU reach Windows
+            // before the V keypress triggers a paste.
+            await new Promise((r) => setTimeout(r, 200));
           }
-          rdpKeyInput(sessionId, true, "v").catch(() => {});
-          rdpKeyInput(sessionId, false, "v").catch(() => {});
+          rdpKeyInput(sessionId, true, "KeyV").catch(() => {});
+          rdpKeyInput(sessionId, false, "KeyV").catch(() => {});
         })
         .catch(() => {
-          rdpKeyInput(sessionId, true, "v").catch(() => {});
+          rdpKeyInput(sessionId, true, "KeyV").catch(() => {});
         });
       return;
     }
-    rdpKeyInput(sessionId, true, e.key).catch(() => {});
+    rdpKeyInput(sessionId, true, e.code).catch(() => {});
   }
 
   function onKeyUp(e: React.KeyboardEvent<HTMLCanvasElement>) {
     e.preventDefault();
-    // V keyup is already sent inside the async Ctrl+V handler above.
-    if (e.ctrlKey && e.key === "v") return;
-    rdpKeyInput(sessionId, false, e.key).catch(() => {});
+    // KeyV keyup handled inside the async Ctrl+V branch above.
+    if (e.ctrlKey && e.code === "KeyV") return;
+    rdpKeyInput(sessionId, false, e.code).catch(() => {});
   }
 
   function onContextMenu(e: React.MouseEvent<HTMLCanvasElement>) {

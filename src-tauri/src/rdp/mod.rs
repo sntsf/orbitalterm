@@ -5,15 +5,25 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-pub mod embedded;
+pub mod freerdp;
 
+// embedded.rs is kept in the tree but no longer compiled — the libfreerdp
+// bridge (freerdp.rs) replaces it entirely on Linux.
 #[cfg(not(target_os = "linux"))]
 pub mod embedded {
     pub struct EmbeddedSession {}
 }
 
+// On Linux the active embedded session type is FreerdpSession.
+// On other platforms keep the old stub.
+#[cfg(target_os = "linux")]
+pub type EmbeddedSession = freerdp::FreerdpSession;
+
+#[cfg(not(target_os = "linux"))]
+pub type EmbeddedSession = embedded::EmbeddedSession;
+
 pub type RdpSessionMap = Arc<Mutex<HashMap<String, Child>>>;
-pub type EmbeddedRdpSessionMap = Arc<Mutex<HashMap<String, embedded::EmbeddedSession>>>;
+pub type EmbeddedRdpSessionMap = Arc<Mutex<HashMap<String, EmbeddedSession>>>;
 
 pub fn new_rdp_sessions() -> RdpSessionMap {
     Arc::new(Mutex::new(HashMap::new()))
@@ -35,8 +45,8 @@ fn binary_exists(name: &str) -> bool {
 #[cfg(not(target_os = "linux"))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum RdpFlavor {
-    FreeRdp,  // xfreerdp3 / xfreerdp  — uses /v: /u: /p: syntax
-    Remmina,  // remmina               — uses rdp://user@host:port URI
+    FreeRdp,
+    Remmina,
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -47,23 +57,6 @@ pub struct RdpClient {
 
 #[cfg(not(target_os = "linux"))]
 pub fn find_rdp_client() -> Result<RdpClient, String> {
-    #[cfg(target_os = "linux")]
-    {
-        for bin in ["xfreerdp3", "xfreerdp"] {
-            if binary_exists(bin) {
-                return Ok(RdpClient { binary: bin.to_string(), flavor: RdpFlavor::FreeRdp });
-            }
-        }
-        if binary_exists("remmina") {
-            return Ok(RdpClient { binary: "remmina".to_string(), flavor: RdpFlavor::Remmina });
-        }
-        Err(
-            "NO_RDP_CLIENT:freerdp3-x11\nNo RDP client found.\n\
-            Install FreeRDP (recommended):\n  sudo apt install freerdp3-x11\n\
-            Or Remmina:\n  sudo apt install remmina remmina-plugin-rdp"
-                .to_string(),
-        )
-    }
     #[cfg(target_os = "windows")]
     {
         Ok(RdpClient { binary: "mstsc.exe".to_string(), flavor: RdpFlavor::FreeRdp })
@@ -77,7 +70,7 @@ pub fn find_rdp_client() -> Result<RdpClient, String> {
         }
         Err("NO_RDP_CLIENT:freerdp\nNo RDP client found.\nInstall with: brew install freerdp".to_string())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         Err("RDP not supported on this platform".to_string())
     }
