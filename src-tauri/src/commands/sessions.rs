@@ -340,12 +340,12 @@ pub async fn rdp_mouse_input(
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let tx = {
+        let display = {
             let map = sessions.lock().unwrap();
-            map.get(&session_id).map(|s| s.input_tx.clone())
+            map.get(&session_id).map(|s| s.display.clone())
         };
-        if let Some(tx) = tx {
-            tx.try_send(crate::rdp::embedded::InputEvent::Mouse { event_type, button, x, y }).ok();
+        if let Some(display) = display {
+            crate::rdp::embedded::mouse_event(&display, event_type, button, x, y)?;
         }
     }
     Ok(())
@@ -364,12 +364,12 @@ pub async fn rdp_key_input(
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let tx = {
+        let display = {
             let map = sessions.lock().unwrap();
-            map.get(&session_id).map(|s| s.input_tx.clone())
+            map.get(&session_id).map(|s| s.display.clone())
         };
-        if let Some(tx) = tx {
-            tx.try_send(crate::rdp::embedded::InputEvent::Key { pressed, key }).ok();
+        if let Some(display) = display {
+            crate::rdp::embedded::key_event(&display, pressed, &key)?;
         }
     }
     Ok(())

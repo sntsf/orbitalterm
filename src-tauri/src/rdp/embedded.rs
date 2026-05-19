@@ -2,20 +2,13 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{self, SyncSender};
 use tauri::{AppHandle, Emitter};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::protocol::xtest::ConnectionExt as XTestExt;
 use x11rb::rust_connection::RustConnection;
-
-pub enum InputEvent {
-    Mouse { event_type: u8, button: u8, x: i16, y: i16 },
-    Key { pressed: bool, key: String },
-}
 
 pub struct EmbeddedSession {
     pub display: String,
@@ -23,9 +16,6 @@ pub struct EmbeddedSession {
     pub height: u16,
     pub dims: Arc<Mutex<(u16, u16)>>,
     pub stop: Arc<AtomicBool>,
-    /// Channel to the dedicated input thread — send() is instant and never
-    /// blocks the async runtime; all X11 I/O stays on that thread.
-    pub input_tx: SyncSender<InputEvent>,
     xvfb: std::process::Child,
     xfreerdp: Arc<Mutex<std::process::Child>>,
 }
@@ -202,53 +192,6 @@ pub fn launch(
         ));
     }
 
-    // Dedicated input thread: owns its own X11 connection so it never
-    // competes with the frame-capture thread or blocks the async runtime.
-    // The async command handlers just try_send() and return immediately.
-    let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(256);
-    let input_display = display.clone();
-    std::thread::spawn(move || {
-        let (conn, screen_num) = match RustConnection::connect(Some(&input_display)) {
-            Ok(r) => r,
-            Err(e) => { eprintln!("rdp input thread: x11rb connect: {e}"); return; }
-        };
-        let root = conn.setup().roots[screen_num].root;
-        let kb_map: HashMap<u32, u8> = match conn
-            .get_keyboard_mapping(8u8, 248u8)
-            .ok()
-            .and_then(|c| c.reply().ok())
-        {
-            Some(m) => {
-                let per = m.keysyms_per_keycode as usize;
-                m.keysyms.chunks(per).enumerate()
-                    .flat_map(|(i, syms)| {
-                        syms.iter().filter(|&&s| s != 0).map(move |&s| (s, (i as u8) + 8))
-                    })
-                    .collect()
-            }
-            None => { eprintln!("rdp input thread: get_keyboard_mapping failed"); return; }
-        };
-
-        while let Ok(ev) = input_rx.recv() {
-            match ev {
-                InputEvent::Mouse { event_type, button, x, y } => {
-                    let _ = conn.xtest_fake_input(event_type, button, 0, root, x, y, 0);
-                    let _ = conn.flush();
-                }
-                InputEvent::Key { pressed, key } => {
-                    if let Some(ks) = js_key_to_keysym(&key) {
-                        if let Some(&kc) = kb_map.get(&ks) {
-                            let ev_type = if pressed { 2u8 } else { 3u8 };
-                            let _ = conn.xtest_fake_input(ev_type, kc, 0, root, 0, 0, 0);
-                            let _ = conn.flush();
-                        }
-                    }
-                }
-            }
-        }
-        // Sender dropped (session ended) → loop exits, thread terminates.
-    });
-
     let xfreerdp = Arc::new(Mutex::new(xfreerdp));
     let xfreerdp_thread = Arc::clone(&xfreerdp);
 
@@ -355,7 +298,7 @@ pub fn launch(
         }
     });
 
-    Ok(EmbeddedSession { display, width, height, dims, stop, input_tx, xvfb, xfreerdp })
+    Ok(EmbeddedSession { display, width, height, dims, stop, xvfb, xfreerdp })
 }
 
 pub fn resize(display: &str, dims: &Arc<Mutex<(u16, u16)>>, width: u16, height: u16) -> Result<(), String> {
@@ -384,10 +327,12 @@ fn detect_session_conflict(log_path: &str, elapsed_secs: u64) -> bool {
         && (log.contains("ERRINFO_RPC_INITIATED_DISCONNECT")
             || log.contains("ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION")
             || log.contains("ERRINFO_SESSION_TAKEN_OVER"));
-    // Case 2: RPC-initiated disconnect within the first 20 s without a
-    // user-visible reason — almost always a ghost/conflicting session on
-    // Windows workstations. Using /admin bypasses this.
-    let fast_rpc = elapsed_secs < 20
+    // Case 2: RPC-initiated disconnect within the first 4 s — ghost/conflicting
+    // session. A real user session takes >4 s to authenticate, so anything
+    // faster is almost certainly a pre-auth rejection by Windows.
+    // Keeping the window tight avoids wrongly retrying with /admin when
+    // Windows kicks an authenticated user for other reasons.
+    let fast_rpc = elapsed_secs < 4
         && log.contains("ERRINFO_RPC_INITIATED_DISCONNECT")
         && !log.contains("ERRINFO_LOGOFF_BY_USER");
     explicit || fast_rpc
@@ -438,6 +383,34 @@ fn capture_frame_b64(conn: &RustConnection, root: u32, width: u16, height: u16) 
     Ok(BASE64.encode(&out))
 }
 
+pub fn mouse_event(display: &str, event_type: u8, button: u8, x: i16, y: i16) -> Result<(), String> {
+    let (conn, screen_num) = RustConnection::connect(Some(display)).map_err(|e| e.to_string())?;
+    let root = conn.setup().roots[screen_num].root;
+    // No .check() — avoids a blocking round-trip per event
+    conn.xtest_fake_input(event_type, button, 0, root, x, y, 0).map_err(|e| e.to_string())?;
+    conn.flush().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn key_event(display: &str, pressed: bool, key: &str) -> Result<(), String> {
+    let (conn, screen_num) = RustConnection::connect(Some(display)).map_err(|e| e.to_string())?;
+    let root = conn.setup().roots[screen_num].root;
+    let keysym = match js_key_to_keysym(key) {
+        Some(k) => k,
+        None => return Ok(()),
+    };
+    let mapping = conn.get_keyboard_mapping(8u8, 248u8)
+        .map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
+    let per = mapping.keysyms_per_keycode as usize;
+    let keycode = mapping.keysyms.chunks(per).enumerate()
+        .find_map(|(i, syms)| if syms.contains(&keysym) { Some((i as u8) + 8) } else { None })
+        .ok_or_else(|| format!("no keycode for keysym {keysym:#x}"))?;
+    let event_type = if pressed { 2u8 } else { 3u8 };
+    // No .check() — avoids a blocking round-trip per event
+    conn.xtest_fake_input(event_type, keycode, 0, root, 0, 0, 0).map_err(|e| e.to_string())?;
+    conn.flush().map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 fn js_key_to_keysym(key: &str) -> Option<u32> {
     Some(match key {
