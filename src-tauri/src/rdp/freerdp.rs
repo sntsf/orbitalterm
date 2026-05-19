@@ -216,17 +216,28 @@ unsafe extern "C" fn on_error(
     msg: *const std::ffi::c_char,
 ) {
     let state = &*(user_ctx as *const FrameState);
-    let msg_str = if msg.is_null() {
+    let raw = if msg.is_null() {
         "Unknown RDP error".to_string()
     } else {
         std::ffi::CStr::from_ptr(msg)
             .to_string_lossy()
             .into_owned()
     };
-    state
-        .app
-        .emit(&format!("rdp-error-{}", state.session_id), msg_str)
-        .ok();
+
+    // "SESSION_ENDED" = clean user logoff (ERRINFO_LOGOFF_BY_USER).
+    // Emit a separate event so the frontend can show a neutral "session ended"
+    // screen instead of the red error UI.
+    if raw == "SESSION_ENDED" {
+        state
+            .app
+            .emit(&format!("rdp-disconnected-{}", state.session_id), ())
+            .ok();
+    } else {
+        state
+            .app
+            .emit(&format!("rdp-error-{}", state.session_id), raw)
+            .ok();
+    }
 }
 
 // ── Public session type ───────────────────────────────────────────────────────

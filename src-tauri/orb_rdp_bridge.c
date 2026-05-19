@@ -11,7 +11,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <pthread.h>
 
 #include <freerdp/freerdp.h>
@@ -313,33 +312,16 @@ static void orb_post_disconnect(freerdp *instance)
  * Event-loop thread
  * ------------------------------------------------------------------------- */
 
-/*
- * ERRINFO_RPC_INITIATED_DISCONNECT (0x0000000C) — Windows sends this to
- * the current connection when it is about to switch sessions.  This
- * happens normally after the "close existing sessions?" selection screen:
- * Windows disconnects the selection-screen connection and then the client
- * must reconnect to reach the actual desktop.  We retry up to MAX_RECONNECTS
- * times before treating the disconnect as fatal.
- *
- * Other transient codes that warrant a silent reconnect:
- *   0x00000023  ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION
- */
-#define ERRINFO_RPC_INITIATED_DISCONNECT      0x0000000C
-#define ERRINFO_DISCONNECTED_BY_OTHER         0x00000023
-#define MAX_RECONNECTS 5
-
-static int should_reconnect(UINT32 err)
-{
-    return err == ERRINFO_RPC_INITIATED_DISCONNECT ||
-           err == ERRINFO_DISCONNECTED_BY_OTHER;
-}
+/* ERRINFO_LOGOFF_BY_USER (0x0000000C): user voluntarily ended the session.
+ * Note: in FreeRDP headers ERRINFO_RPC_INITIATED_DISCONNECT = 0x00000001,
+ * not 0x0000000C — do NOT confuse the two. */
+#define ERRINFO_LOGOFF_BY_USER 0x0000000C
 
 static void *orb_event_loop(void *arg)
 {
     OrbRdpSession *sess     = (OrbRdpSession *)arg;
     freerdp       *instance = sess->instance;
     OrbContext    *ctx      = (OrbContext *)instance->context;
-    int            reconnects = 0;
 
     if (!freerdp_connect(instance)) {
         UINT32 err = freerdp_get_last_error(instance->context);
@@ -361,34 +343,19 @@ static void *orb_event_loop(void *arg)
         if (!freerdp_check_event_handles(instance->context)) {
             UINT32 err = freerdp_error_info(instance);
 
-            if (should_reconnect(err) && reconnects < MAX_RECONNECTS &&
-                    !ctx->stop_requested) {
-                /* Brief pause so Windows can finish session housekeeping
-                 * before we reconnect.  Without this the second connect
-                 * sometimes lands back on the selection screen. */
-                struct timespec ts = { 0, 800000000L }; /* 800 ms */
-                nanosleep(&ts, NULL);
-
-                reconnects++;
-                if (freerdp_reconnect(instance)) {
-                    /* freerdp_reconnect calls PostConnect → gdi_init again,
-                     * so EndPaint is still wired.  Resume the event loop. */
-                    continue;
-                }
-                /* reconnect failed — fall through to fatal error */
-            }
-
-            if (err && err != 0xFFFF) {
+            if (err == ERRINFO_LOGOFF_BY_USER) {
+                /* Clean user logoff — notify frontend with a neutral message,
+                 * no error UI, just "session ended". */
+                report_error(ctx, "SESSION_ENDED");
+            } else if (err && err != 0xFFFF) {
                 char msg[128];
                 snprintf(msg, sizeof(msg),
                          "RDP sesión terminada por el servidor (0x%08X)", err);
                 report_error(ctx, "%s", msg);
             }
+            /* err == 0: clean disconnect with no explicit code — no message */
             break;
         }
-
-        /* Reset reconnect budget once we are stably pumping events */
-        reconnects = 0;
     }
 
     freerdp_disconnect(instance);

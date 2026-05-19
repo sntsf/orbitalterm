@@ -77,6 +77,10 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
     listen<string>(`rdp-error-${sessionId}`, (event) => {
       onSessionError(event.payload);
     }).then((fn) => unlistens.push(fn));
+    // Clean user logoff — show a neutral "session ended" message, not the red error UI.
+    listen(`rdp-disconnected-${sessionId}`, () => {
+      onSessionError("SESSION_ENDED");
+    }).then((fn) => unlistens.push(fn));
     return () => { unlistens.forEach((fn) => fn()); };
   }, [sessionId, onSessionError]);
 
@@ -332,6 +336,23 @@ export function RdpPane({ tab }: RdpPaneProps) {
       )}
 
       {status === "error" && (() => {
+        if (errorMsg === "SESSION_ENDED") {
+          return (
+            <div className="flex flex-col items-center gap-3 max-w-sm text-center">
+              <CheckCircle size={28} className="text-[var(--color-text-muted)] opacity-50" />
+              <p className="text-sm text-[var(--color-text-muted)]">
+                Sesión finalizada
+              </p>
+              <button
+                onClick={() => connect(true)}
+                className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
+              >
+                <RefreshCw size={12} />
+                Reconectar
+              </button>
+            </div>
+          );
+        }
         if (isMissingPassword(errorMsg)) {
           return (
             <div className="flex flex-col items-center gap-3 max-w-sm text-center">
