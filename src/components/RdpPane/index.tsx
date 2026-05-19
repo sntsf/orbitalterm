@@ -199,21 +199,30 @@ export function RdpPane({ tab }: RdpPaneProps) {
   const [frameSize, setFrameSize] = useState({ width: 1280, height: 800 });
   const sessionIdRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Generation counter: incremented each time a new connect() is initiated
+  // (including by the useEffect cleanup on unmount/re-mount). Any in-flight
+  // connect() that finds its generation outdated discards the session it
+  // created. This prevents React 18 StrictMode's double-invoke from opening
+  // two simultaneous RDP connections to the same server.
+  const connectGenRef = useRef(0);
   const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
 
   const connect = async (isRetry = false, adminMode = false) => {
-    // Kill previous session before retrying so Xvfb is freed and Windows
-    // has time to clean up before we create a new session.
+    const gen = ++connectGenRef.current;
+
     if (sessionIdRef.current) {
       await disconnectRdp(sessionIdRef.current).catch(() => {});
       sessionIdRef.current = null;
     }
+    // If a newer connect() started while we were awaiting, abort.
+    if (gen !== connectGenRef.current) return;
+
     if (isRetry) {
-      // Give Windows ~5s to release the session after the previous disconnect.
       setStatus("connecting");
       setErrorMsg("");
       setTabStatus(tab.id, "connecting");
       await new Promise((r) => setTimeout(r, 5000));
+      if (gen !== connectGenRef.current) return;
     }
 
     setStatus("connecting");
@@ -225,6 +234,13 @@ export function RdpPane({ tab }: RdpPaneProps) {
       const w = el ? Math.max(640, Math.floor(el.clientWidth)) : 1280;
       const h = el ? Math.max(480, Math.floor(el.clientHeight)) : 800;
       const result = await connectRdp(tab.connection_id, w, h, adminMode);
+
+      if (gen !== connectGenRef.current) {
+        // Superseded — discard this session so we don't leak an RDP connection.
+        disconnectRdp(result.session_id).catch(() => {});
+        return;
+      }
+
       sessionIdRef.current = result.session_id;
       setTabSessionId(tab.id, result.session_id);
       setEmbedded(result.embedded);
@@ -234,17 +250,22 @@ export function RdpPane({ tab }: RdpPaneProps) {
       setStatus("connected");
       setTabStatus(tab.id, "connected");
     } catch (err) {
-      setErrorMsg(String(err));
-      setStatus("error");
-      setTabStatus(tab.id, "error");
+      if (gen === connectGenRef.current) {
+        setErrorMsg(String(err));
+        setStatus("error");
+        setTabStatus(tab.id, "error");
+      }
     }
   };
 
   useEffect(() => {
     connect();
     return () => {
+      // Bump generation so any pending connect() discards its result.
+      connectGenRef.current++;
       if (sessionIdRef.current) {
         disconnectRdp(sessionIdRef.current).catch(console.error);
+        sessionIdRef.current = null;
       }
     };
   }, [tab.id]); // eslint-disable-line react-hooks/exhaustive-deps
