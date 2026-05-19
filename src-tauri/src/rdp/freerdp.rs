@@ -198,7 +198,7 @@ fn spawn_encoder(app: AppHandle, session_id: String, rx: mpsc::Receiver<FrameMsg
     std::thread::spawn(move || {
         while let Ok(msg) = rx.recv() {
             let mut jpeg_buf = Vec::new();
-            if JpegEncoder::new_with_quality(&mut jpeg_buf, 80)
+            if JpegEncoder::new_with_quality(&mut jpeg_buf, 70)
                 .encode(&msg.rgb, msg.w, msg.h, ExtendedColorType::Rgb8)
                 .is_ok()
             {
@@ -340,9 +340,9 @@ pub fn launch(
     let c_password = CString::new(password).map_err(|e| e.to_string())?;
     let c_domain   = CString::new(domain).map_err(|e| e.to_string())?;
 
-    // Bounded channel: capacity 2 gives the encoder a small buffer but
-    // drops frames (via try_send) rather than letting them accumulate.
-    let (tx, rx) = mpsc::sync_channel::<FrameMsg>(2);
+    // Bounded channel: capacity 4 gives the encoder a buffer across ~65ms
+    // of encoding time before frames are dropped via try_send.
+    let (tx, rx) = mpsc::sync_channel::<FrameMsg>(4);
 
     let state = Box::new(FrameState {
         app: app.clone(),

@@ -106,10 +106,10 @@ static BOOL orb_end_paint(rdpContext *context)
         (int64_t)(now.tv_sec  - ctx->last_frame_ts.tv_sec)  * 1000000LL +
         (int64_t)(now.tv_nsec - ctx->last_frame_ts.tv_nsec) / 1000LL;
     if (elapsed_us < 16000) {
-        /* Still reset the dirty rect so it doesn't accumulate stale regions. */
-        if (gdi->primary && gdi->primary->hdc &&
-            gdi->primary->hdc->hwnd && gdi->primary->hdc->hwnd->invalid)
-            gdi->primary->hdc->hwnd->invalid->null = TRUE;
+        /* Skip this frame — leave the dirty rect untouched so FreeRDP
+         * automatically merges subsequent updates into it.  The next
+         * processed frame will cover the union of all skipped dirty rects,
+         * ensuring no screen region is permanently missed. */
         return TRUE;
     }
     ctx->last_frame_ts = now;
