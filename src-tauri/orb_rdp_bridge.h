@@ -22,7 +22,12 @@ typedef struct OrbRdpSession OrbRdpSession;
  */
 typedef void (*orb_frame_fn )(void *user_ctx,
                                const uint8_t *data,
-                               uint32_t w, uint32_t h, uint32_t stride);
+                               uint32_t x,      /* dirty rect left */
+                               uint32_t y,      /* dirty rect top */
+                               uint32_t w,      /* dirty rect width */
+                               uint32_t h,      /* dirty rect height */
+                               uint32_t stride  /* full framebuffer stride */
+                               );
 typedef void (*orb_error_fn )(void *user_ctx, const char *msg);
 
 /*

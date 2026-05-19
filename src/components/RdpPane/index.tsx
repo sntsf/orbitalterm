@@ -65,14 +65,15 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
   // Frame + error listeners
   useEffect(() => {
     const unlistens: UnlistenFn[] = [];
-    listen<string>(`rdp-frame-${sessionId}`, (event) => {
+    listen<{ x: number; y: number; data: string }>(`rdp-frame-${sessionId}`, (event) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
+      const { x, y, data } = event.payload;
       const img = new Image();
-      img.onload = () => ctx.drawImage(img, 0, 0);
-      img.src = `data:image/jpeg;base64,${event.payload}`;
+      img.onload = () => ctx.drawImage(img, x, y);
+      img.src = `data:image/jpeg;base64,${data}`;
     }).then((fn) => unlistens.push(fn));
     listen<string>(`rdp-error-${sessionId}`, (event) => {
       onSessionError(event.payload);

@@ -10,6 +10,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
@@ -134,9 +135,14 @@ pub fn code_to_scancode(code: &str) -> Option<(u8, bool)> {
 #[allow(non_camel_case_types)]
 pub enum OrbRdpSession {}
 
+/// Callback fired by the C bridge for each dirty-rect paint.
+/// `data` points to the full BGRX32 framebuffer; `(x,y,w,h)` is the dirty
+/// rectangle; `stride` is the full-framebuffer row stride in bytes.
 pub type OrbFrameFn = unsafe extern "C" fn(
     user_ctx: *mut std::ffi::c_void,
     data: *const u8,
+    x: u32,
+    y: u32,
     w: u32,
     h: u32,
     stride: u32,
@@ -166,49 +172,92 @@ extern "C" {
     fn orb_set_clipboard(session: *mut OrbRdpSession, text: *const std::ffi::c_char);
 }
 
+// ── Encoder pipeline ──────────────────────────────────────────────────────────
+
+/// A dirty-rect frame with pixels already converted to RGB.
+struct FrameMsg {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    rgb: Vec<u8>,
+}
+
+/// Payload emitted to the frontend for each rendered frame.
+#[derive(serde::Serialize)]
+struct FramePayload {
+    x: u32,
+    y: u32,
+    data: String,
+}
+
+/// Spawns a background thread that JPEG-encodes frames and emits Tauri events.
+/// The thread exits automatically when `rx` is closed (i.e. when FrameState
+/// and its `tx` are dropped).
+fn spawn_encoder(app: AppHandle, session_id: String, rx: mpsc::Receiver<FrameMsg>) {
+    std::thread::spawn(move || {
+        while let Ok(msg) = rx.recv() {
+            let mut jpeg_buf = Vec::new();
+            if JpegEncoder::new_with_quality(&mut jpeg_buf, 80)
+                .encode(&msg.rgb, msg.w, msg.h, ExtendedColorType::Rgb8)
+                .is_ok()
+            {
+                let payload = FramePayload {
+                    x: msg.x,
+                    y: msg.y,
+                    data: BASE64.encode(&jpeg_buf),
+                };
+                app.emit(&format!("rdp-frame-{}", session_id), payload).ok();
+            }
+        }
+    });
+}
+
 // ── Callback state ────────────────────────────────────────────────────────────
 
 struct FrameState {
     app: AppHandle,
     session_id: String,
+    /// Bounded channel (capacity 2): on_frame sends here without blocking;
+    /// frames are dropped when the encoder falls behind rather than backing up.
+    tx: mpsc::SyncSender<FrameMsg>,
 }
 
+/// Called on the FreeRDP event-loop thread for each dirty-rect update.
+/// Must return as fast as possible — encoding happens in the encoder thread.
 unsafe extern "C" fn on_frame(
     user_ctx: *mut std::ffi::c_void,
     data: *const u8,
+    x: u32,
+    y: u32,
     w: u32,
     h: u32,
     stride: u32,
 ) {
+    if w == 0 || h == 0 {
+        return;
+    }
     let state = &*(user_ctx as *const FrameState);
-    let n_bytes = (stride * h) as usize;
-    let raw = std::slice::from_raw_parts(data, n_bytes);
 
-    // Convert BGRX → RGB and encode as JPEG
+    // Slice only the rows we need to avoid reading the full framebuffer.
+    let row_offset = (y * stride) as usize;
+    let row_bytes  = (h * stride) as usize;
+    let raw = std::slice::from_raw_parts(data.add(row_offset), row_bytes);
+
+    // Convert BGRX → RGB for the dirty sub-image.
     let mut rgb = Vec::with_capacity((w * h * 3) as usize);
     for row in 0..h as usize {
-        let row_start = row * stride as usize;
-        for px in 0..w as usize {
-            let base = row_start + px * 4;
-            if base + 3 < n_bytes {
-                rgb.push(raw[base + 2]); // R
-                rgb.push(raw[base + 1]); // G
-                rgb.push(raw[base]);     // B
-            }
+        let row_start = row * stride as usize + x as usize * 4;
+        let row_slice = &raw[row_start..row_start + w as usize * 4];
+        for chunk in row_slice.chunks_exact(4) {
+            rgb.push(chunk[2]); // R  (BGRX: B=0, G=1, R=2, X=3)
+            rgb.push(chunk[1]); // G
+            rgb.push(chunk[0]); // B
         }
     }
 
-    let mut jpeg_buf = Vec::new();
-    if JpegEncoder::new_with_quality(&mut jpeg_buf, 80)
-        .encode(&rgb, w, h, ExtendedColorType::Rgb8)
-        .is_ok()
-    {
-        let b64 = BASE64.encode(&jpeg_buf);
-        state
-            .app
-            .emit(&format!("rdp-frame-{}", state.session_id), b64)
-            .ok();
-    }
+    // Non-blocking: drop the frame if the encoder is busy.
+    let _ = state.tx.try_send(FrameMsg { x, y, w, h, rgb });
 }
 
 unsafe extern "C" fn on_error(
@@ -263,8 +312,8 @@ impl Drop for FreerdpSession {
             unsafe { orb_session_free(self.ptr) };
             self.ptr = std::ptr::null_mut();
         }
-        // _state is dropped after ptr is freed — safe because orb_session_free
-        // joins the event-loop thread before returning, ensuring no more callbacks.
+        // _state (and its tx) are dropped here, closing the encoder channel.
+        // The encoder thread exits when it drains the channel.
     }
 }
 
@@ -291,11 +340,19 @@ pub fn launch(
     let c_password = CString::new(password).map_err(|e| e.to_string())?;
     let c_domain   = CString::new(domain).map_err(|e| e.to_string())?;
 
+    // Bounded channel: capacity 2 gives the encoder a small buffer but
+    // drops frames (via try_send) rather than letting them accumulate.
+    let (tx, rx) = mpsc::sync_channel::<FrameMsg>(2);
+
     let state = Box::new(FrameState {
-        app,
+        app: app.clone(),
         session_id: session_id.to_string(),
+        tx,
     });
     let user_ctx = &*state as *const FrameState as *mut std::ffi::c_void;
+
+    // Spawn encoder before connecting so frames are never dropped on startup.
+    spawn_encoder(app, session_id.to_string(), rx);
 
     let ptr = unsafe {
         orb_session_new(

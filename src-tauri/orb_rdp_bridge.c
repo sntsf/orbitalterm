@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <time.h>
 
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
@@ -46,6 +47,8 @@ typedef struct {
     pthread_mutex_t clipboard_mutex;
 
     volatile int   stop_requested;
+
+    struct timespec last_frame_ts; /* for 60fps rate-limiter */
 
     struct OrbRdpSession *session;
 
@@ -93,18 +96,57 @@ static BOOL orb_end_paint(rdpContext *context)
     OrbContext *ctx = (OrbContext *)context;
     rdpGdi     *gdi = context->gdi;
 
-    if (!gdi || !gdi->primary_buffer)
+    if (!gdi || !gdi->primary_buffer || !ctx->on_frame)
         return TRUE;
 
-    if (ctx->on_frame) {
-        ctx->on_frame(
-            ctx->user_ctx,
-            gdi->primary_buffer,
-            (uint32_t)gdi->width,
-            (uint32_t)gdi->height,
-            (uint32_t)gdi->stride
-        );
+    /* Rate-limit to 60 fps: skip frames that arrive within 16 ms of the last. */
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    int64_t elapsed_us =
+        (int64_t)(now.tv_sec  - ctx->last_frame_ts.tv_sec)  * 1000000LL +
+        (int64_t)(now.tv_nsec - ctx->last_frame_ts.tv_nsec) / 1000LL;
+    if (elapsed_us < 16000) {
+        /* Still reset the dirty rect so it doesn't accumulate stale regions. */
+        if (gdi->primary && gdi->primary->hwnd && gdi->primary->hwnd->invalid)
+            gdi->primary->hwnd->invalid->null = TRUE;
+        return TRUE;
     }
+    ctx->last_frame_ts = now;
+
+    /* Determine dirty rectangle.
+     * FreeRDP tracks the region modified since the previous EndPaint call
+     * in gdi->primary->hwnd->invalid.  Fall back to the full frame if the
+     * region is not available or marked null. */
+    uint32_t dx = 0, dy = 0;
+    uint32_t dw = (uint32_t)gdi->width;
+    uint32_t dh = (uint32_t)gdi->height;
+
+    if (gdi->primary && gdi->primary->hwnd) {
+        HGDI_RGN inv = gdi->primary->hwnd->invalid;
+        if (inv && !inv->null && inv->w > 0 && inv->h > 0) {
+            dx = (uint32_t)(inv->x > 0 ? inv->x : 0);
+            dy = (uint32_t)(inv->y > 0 ? inv->y : 0);
+            dw = (uint32_t)inv->w;
+            dh = (uint32_t)inv->h;
+            /* Clamp to framebuffer bounds */
+            if (dx + dw > (uint32_t)gdi->width)
+                dw = (uint32_t)gdi->width > dx ? (uint32_t)gdi->width - dx : 0;
+            if (dy + dh > (uint32_t)gdi->height)
+                dh = (uint32_t)gdi->height > dy ? (uint32_t)gdi->height - dy : 0;
+        }
+        /* Reset dirty rect — FreeRDP merges into it; we own the reset now. */
+        if (inv) { inv->x = 0; inv->y = 0; inv->w = 0; inv->h = 0; inv->null = TRUE; }
+    }
+
+    if (dw == 0 || dh == 0)
+        return TRUE;
+
+    ctx->on_frame(
+        ctx->user_ctx,
+        gdi->primary_buffer,
+        dx, dy, dw, dh,
+        (uint32_t)gdi->stride
+    );
     return TRUE;
 }
 
