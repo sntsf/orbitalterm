@@ -184,7 +184,7 @@ struct FrameMsg {
 }
 
 /// Payload emitted to the frontend for each rendered frame.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 struct FramePayload {
     x: u32,
     y: u32,
