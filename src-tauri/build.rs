@@ -34,7 +34,7 @@ fn build_rdp_bridge() {
     let mut build = cc::Build::new();
     build
         .file("orb_rdp_bridge.c")
-        .std("c11")
+        .std("gnu11")
         .opt_level(2)
         .flag("-Wall")
         .flag("-Wextra")

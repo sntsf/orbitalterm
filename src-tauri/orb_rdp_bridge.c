@@ -2,14 +2,12 @@
  * orb_rdp_bridge.c – libfreerdp3 bridge for OrbitalTerm
  *
  * Implements the API declared in orb_rdp_bridge.h.
- * Compiles with:
- *   cc -std=c11 $(pkg-config --cflags freerdp3 freerdp-client3) \
- *      orb_rdp_bridge.c -o orb_rdp_bridge.o \
- *      $(pkg-config --libs freerdp3 freerdp-client3 winpr3)
+ * Build requires: sudo apt install libfreerdp-dev3 libfreerdp-client-dev3
  */
 
 #include "orb_rdp_bridge.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,12 +15,10 @@
 
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
-#include <freerdp/client/cmdline.h>
 #include <freerdp/client/channels.h>
 #include <freerdp/channels/channels.h>
 #include <freerdp/input.h>
 #include <freerdp/settings.h>
-#include <freerdp/log.h>
 
 /* DISP channel for dynamic resize */
 #include <freerdp/client/disp.h>
@@ -31,39 +27,30 @@
 #include <freerdp/client/cliprdr.h>
 #include <freerdp/channels/cliprdr.h>
 
-/* winpr threading primitives (used by freerdp itself) */
+/* winpr threading */
 #include <winpr/synch.h>
 #include <winpr/thread.h>
 
 /* -------------------------------------------------------------------------
- * Extended client context
+ * Extended context  (rdpContext MUST be the first member)
  * ------------------------------------------------------------------------- */
 
 typedef struct {
-    /* Must be first – freerdp casts between rdpClientContext and rdpContext */
-    rdpClientContext base;
+    rdpContext base; /* freerdp casts context pointers — keep this first */
 
-    /* Our additions */
     orb_frame_fn  on_frame;
     orb_error_fn  on_error;
     void         *user_ctx;
 
-    /* Clipboard text pending push to remote (NULL = nothing pending) */
-    char         *pending_clipboard;
+    char          *pending_clipboard;
     pthread_mutex_t clipboard_mutex;
 
-    /* Set to 1 to request the event loop to exit */
-    volatile int  stop_requested;
+    volatile int   stop_requested;
 
-    /* The owning OrbRdpSession (set before connect) */
     struct OrbRdpSession *session;
 
-    /* DISP virtual channel handle */
-    DispClientContext *disp;
-
-    /* Cliprdr virtual channel handle */
+    DispClientContext    *disp;
     CliprdrClientContext *cliprdr;
-
 } OrbContext;
 
 /* -------------------------------------------------------------------------
@@ -73,11 +60,11 @@ typedef struct {
 struct OrbRdpSession {
     freerdp     *instance;
     pthread_t    thread;
-    volatile int alive; /* 1 while thread is running */
+    volatile int alive;
 };
 
 /* -------------------------------------------------------------------------
- * Helper: fire error callback and mark session dead
+ * Helpers
  * ------------------------------------------------------------------------- */
 
 static void report_error(OrbContext *ctx, const char *fmt, ...)
@@ -89,6 +76,12 @@ static void report_error(OrbContext *ctx, const char *fmt, ...)
     va_end(ap);
     if (ctx->on_error)
         ctx->on_error(ctx->user_ctx, buf);
+}
+
+/* Convenience: get settings from context (works after freerdp_context_new) */
+static inline rdpSettings *orb_settings(OrbContext *ctx)
+{
+    return ctx->base.settings;
 }
 
 /* -------------------------------------------------------------------------
@@ -116,50 +109,49 @@ static BOOL orb_end_paint(rdpContext *context)
 }
 
 /* -------------------------------------------------------------------------
- * DISP channel callbacks
+ * DISP channel
  * ------------------------------------------------------------------------- */
 
 static UINT orb_disp_caps(DispClientContext *disp,
-                            UINT32 maxNumMonitors,
-                            UINT32 maxMonitorAreaFactorA,
-                            UINT32 maxMonitorAreaFactorB)
+                           UINT32 maxMonitors,
+                           UINT32 factorA, UINT32 factorB)
 {
-    (void)disp; (void)maxNumMonitors;
-    (void)maxMonitorAreaFactorA; (void)maxMonitorAreaFactorB;
+    (void)disp; (void)maxMonitors; (void)factorA; (void)factorB;
     return CHANNEL_RC_OK;
 }
 
 /* -------------------------------------------------------------------------
- * Clipboard channel callbacks (minimal – text push only)
+ * Clipboard channel callbacks
  * ------------------------------------------------------------------------- */
 
 static UINT orb_cliprdr_monitor_ready(CliprdrClientContext *cliprdr,
-                                       const CLIPRDR_MONITOR_READY *monitorReady)
+                                       const CLIPRDR_MONITOR_READY *ev)
 {
-    (void)monitorReady;
+    (void)ev;
     OrbContext *ctx = (OrbContext *)cliprdr->custom;
 
-    /* Announce we can provide CF_UNICODETEXT */
-    CLIPRDR_CAPABILITIES caps = { 0 };
+    /* Announce capabilities */
     CLIPRDR_GENERAL_CAPABILITY_SET genCap = { 0 };
-    genCap.capabilitySetType = CB_CAPSTYPE_GENERAL;
+    genCap.capabilitySetType   = CB_CAPSTYPE_GENERAL;
     genCap.capabilitySetLength = 12;
-    genCap.version = CB_CAPS_VERSION_2;
-    genCap.generalFlags = CB_USE_LONG_FORMAT_NAMES;
+    genCap.version             = CB_CAPS_VERSION_2;
+    genCap.generalFlags        = CB_USE_LONG_FORMAT_NAMES;
+
+    CLIPRDR_CAPABILITIES caps = { 0 };
     caps.cCapabilitiesSets = 1;
-    caps.capabilitySets = (CLIPRDR_CAPABILITY_SET *)&genCap;
+    caps.capabilitySets    = (CLIPRDR_CAPABILITY_SET *)&genCap;
     cliprdr->ClientCapabilities(cliprdr, &caps);
 
-    /* If there is already pending clipboard text, advertise it now */
+    /* Advertise CF_UNICODETEXT if we already have pending text */
     pthread_mutex_lock(&ctx->clipboard_mutex);
     int has_pending = (ctx->pending_clipboard != NULL);
     pthread_mutex_unlock(&ctx->clipboard_mutex);
 
     if (has_pending) {
-        CLIPRDR_FORMAT_LIST fmt = { 0 };
         CLIPRDR_FORMAT entry = { CF_UNICODETEXT, NULL };
+        CLIPRDR_FORMAT_LIST fmt = { 0 };
         fmt.numFormats = 1;
-        fmt.formats = &entry;
+        fmt.formats    = &entry;
         cliprdr->ClientFormatList(cliprdr, &fmt);
     }
 
@@ -167,12 +159,12 @@ static UINT orb_cliprdr_monitor_ready(CliprdrClientContext *cliprdr,
 }
 
 static UINT orb_cliprdr_format_list(CliprdrClientContext *cliprdr,
-                                     const CLIPRDR_FORMAT_LIST *formatList)
+                                     const CLIPRDR_FORMAT_LIST *list)
 {
-    /* Remote is advertising its formats – just acknowledge */
-    (void)formatList;
+    (void)list;
+    /* Acknowledge remote format advertisement */
     CLIPRDR_FORMAT_LIST_RESPONSE resp = { 0 };
-    resp.msgFlags = CB_RESPONSE_OK;
+    resp.common.msgFlags = CB_RESPONSE_OK;
     cliprdr->ClientFormatListResponse(cliprdr, &resp);
     return CHANNEL_RC_OK;
 }
@@ -184,7 +176,7 @@ static UINT orb_cliprdr_format_data_request(CliprdrClientContext *cliprdr,
 
     if (req->requestedFormatId != CF_UNICODETEXT) {
         CLIPRDR_FORMAT_DATA_RESPONSE resp = { 0 };
-        resp.msgFlags = CB_RESPONSE_FAIL;
+        resp.common.msgFlags = CB_RESPONSE_FAIL;
         cliprdr->ClientFormatDataResponse(cliprdr, &resp);
         return CHANNEL_RC_OK;
     }
@@ -195,29 +187,26 @@ static UINT orb_cliprdr_format_data_request(CliprdrClientContext *cliprdr,
 
     if (!text) {
         CLIPRDR_FORMAT_DATA_RESPONSE resp = { 0 };
-        resp.msgFlags = CB_RESPONSE_FAIL;
+        resp.common.msgFlags = CB_RESPONSE_FAIL;
         cliprdr->ClientFormatDataResponse(cliprdr, &resp);
         return CHANNEL_RC_OK;
     }
 
-    /* Convert UTF-8 → UTF-16LE */
+    /* Convert UTF-8 → UTF-16LE (ASCII fast-path, good enough for typical text) */
     size_t len_utf8 = strlen(text);
-    /* worst-case: each char → 2 UTF-16 code units + NUL */
-    size_t buf_size = (len_utf8 + 1) * 2;
-    BYTE *utf16 = calloc(1, buf_size);
+    size_t buf_bytes = (len_utf8 + 1) * 2; /* +1 for NUL, *2 for UTF-16 */
+    BYTE *utf16 = (BYTE *)calloc(1, buf_bytes);
     if (utf16) {
-        size_t written = 0;
-        const char *src = text;
+        const unsigned char *src = (const unsigned char *)text;
         WCHAR *dst = (WCHAR *)utf16;
-        /* Simple ASCII fast-path (good enough for most clipboard text) */
-        while (*src && written < buf_size / 2 - 1) {
-            *dst++ = (WCHAR)(unsigned char)*src++;
-            written++;
-        }
+        size_t n = 0;
+        while (*src && n < len_utf8) { *dst++ = (WCHAR)*src++; n++; }
+        *dst = 0; /* NUL-terminate */
+
         CLIPRDR_FORMAT_DATA_RESPONSE resp = { 0 };
-        resp.msgFlags = CB_RESPONSE_OK;
+        resp.common.msgFlags    = CB_RESPONSE_OK;
+        resp.common.dataLen     = (UINT32)((n + 1) * 2);
         resp.requestedFormatData = utf16;
-        resp.dataLen = (UINT32)((written + 1) * 2); /* include NUL */
         cliprdr->ClientFormatDataResponse(cliprdr, &resp);
         free(utf16);
     }
@@ -227,68 +216,66 @@ static UINT orb_cliprdr_format_data_request(CliprdrClientContext *cliprdr,
 }
 
 /* -------------------------------------------------------------------------
- * Channel lifecycle – called by freerdp when VCs open/close
+ * Channel lifecycle – wired up via PubSub in PreConnect
+ * The handler signature changed in FreeRDP 3: first arg is rdpContext*.
  * ------------------------------------------------------------------------- */
 
-static void orb_channel_connected(freerdp *instance,
+static void orb_channel_connected(rdpContext *context,
                                    ChannelConnectedEventArgs *e)
 {
-    OrbContext *ctx = (OrbContext *)instance->context;
+    OrbContext *ctx = (OrbContext *)context;
 
     if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
         ctx->disp = (DispClientContext *)e->pInterface;
         ctx->disp->DisplayControlCaps = orb_disp_caps;
     } else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
         ctx->cliprdr = (CliprdrClientContext *)e->pInterface;
-        ctx->cliprdr->custom = ctx;
-        ctx->cliprdr->MonitorReady        = orb_cliprdr_monitor_ready;
-        ctx->cliprdr->ServerFormatList    = orb_cliprdr_format_list;
+        ctx->cliprdr->custom                  = ctx;
+        ctx->cliprdr->MonitorReady            = orb_cliprdr_monitor_ready;
+        ctx->cliprdr->ServerFormatList        = orb_cliprdr_format_list;
         ctx->cliprdr->ServerFormatDataRequest = orb_cliprdr_format_data_request;
     }
-
-    freerdp_client_OnChannelConnectedEventHandler(instance->context, e);
 }
 
-static void orb_channel_disconnected(freerdp *instance,
+static void orb_channel_disconnected(rdpContext *context,
                                       ChannelDisconnectedEventArgs *e)
 {
-    OrbContext *ctx = (OrbContext *)instance->context;
+    OrbContext *ctx = (OrbContext *)context;
 
     if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0)
         ctx->disp = NULL;
     else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0)
         ctx->cliprdr = NULL;
-
-    freerdp_client_OnChannelDisconnectedEventHandler(instance->context, e);
 }
 
 /* -------------------------------------------------------------------------
- * PreConnect – configure settings before connecting
+ * PreConnect
  * ------------------------------------------------------------------------- */
 
 static BOOL orb_pre_connect(freerdp *instance)
 {
-    rdpSettings *settings = instance->settings;
+    OrbContext   *ctx      = (OrbContext *)instance->context;
+    rdpSettings  *settings = orb_settings(ctx);
 
-    /* Request virtual channels */
+    /* Load channel plugins (cliprdr, disp, …) based on settings flags */
     freerdp_client_load_addins(instance->context->channels, settings);
 
-    /* NLA / TLS negotiation – allow both for compatibility */
-    freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity,   TRUE);
-    freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity,   TRUE);
-    freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity,   TRUE);
+    /* Security: allow NLA, TLS, classic RDP; ignore cert errors */
+    freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity,       TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity,       TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity,       TRUE);
     freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
 
-    /* Use RemoteFX / GFX if server supports it; fall back to basic RDP */
-    freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, TRUE);
-    freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec,  TRUE);
-    freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth,   32);
+    /* Video pipeline */
+    freerdp_settings_set_bool(settings,   FreeRDP_SupportGraphicsPipeline, TRUE);
+    freerdp_settings_set_bool(settings,   FreeRDP_RemoteFxCodec,           TRUE);
+    freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth,              32);
 
-    /* Disable audio (we don't handle it) */
+    /* No audio */
     freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_AudioCapture,  FALSE);
 
-    /* Register channel event handlers */
+    /* Subscribe to channel open/close events */
     PubSub_SubscribeChannelConnected(
         instance->context->pubSub,
         (pChannelConnectedEventHandler)orb_channel_connected);
@@ -300,7 +287,7 @@ static BOOL orb_pre_connect(freerdp *instance)
 }
 
 /* -------------------------------------------------------------------------
- * PostConnect – initialise GDI / EndPaint after connection is established
+ * PostConnect
  * ------------------------------------------------------------------------- */
 
 static BOOL orb_post_connect(freerdp *instance)
@@ -308,14 +295,12 @@ static BOOL orb_post_connect(freerdp *instance)
     if (!gdi_init(instance, PIXEL_FORMAT_BGRX32))
         return FALSE;
 
-    /* Hook our EndPaint into the update chain */
     instance->context->update->EndPaint = orb_end_paint;
-
     return TRUE;
 }
 
 /* -------------------------------------------------------------------------
- * PostDisconnect – clean up GDI
+ * PostDisconnect
  * ------------------------------------------------------------------------- */
 
 static void orb_post_disconnect(freerdp *instance)
@@ -329,42 +314,33 @@ static void orb_post_disconnect(freerdp *instance)
 
 static void *orb_event_loop(void *arg)
 {
-    OrbRdpSession *sess = (OrbRdpSession *)arg;
+    OrbRdpSession *sess     = (OrbRdpSession *)arg;
     freerdp       *instance = sess->instance;
-    OrbContext    *ctx = (OrbContext *)instance->context;
+    OrbContext    *ctx      = (OrbContext *)instance->context;
 
-    /* Connect (blocks until connected or failed) */
-    BOOL ok = freerdp_connect(instance);
-    if (!ok) {
+    if (!freerdp_connect(instance)) {
         UINT32 err = freerdp_get_last_error(instance->context);
         char msg[256];
-        snprintf(msg, sizeof(msg),
-                 "RDP connect failed: %s",
+        snprintf(msg, sizeof(msg), "RDP connect failed: %s",
                  freerdp_get_last_error_string(err));
         report_error(ctx, "%s", msg);
         sess->alive = 0;
         return NULL;
     }
 
-    /* Pump events until disconnect requested or server closes */
     while (!ctx->stop_requested) {
         HANDLE handles[64];
-        DWORD  count = freerdp_get_event_handles(instance->context,
-                                                  handles, 64);
-        if (count == 0)
-            break;
+        DWORD  count = freerdp_get_event_handles(instance->context, handles, 64);
+        if (count == 0) break;
 
-        DWORD status = WaitForMultipleObjects(count, handles, FALSE, 100 /* ms */);
-        (void)status;
+        WaitForMultipleObjects(count, handles, FALSE, 100);
 
         if (!freerdp_check_event_handles(instance->context)) {
-            if (freerdp_get_disconnect_ultimatum(instance->context) ==
-                    Disconnect_Ultimatum_provider_initiated) {
-                /* Server disconnected us */
-                UINT32 err = freerdp_error_info(instance);
-                char msg[256];
+            UINT32 err = freerdp_error_info(instance);
+            if (err && err != 0xFFFF) {
+                char msg[128];
                 snprintf(msg, sizeof(msg),
-                         "RDP disconnected by server (error 0x%08X)", err);
+                         "RDP sesión terminada por el servidor (0x%08X)", err);
                 report_error(ctx, "%s", msg);
             }
             break;
@@ -392,10 +368,9 @@ OrbRdpSession *orb_session_new(const char   *host,
                                 orb_error_fn  on_error,
                                 void         *user_ctx)
 {
-    OrbRdpSession *sess = calloc(1, sizeof(*sess));
+    OrbRdpSession *sess = (OrbRdpSession *)calloc(1, sizeof(*sess));
     if (!sess) return NULL;
 
-    /* Allocate freerdp instance with our extended context */
     freerdp *instance = freerdp_new();
     if (!instance) { free(sess); return NULL; }
 
@@ -410,43 +385,37 @@ OrbRdpSession *orb_session_new(const char   *host,
         return NULL;
     }
 
-    /* Initialise our custom fields */
-    OrbContext *ctx = (OrbContext *)instance->context;
+    OrbContext  *ctx      = (OrbContext *)instance->context;
+    rdpSettings *settings = orb_settings(ctx);
+
     ctx->on_frame  = on_frame;
     ctx->on_error  = on_error;
     ctx->user_ctx  = user_ctx;
     ctx->session   = sess;
     pthread_mutex_init(&ctx->clipboard_mutex, NULL);
 
-    /* Apply connection settings */
-    rdpSettings *settings = instance->settings;
     freerdp_settings_set_string(settings, FreeRDP_ServerHostname, host);
     freerdp_settings_set_uint32(settings, FreeRDP_ServerPort,     port);
     freerdp_settings_set_string(settings, FreeRDP_Username,       username);
     freerdp_settings_set_string(settings, FreeRDP_Password,       password);
     if (domain && domain[0])
         freerdp_settings_set_string(settings, FreeRDP_Domain, domain);
-    freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth,   width);
-    freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight,  height);
+    freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth,  width);
+    freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, height);
 
     if (console_mode)
         freerdp_settings_set_bool(settings, FreeRDP_ConsoleSession, TRUE);
 
-    /* Enable DISP and clipboard VCs */
     freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, TRUE);
     freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard,     TRUE);
-
-    /* Initialize the channels subsystem */
-    freerdp_client_context_new((rdpClientContext *)instance->context);
 
     sess->instance = instance;
     sess->alive    = 1;
 
-    /* Launch the event-loop on a dedicated thread */
     if (pthread_create(&sess->thread, NULL, orb_event_loop, sess) != 0) {
+        pthread_mutex_destroy(&ctx->clipboard_mutex);
         freerdp_context_free(instance);
         freerdp_free(instance);
-        pthread_mutex_destroy(&ctx->clipboard_mutex);
         free(sess);
         return NULL;
     }
@@ -469,7 +438,6 @@ void orb_session_free(OrbRdpSession *session)
     pthread_mutex_unlock(&ctx->clipboard_mutex);
     pthread_mutex_destroy(&ctx->clipboard_mutex);
 
-    freerdp_client_context_free((rdpClientContext *)session->instance->context);
     freerdp_context_free(session->instance);
     freerdp_free(session->instance);
     free(session);
@@ -497,12 +465,10 @@ void orb_resize(OrbRdpSession *session, uint16_t width, uint16_t height)
     if (!ctx->disp) return;
 
     DISPLAY_CONTROL_MONITOR_LAYOUT layout = { 0 };
-    layout.Flags       = DISPLAY_CONTROL_MONITOR_PRIMARY;
-    layout.Left        = 0;
-    layout.Top         = 0;
-    layout.Width       = width;
-    layout.Height      = height;
-    layout.Orientation = ORIENTATION_LANDSCAPE;
+    layout.Flags              = DISPLAY_CONTROL_MONITOR_PRIMARY;
+    layout.Width              = width;
+    layout.Height             = height;
+    layout.Orientation        = ORIENTATION_LANDSCAPE;
     layout.DesktopScaleFactor = 100;
     layout.DeviceScaleFactor  = 100;
     layout.PhysicalWidth      = width;
@@ -521,12 +487,11 @@ void orb_set_clipboard(OrbRdpSession *session, const char *text)
     ctx->pending_clipboard = strdup(text);
     pthread_mutex_unlock(&ctx->clipboard_mutex);
 
-    /* If cliprdr is already up, advertise the new format immediately */
     if (ctx->cliprdr && session->alive) {
-        CLIPRDR_FORMAT_LIST fmt = { 0 };
         CLIPRDR_FORMAT entry = { CF_UNICODETEXT, NULL };
+        CLIPRDR_FORMAT_LIST fmt = { 0 };
         fmt.numFormats = 1;
-        fmt.formats = &entry;
+        fmt.formats    = &entry;
         ctx->cliprdr->ClientFormatList(ctx->cliprdr, &fmt);
     }
 }
