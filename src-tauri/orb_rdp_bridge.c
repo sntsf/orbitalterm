@@ -107,22 +107,23 @@ static BOOL orb_end_paint(rdpContext *context)
         (int64_t)(now.tv_nsec - ctx->last_frame_ts.tv_nsec) / 1000LL;
     if (elapsed_us < 16000) {
         /* Still reset the dirty rect so it doesn't accumulate stale regions. */
-        if (gdi->primary && gdi->primary->hwnd && gdi->primary->hwnd->invalid)
-            gdi->primary->hwnd->invalid->null = TRUE;
+        if (gdi->primary && gdi->primary->hdc &&
+            gdi->primary->hdc->hwnd && gdi->primary->hdc->hwnd->invalid)
+            gdi->primary->hdc->hwnd->invalid->null = TRUE;
         return TRUE;
     }
     ctx->last_frame_ts = now;
 
     /* Determine dirty rectangle.
      * FreeRDP tracks the region modified since the previous EndPaint call
-     * in gdi->primary->hwnd->invalid.  Fall back to the full frame if the
-     * region is not available or marked null. */
+     * in gdi->primary->hdc->hwnd->invalid (gdiBitmap → hdc → hwnd → invalid).
+     * Fall back to the full frame if the region is not available or null. */
     uint32_t dx = 0, dy = 0;
     uint32_t dw = (uint32_t)gdi->width;
     uint32_t dh = (uint32_t)gdi->height;
 
-    if (gdi->primary && gdi->primary->hwnd) {
-        HGDI_RGN inv = gdi->primary->hwnd->invalid;
+    if (gdi->primary && gdi->primary->hdc && gdi->primary->hdc->hwnd) {
+        HGDI_RGN inv = gdi->primary->hdc->hwnd->invalid;
         if (inv && !inv->null && inv->w > 0 && inv->h > 0) {
             dx = (uint32_t)(inv->x > 0 ? inv->x : 0);
             dy = (uint32_t)(inv->y > 0 ? inv->y : 0);
