@@ -163,6 +163,7 @@ export function Sidebar() {
       notes: conn.notes,
       description: conn.description,
       domain: conn.domain,
+      rdp_admin: conn.rdp_admin,
     });
     setConnections(await getConnections());
   };
