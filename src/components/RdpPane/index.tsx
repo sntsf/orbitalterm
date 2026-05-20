@@ -71,9 +71,12 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       const { x, y, data } = event.payload;
-      const img = new Image();
-      img.onload = () => ctx.drawImage(img, x, y);
-      img.src = `data:image/jpeg;base64,${data}`;
+      // Decode JPEG off the main thread via createImageBitmap.
+      const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+      createImageBitmap(new Blob([bytes], { type: "image/jpeg" })).then((bmp) => {
+        ctx.drawImage(bmp, x, y);
+        bmp.close();
+      });
     }).then((fn) => unlistens.push(fn));
     listen<string>(`rdp-error-${sessionId}`, (event) => {
       onSessionError(event.payload);
