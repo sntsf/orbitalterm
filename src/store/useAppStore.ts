@@ -20,6 +20,7 @@ interface AppStore {
 
   openTab: (connection: Connection) => void;
   closeTab: (tabId: string) => void;
+  reconnectTab: (tabId: string) => void;
   setActiveTab: (tabId: string) => void;
   setTabStatus: (tabId: string, status: ConnectionStatus) => void;
   setTabSessionId: (tabId: string, sessionId: string) => void;
@@ -75,6 +76,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
       nextActive = filtered[Math.min(idx, filtered.length - 1)]?.id ?? null;
     }
     set({ tabs: filtered, activeTabId: nextActive });
+  },
+
+  reconnectTab: (tabId) => {
+    const { tabs } = get();
+    const tab = tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    // Replace with a new UUID — the key={tab.id} on the pane wrapper causes
+    // React to unmount the old pane (cleanup/disconnect) and mount a fresh one.
+    const newTab: Tab = { ...tab, id: crypto.randomUUID(), status: "connecting", session_id: undefined };
+    set({ tabs: tabs.map((t) => (t.id === tabId ? newTab : t)), activeTabId: newTab.id });
   },
 
   setActiveTab: (activeTabId) => set({ activeTabId }),

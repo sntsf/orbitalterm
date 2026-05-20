@@ -321,22 +321,6 @@ export function PropertiesPanel() {
           </Row>
         )}
 
-        {showRdpAdmin && (
-          <Row label="Sesión">
-            <label className="flex items-center gap-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={rdpAdmin}
-                onChange={(e) => setRdpAdmin(e.target.checked)}
-                className="accent-[var(--color-accent)]"
-              />
-              <span className="text-xs text-[var(--color-text-muted)]">
-                Sesión admin <span className="text-[10px]">(requiere cuenta administrador)</span>
-              </span>
-            </label>
-          </Row>
-        )}
-
         <Row label="Carpeta">
           <select value={folderId} onChange={(e) => setFolderId(e.target.value)} className={inp}>
             <option value="">— Ninguna —</option>
