@@ -534,19 +534,26 @@ void orb_resize(OrbRdpSession *session, uint16_t width, uint16_t height)
 void orb_refresh(OrbRdpSession *session)
 {
     if (!session || !session->alive) return;
-    freerdp *instance = session->instance;
-    rdpGdi  *gdi      = instance->context->gdi;
-    if (!gdi || gdi->width == 0 || gdi->height == 0) return;
+    freerdp  *instance = session->instance;
+    OrbContext *ctx    = (OrbContext *)instance->context;
+    rdpGdi   *gdi      = instance->context->gdi;
+    if (!gdi || !gdi->primary_buffer || gdi->width == 0 || gdi->height == 0 || !ctx->on_frame)
+        return;
 
-    /* Send a Refresh Rect PDU covering the full framebuffer.
-     * Windows responds by repainting the entire desktop, which triggers
-     * EndPaint callbacks and refreshes our canvas. */
-    RECTANGLE_16 rect;
-    rect.left   = 0;
-    rect.top    = 0;
-    rect.right  = (UINT16)(gdi->width  > 0 ? gdi->width  - 1 : 0);
-    rect.bottom = (UINT16)(gdi->height > 0 ? gdi->height - 1 : 0);
-    freerdp_input_send_refresh_rect(instance->context->input, 1, &rect);
+    /* Push the full current framebuffer directly to the encoder without
+     * waiting for a server-initiated EndPaint.  This gives instant results
+     * when the canvas becomes visible after a tab switch — no network
+     * round-trip required because FreeRDP already has the screen in memory. */
+    ctx->on_frame(
+        ctx->user_ctx,
+        gdi->primary_buffer,
+        0, 0,
+        (uint32_t)gdi->width,
+        (uint32_t)gdi->height,
+        (uint32_t)gdi->stride
+    );
+    /* Update rate-limiter so the forced frame doesn't block the next EndPaint. */
+    clock_gettime(CLOCK_MONOTONIC, &ctx->last_frame_ts);
 }
 
 void orb_set_clipboard(OrbRdpSession *session, const char *text)
