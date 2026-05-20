@@ -89,9 +89,16 @@ void orb_send_key(OrbRdpSession *session, uint16_t flags, uint8_t scancode);
 void orb_resize(OrbRdpSession *session, uint16_t width, uint16_t height);
 
 /*
- * Clipboard: push text to the remote clipboard.
+ * orb_set_clipboard: push text to the remote clipboard.
  */
 void orb_set_clipboard(OrbRdpSession *session, const char *text);
+
+/*
+ * orb_refresh: ask the server to repaint the entire framebuffer.
+ * Call this when the viewer canvas becomes visible after being hidden,
+ * or after the initial connection to ensure the full desktop is rendered.
+ */
+void orb_refresh(OrbRdpSession *session);
 
 #ifdef __cplusplus
 }

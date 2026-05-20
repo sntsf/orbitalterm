@@ -469,6 +469,22 @@ pub async fn rdp_resize_session(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn rdp_refresh_session(
+    embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
+    session_id: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let map = embedded_sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            session.refresh();
+        }
+    }
+    let _ = (embedded_sessions, session_id);
+    Ok(())
+}
+
 #[cfg(not(target_os = "linux"))]
 fn build_rdp_args(
     cmd: &mut std::process::Command,

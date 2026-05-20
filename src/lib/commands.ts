@@ -95,6 +95,10 @@ export async function rdpResizeSession(sessionId: string, width: number, height:
   return invoke("rdp_resize_session", { sessionId, width, height });
 }
 
+export async function rdpRefreshSession(sessionId: string): Promise<void> {
+  return invoke("rdp_refresh_session", { sessionId });
+}
+
 export async function rdpStatus(sessionId: string): Promise<"connected" | "disconnected"> {
   return invoke("rdp_status", { sessionId });
 }

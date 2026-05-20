@@ -531,6 +531,24 @@ void orb_resize(OrbRdpSession *session, uint16_t width, uint16_t height)
     ctx->disp->SendMonitorLayout(ctx->disp, 1, &layout);
 }
 
+void orb_refresh(OrbRdpSession *session)
+{
+    if (!session || !session->alive) return;
+    freerdp *instance = session->instance;
+    rdpGdi  *gdi      = instance->context->gdi;
+    if (!gdi || gdi->width == 0 || gdi->height == 0) return;
+
+    /* Send a Refresh Rect PDU covering the full framebuffer.
+     * Windows responds by repainting the entire desktop, which triggers
+     * EndPaint callbacks and refreshes our canvas. */
+    RECTANGLE_16 rect;
+    rect.left   = 0;
+    rect.top    = 0;
+    rect.right  = (UINT16)(gdi->width  > 0 ? gdi->width  - 1 : 0);
+    rect.bottom = (UINT16)(gdi->height > 0 ? gdi->height - 1 : 0);
+    freerdp_input_send_refresh_rect(instance->context->input, 1, &rect);
+}
+
 void orb_set_clipboard(OrbRdpSession *session, const char *text)
 {
     if (!session || !text) return;

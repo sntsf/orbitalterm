@@ -8,8 +8,7 @@ import {
   rdpMouseInput,
   rdpKeyInput,
   rdpResizeSession,
-  rdpGetLinuxClipboard,
-  rdpSetClipboard,
+  rdpRefreshSession,
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import type { Tab } from "../../types";
@@ -139,32 +138,18 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
 
   function onKeyDown(e: React.KeyboardEvent<HTMLCanvasElement>) {
     e.preventDefault();
-    // Ctrl+V: read Linux clipboard → push to RDP cliprdr, then forward the keystroke.
-    if (e.ctrlKey && e.code === "KeyV") {
-      rdpGetLinuxClipboard()
-        .then(async (text) => {
-          if (text) {
-            await rdpSetClipboard(sessionId, text).catch(() => {});
-            // Brief delay lets the cliprdr CB_FORMAT_LIST_PDU reach Windows
-            // before the V keypress triggers a paste.
-            await new Promise((r) => setTimeout(r, 200));
-          }
-          rdpKeyInput(sessionId, true, "KeyV").catch(() => {});
-          rdpKeyInput(sessionId, false, "KeyV").catch(() => {});
-        })
-        .catch(() => {
-          rdpKeyInput(sessionId, true, "KeyV").catch(() => {});
-        });
-      return;
-    }
     rdpKeyInput(sessionId, true, e.code).catch(() => {});
   }
 
   function onKeyUp(e: React.KeyboardEvent<HTMLCanvasElement>) {
     e.preventDefault();
-    // KeyV keyup handled inside the async Ctrl+V branch above.
-    if (e.ctrlKey && e.code === "KeyV") return;
     rdpKeyInput(sessionId, false, e.code).catch(() => {});
+  }
+
+  function onFocus() {
+    // Request a full-screen repaint from Windows whenever the canvas is
+    // focused (e.g. after switching tabs or clicking back into the session).
+    rdpRefreshSession(sessionId).catch(() => {});
   }
 
   function onContextMenu(e: React.MouseEvent<HTMLCanvasElement>) {
@@ -188,6 +173,7 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
         onWheel={onWheel}
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
+        onFocus={onFocus}
         onContextMenu={onContextMenu}
       />
     </div>
@@ -263,6 +249,13 @@ export function RdpPane({ tab }: RdpPaneProps) {
       setEmbedded(result.embedded);
       if (result.embedded) {
         setFrameSize({ width: result.width, height: result.height });
+        // After the GDI is up, Windows may not send a full frame until something
+        // changes.  A Refresh Rect request forces it to repaint the desktop.
+        setTimeout(() => {
+          if (sessionIdRef.current === result.session_id) {
+            rdpRefreshSession(result.session_id).catch(() => {});
+          }
+        }, 800);
       }
       setStatus("connected");
       setTabStatus(tab.id, "connected");

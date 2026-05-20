@@ -170,6 +170,7 @@ extern "C" {
     fn orb_send_key(session: *mut OrbRdpSession, flags: u16, scancode: u8);
     fn orb_resize(session: *mut OrbRdpSession, width: u16, height: u16);
     fn orb_set_clipboard(session: *mut OrbRdpSession, text: *const std::ffi::c_char);
+    fn orb_refresh(session: *mut OrbRdpSession);
 }
 
 // ── Encoder pipeline ──────────────────────────────────────────────────────────
@@ -198,7 +199,10 @@ fn spawn_encoder(app: AppHandle, session_id: String, rx: mpsc::Receiver<FrameMsg
     std::thread::spawn(move || {
         while let Ok(msg) = rx.recv() {
             let mut jpeg_buf = Vec::new();
-            if JpegEncoder::new_with_quality(&mut jpeg_buf, 70)
+            // Use lower quality for large frames (full-screen refreshes) so
+            // the encoder keeps up; use higher quality for small dirty rects.
+            let quality: u8 = if msg.w * msg.h > 200_000 { 55 } else { 75 };
+            if JpegEncoder::new_with_quality(&mut jpeg_buf, quality)
                 .encode(&msg.rgb, msg.w, msg.h, ExtendedColorType::Rgb8)
                 .is_ok()
             {
@@ -415,6 +419,12 @@ impl FreerdpSession {
         }
         if let Ok(c_text) = CString::new(text) {
             unsafe { orb_set_clipboard(self.ptr, c_text.as_ptr()) };
+        }
+    }
+
+    pub fn refresh(&self) {
+        if !self.stopped.load(Ordering::Relaxed) {
+            unsafe { orb_refresh(self.ptr) };
         }
     }
 }
