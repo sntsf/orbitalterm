@@ -399,6 +399,26 @@ static void *orb_event_loop(void *arg)
             /* err == 0: clean disconnect with no explicit code — no message */
             break;
         }
+
+        /* Flush any stale dirty rect the rate-limiter may have skipped.
+         *
+         * Windows stops sending EndPaint events once rendering is complete.
+         * If the rate-limiter skipped the last EndPaint in a burst (e.g. after
+         * opening a folder), the dirty rect stays in FreeRDP's state forever —
+         * visible only after the user clicks (which triggers a new EndPaint).
+         *
+         * Fix: on each event-loop iteration (≤100 ms apart) check whether a
+         * non-null dirty rect is still sitting in FreeRDP's state.  If yes,
+         * clear the rate-limiter timestamp so orb_end_paint treats the call as
+         * a fresh frame and forwards it immediately. */
+        rdpGdi *gdi = instance->context->gdi;
+        if (gdi && gdi->primary && gdi->primary->hdc && gdi->primary->hdc->hwnd) {
+            HGDI_RGN inv = gdi->primary->hdc->hwnd->invalid;
+            if (inv && !inv->null && inv->w > 0 && inv->h > 0) {
+                memset(&ctx->last_frame_ts, 0, sizeof(ctx->last_frame_ts));
+                orb_end_paint(instance->context);
+            }
+        }
     }
 
     freerdp_disconnect(instance);
