@@ -37,7 +37,6 @@ export function PropertiesPanel() {
     setIsCreatingNew,
     selectConnection,
     openTab,
-    folders,
   } = useAppStore();
 
   const existing = connections.find((c) => c.id === selectedConnectionId);
@@ -313,13 +312,6 @@ export function PropertiesPanel() {
             />
           </Row>
         )}
-
-        <Row label="Carpeta">
-          <select value={folderId} onChange={(e) => setFolderId(e.target.value)} className={inp}>
-            <option value="">— Ninguna —</option>
-            {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
-          </select>
-        </Row>
 
         <Row label="Notas">
           <textarea
