@@ -219,25 +219,18 @@ export function PropertiesPanel() {
 
       {/* Fields */}
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
-        {/* Type toggle */}
-        <Row label="Type">
-          <div className="flex gap-1 bg-[var(--color-bg-elevated)] rounded p-0.5 flex-wrap">
-            {(["ssh", "rdp", "vnc", "ftp", "sftp"] as ConnectionType[]).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => handleTypeChange(t)}
-                className={[
-                  "flex-1 min-w-0 py-0.5 rounded text-[10px] uppercase font-medium transition-colors",
-                  type === t
-                    ? "bg-[var(--color-accent)] text-white"
-                    : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]",
-                ].join(" ")}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
+        <Row label="Tipo">
+          <select
+            value={type}
+            onChange={(e) => handleTypeChange(e.target.value as ConnectionType)}
+            className={inp}
+          >
+            <option value="ssh">SSH</option>
+            <option value="rdp">RDP</option>
+            <option value="vnc">VNC</option>
+            <option value="ftp">FTP</option>
+            <option value="sftp">SFTP</option>
+          </select>
         </Row>
 
         <Row label="Nombre">

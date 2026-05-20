@@ -22,6 +22,7 @@ pub struct Connection {
     pub rdp_admin: bool,
     pub created_at: String,
     pub updated_at: String,
+    pub sort_order: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,6 +41,13 @@ pub struct NewConnection {
     pub domain: String,
     #[serde(default)]
     pub rdp_admin: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReorderItem {
+    pub id: String,
+    pub sort_order: i64,
+    pub folder_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -67,18 +75,19 @@ fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
         rdp_admin: row.get::<_, i64>(12).unwrap_or(0) != 0,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
+        sort_order: row.get(15).unwrap_or(0),
     })
 }
 
 const SELECT_COLS: &str = "id, name, type, host, port, username, auth_type, key_path,
-                           folder_id, notes, description, domain, rdp_admin, created_at, updated_at";
+                           folder_id, notes, description, domain, rdp_admin, created_at, updated_at, sort_order";
 
 #[tauri::command]
 pub fn get_connections() -> Result<Vec<Connection>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT {SELECT_COLS} FROM connections ORDER BY name COLLATE NOCASE"
+            "SELECT {SELECT_COLS} FROM connections ORDER BY sort_order ASC, name COLLATE NOCASE"
         ))
         .map_err(|e| e.to_string())?;
 
@@ -93,12 +102,17 @@ pub fn get_connections() -> Result<Vec<Connection>, String> {
 pub fn save_connection(conn: NewConnection) -> Result<Connection, String> {
     let db = db::open().map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
+    let sort_order: i64 = db.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM connections",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
     db.execute(
-        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![id, conn.name, conn.conn_type, conn.host, conn.port,
                 conn.username, conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
-                conn.description, conn.domain, conn.rdp_admin as i64],
+                conn.description, conn.domain, conn.rdp_admin as i64, sort_order],
     )
     .map_err(|e| e.to_string())?;
 
@@ -130,6 +144,18 @@ pub fn delete_connection(id: String) -> Result<(), String> {
     let db = db::open().map_err(|e| e.to_string())?;
     db.execute("DELETE FROM connections WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reorder_connections(updates: Vec<ReorderItem>) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    for item in updates {
+        db.execute(
+            "UPDATE connections SET sort_order=?1, folder_id=?2, updated_at=datetime('now') WHERE id=?3",
+            params![item.sort_order, item.folder_id, item.id],
+        ).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

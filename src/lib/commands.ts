@@ -41,6 +41,12 @@ export async function importConnections(json: string): Promise<number> {
   return invoke("import_connections", { json });
 }
 
+export async function reorderConnections(
+  updates: { id: string; sort_order: number; folder_id: string | null }[],
+): Promise<void> {
+  return invoke("reorder_connections", { updates });
+}
+
 // ── Passwords ────────────────────────────────────────────────────────────────
 
 export async function savePassword(connectionId: string, password: string): Promise<void> {

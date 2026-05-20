@@ -6,7 +6,7 @@ mod ssh;
 
 use commands::connections::{
     delete_connection, delete_folder, export_connections, get_connections, get_folders,
-    import_connections, save_connection, save_folder, update_connection,
+    import_connections, reorder_connections, save_connection, save_folder, update_connection,
 };
 use commands::sessions::{
     connect_rdp, connect_ssh, delete_password, disconnect_rdp, disconnect_ssh, has_password,
@@ -32,6 +32,7 @@ pub fn run() {
             save_connection,
             update_connection,
             delete_connection,
+            reorder_connections,
             get_folders,
             save_folder,
             delete_folder,

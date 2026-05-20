@@ -6,7 +6,7 @@ import {
 import { useAppStore } from "../../store/useAppStore";
 import {
   getConnections, getFolders, deleteConnection, saveConnection,
-  saveFolder, deleteFolder, getFolders as refetchFolders,
+  saveFolder, deleteFolder, getFolders as refetchFolders, reorderConnections,
 } from "../../lib/commands";
 import { ContextMenu, useContextMenu } from "../ContextMenu";
 import { PropertiesPanel } from "../PropertiesPanel";
@@ -34,6 +34,10 @@ export function Sidebar() {
   const [newFolderName, setNewFolderName] = useState("");
   const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+
+  // Drag-and-drop state
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
 
   // Folder rename state
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
@@ -125,6 +129,38 @@ export function Sidebar() {
     } catch (err) {
       console.error(err);
     }
+  };
+
+  // Drag handlers
+  const handleDragEnd = () => { setDragId(null); setDropTarget(null); };
+
+  const handleDropOnConn = async (target: Connection) => {
+    if (!dragId || dragId === target.id) { handleDragEnd(); return; }
+    const dragged = connections.find((c) => c.id === dragId);
+    if (!dragged) { handleDragEnd(); return; }
+    // All connections at the target's folder level, sorted by current order
+    const level = connections
+      .filter((c) => c.folder_id === target.folder_id)
+      .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
+    const without = level.filter((c) => c.id !== dragId);
+    const idx = without.findIndex((c) => c.id === target.id);
+    without.splice(idx, 0, { ...dragged, folder_id: target.folder_id });
+    const updates = without.map((c, i) => ({ id: c.id, sort_order: i * 10, folder_id: target.folder_id }));
+    await reorderConnections(updates).catch(console.error);
+    setConnections(await getConnections());
+    handleDragEnd();
+  };
+
+  const handleDropOnFolder = async (folderId: string) => {
+    if (!dragId) { handleDragEnd(); return; }
+    const dragged = connections.find((c) => c.id === dragId);
+    if (!dragged || dragged.folder_id === folderId) { handleDragEnd(); return; }
+    const maxSort = connections
+      .filter((c) => c.folder_id === folderId)
+      .reduce((m, c) => Math.max(m, c.sort_order), -10) + 10;
+    await reorderConnections([{ id: dragId, sort_order: maxSort, folder_id: folderId }]).catch(console.error);
+    setConnections(await getConnections());
+    handleDragEnd();
   };
 
   // Folder context menu
@@ -279,6 +315,13 @@ export function Sidebar() {
             onSubfolderConfirm={confirmCreateFolder}
             onSubfolderCancel={cancelCreateFolder}
             subfolderInputRef={creatingFolder && newFolderParentId === folder.id ? folderInputRef : undefined}
+            dragId={dragId}
+            dropTarget={dropTarget}
+            onDragStart={setDragId}
+            onDragEnd={handleDragEnd}
+            onDropTarget={setDropTarget}
+            onDropOnConn={handleDropOnConn}
+            onDropOnFolder={handleDropOnFolder}
           />
         ))}
 
@@ -301,6 +344,12 @@ export function Sidebar() {
             onSelect={() => selectConnection(conn.id)}
             onOpen={() => openTab(conn)}
             onContextMenu={(e) => connMenu(e, conn)}
+            dragging={dragId === conn.id}
+            isDropTarget={dropTarget === conn.id}
+            onDragStart={() => setDragId(conn.id)}
+            onDragEnd={handleDragEnd}
+            onDragOver={() => setDropTarget(conn.id)}
+            onDrop={() => handleDropOnConn(conn)}
           />
         ))}
 
@@ -375,6 +424,7 @@ function FolderItem({
   isRenaming, renameName, onRenameChange, onRenameConfirm, onRenameCancel, renameInputRef,
   creatingSubfolder, subfoldersNewName, onSubfolderNameChange, onSubfolderConfirm,
   onSubfolderCancel, subfolderInputRef,
+  dragId, dropTarget, onDragStart, onDragEnd, onDropTarget, onDropOnConn, onDropOnFolder,
 }: {
   folder: FolderType;
   connections: Connection[];
@@ -396,8 +446,16 @@ function FolderItem({
   onSubfolderConfirm: () => void;
   onSubfolderCancel: () => void;
   subfolderInputRef?: React.RefObject<HTMLInputElement>;
+  dragId: string | null;
+  dropTarget: string | null;
+  onDragStart: (id: string) => void;
+  onDragEnd: () => void;
+  onDropTarget: (id: string | null) => void;
+  onDropOnConn: (c: Connection) => void;
+  onDropOnFolder: (folderId: string) => void;
 }) {
   const Icon = folder.expanded ? FolderOpen : Folder;
+  const isFolderDropTarget = dropTarget === `folder:${folder.id}`;
   return (
     <div>
       {isRenaming ? (
@@ -420,7 +478,15 @@ function FolderItem({
         <button
           onClick={onToggle}
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
-          className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
+          onDragOver={(e) => { e.preventDefault(); onDropTarget(`folder:${folder.id}`); }}
+          onDragLeave={() => onDropTarget(null)}
+          onDrop={(e) => { e.preventDefault(); onDropOnFolder(folder.id); }}
+          className={[
+            "flex items-center gap-2 w-full px-3 py-1.5 transition-colors text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]",
+            isFolderDropTarget
+              ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)]"
+              : "hover:bg-[var(--color-bg-hover)]",
+          ].join(" ")}
         >
           <Icon size={13} />
           <span className="text-xs truncate flex-1 text-left">{folder.name}</span>
@@ -447,6 +513,12 @@ function FolderItem({
               onOpen={() => onOpen(conn)}
               onContextMenu={(e) => onContextMenu(e, conn)}
               indent
+              dragging={dragId === conn.id}
+              isDropTarget={dropTarget === conn.id}
+              onDragStart={() => onDragStart(conn.id)}
+              onDragEnd={onDragEnd}
+              onDragOver={() => onDropTarget(conn.id)}
+              onDrop={() => onDropOnConn(conn)}
             />
           ))}
         </>
@@ -457,6 +529,8 @@ function FolderItem({
 
 function ConnItem({
   conn, selected, onSelect, onOpen, onContextMenu, indent = false,
+  dragging = false, isDropTarget = false,
+  onDragStart, onDragEnd, onDragOver, onDrop,
 }: {
   conn: Connection;
   selected: boolean;
@@ -464,6 +538,12 @@ function ConnItem({
   onOpen: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
   indent?: boolean;
+  dragging?: boolean;
+  isDropTarget?: boolean;
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
+  onDragOver?: () => void;
+  onDrop?: () => void;
 }) {
   const typeColors: Record<string, string> = {
     ssh: "text-[var(--color-success)] bg-[var(--color-success)]/10",
@@ -486,12 +566,19 @@ function ConnItem({
 
   return (
     <button
+      draggable
       onClick={onSelect}
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
+      onDragStart={(e) => { e.stopPropagation(); onDragStart?.(); }}
+      onDragEnd={onDragEnd}
+      onDragOver={(e) => { e.preventDefault(); onDragOver?.(); }}
+      onDrop={(e) => { e.preventDefault(); onDrop?.(); }}
       className={[
         "flex items-center gap-2 w-full py-1.5 pr-3 transition-colors text-left group",
         indent ? "pl-8" : "pl-3",
+        dragging ? "opacity-40" : "",
+        isDropTarget ? "border-t-2 border-[var(--color-accent)]" : "",
         selected
           ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
           : "hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]",
