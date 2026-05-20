@@ -183,7 +183,7 @@ export function PropertiesPanel() {
   const supportedAuthTypes = AUTH_FOR_TYPE[type];
   const showAuthSection = supportedAuthTypes.length > 1 || supportedAuthTypes[0] !== "password";
   const showDomain = type === "rdp";
-  const showRdpAdmin = type === "rdp";
+
   const showPasswordField = authType === "password";
   const showKeyField = authType === "key";
 
