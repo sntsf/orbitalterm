@@ -12,7 +12,7 @@ export async function getFolders(): Promise<Folder[]> {
 }
 
 export async function saveConnection(
-  conn: Omit<Connection, "id" | "created_at" | "updated_at">
+  conn: Omit<Connection, "id" | "created_at" | "updated_at" | "sort_order">
 ): Promise<Connection> {
   return invoke("save_connection", { conn });
 }
