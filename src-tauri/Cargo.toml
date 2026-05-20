@@ -37,6 +37,19 @@ ssh2 = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 base64 = "0.22"
 
+# Compile image-encoding crates at full optimization even in dev builds.
+# JPEG encoding in the `image` crate is ~20x slower in debug than release;
+# these overrides bring dev-build RDP rendering close to release performance
+# without requiring a full `cargo tauri build`.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.zune-core]
+opt-level = 3
+[profile.dev.package.base64]
+opt-level = 3
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
