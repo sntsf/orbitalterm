@@ -7,7 +7,6 @@
 //! input goes directly to the RDP stream via libfreerdp — no X11 involved.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -175,44 +174,42 @@ extern "C" {
 
 // ── Encoder pipeline ──────────────────────────────────────────────────────────
 
-/// A dirty-rect frame with pixels already converted to RGB.
+/// A dirty-rect frame with pixels already converted to RGBA.
 struct FrameMsg {
     x: u32,
     y: u32,
     w: u32,
     h: u32,
-    rgb: Vec<u8>,
+    rgba: Vec<u8>,
 }
 
 /// Payload emitted to the frontend for each rendered frame.
+/// `data` is a base64-encoded raw RGBA byte array (w × h × 4 bytes).
+/// The frontend uses `new ImageData(rgba, w, h)` + `putImageData` directly —
+/// no JPEG encode/decode step, no dropped-frame visual gaps.
 #[derive(serde::Serialize, Clone)]
 struct FramePayload {
     x: u32,
     y: u32,
+    w: u32,
+    h: u32,
     data: String,
 }
 
-/// Spawns a background thread that JPEG-encodes frames and emits Tauri events.
-/// The thread exits automatically when `rx` is closed (i.e. when FrameState
-/// and its `tx` are dropped).
+/// Spawns a background thread that base64-encodes raw RGBA frames and emits
+/// Tauri events.  There is no CPU-heavy encoding step, so the thread keeps up
+/// with dirty-rect updates even in unoptimised debug builds.
 fn spawn_encoder(app: AppHandle, session_id: String, rx: mpsc::Receiver<FrameMsg>) {
     std::thread::spawn(move || {
         while let Ok(msg) = rx.recv() {
-            let mut jpeg_buf = Vec::new();
-            // Use lower quality for large frames (full-screen refreshes) so
-            // the encoder keeps up; use higher quality for small dirty rects.
-            let quality: u8 = if msg.w * msg.h > 200_000 { 55 } else { 75 };
-            if JpegEncoder::new_with_quality(&mut jpeg_buf, quality)
-                .encode(&msg.rgb, msg.w, msg.h, ExtendedColorType::Rgb8)
-                .is_ok()
-            {
-                let payload = FramePayload {
-                    x: msg.x,
-                    y: msg.y,
-                    data: BASE64.encode(&jpeg_buf),
-                };
-                app.emit(&format!("rdp-frame-{}", session_id), payload).ok();
-            }
+            let payload = FramePayload {
+                x: msg.x,
+                y: msg.y,
+                w: msg.w,
+                h: msg.h,
+                data: BASE64.encode(&msg.rgba),
+            };
+            app.emit(&format!("rdp-frame-{}", session_id), payload).ok();
         }
     });
 }
@@ -248,20 +245,21 @@ unsafe extern "C" fn on_frame(
     let row_bytes  = (h * stride) as usize;
     let raw = std::slice::from_raw_parts(data.add(row_offset), row_bytes);
 
-    // Convert BGRX → RGB for the dirty sub-image.
-    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+    // Convert BGRX → RGBA for the dirty sub-image.
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
     for row in 0..h as usize {
         let row_start = row * stride as usize + x as usize * 4;
         let row_slice = &raw[row_start..row_start + w as usize * 4];
         for chunk in row_slice.chunks_exact(4) {
-            rgb.push(chunk[2]); // R  (BGRX: B=0, G=1, R=2, X=3)
-            rgb.push(chunk[1]); // G
-            rgb.push(chunk[0]); // B
+            rgba.push(chunk[2]); // R  (BGRX: B=0, G=1, R=2, X=3)
+            rgba.push(chunk[1]); // G
+            rgba.push(chunk[0]); // B
+            rgba.push(255);      // A
         }
     }
 
     // Non-blocking: drop the frame if the encoder is busy.
-    let _ = state.tx.try_send(FrameMsg { x, y, w, h, rgb });
+    let _ = state.tx.try_send(FrameMsg { x, y, w, h, rgba });
 }
 
 unsafe extern "C" fn on_error(
