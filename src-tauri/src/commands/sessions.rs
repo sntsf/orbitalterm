@@ -20,7 +20,8 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
     let db = db::open().map_err(|e| e.to_string())?;
     db.query_row(
         "SELECT id, name, type, host, port, username, auth_type, key_path,
-                folder_id, notes, description, domain, rdp_admin, created_at, updated_at
+                folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
+                sort_order
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -40,6 +41,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 rdp_admin: row.get::<_, i64>(12).unwrap_or(0) != 0,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
+                sort_order: row.get(15).unwrap_or(0),
             })
         },
     )
