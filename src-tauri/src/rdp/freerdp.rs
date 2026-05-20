@@ -7,10 +7,10 @@
 //! input goes directly to the RDP stream via libfreerdp — no X11 involved.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 // ── AT-set-1 scan codes ───────────────────────────────────────────────────────
@@ -174,40 +174,44 @@ extern "C" {
 
 // ── Encoder pipeline ──────────────────────────────────────────────────────────
 
-/// A dirty-rect frame with pixels already converted to RGBA.
+/// A dirty-rect frame with pixels converted to packed RGB (3 bytes/pixel).
 struct FrameMsg {
     x: u32,
     y: u32,
     w: u32,
     h: u32,
-    rgba: Vec<u8>,
+    rgb: Vec<u8>,
 }
 
 /// Payload emitted to the frontend for each rendered frame.
-/// `data` is a base64-encoded raw RGBA byte array (w × h × 4 bytes).
-/// The frontend uses `new ImageData(rgba, w, h)` + `putImageData` directly —
-/// no JPEG encode/decode step, no dropped-frame visual gaps.
+/// `data` is a base64-encoded JPEG.  Dimensions are encoded in the JPEG header;
+/// `x` and `y` tell the frontend where to blit it on the canvas.
 #[derive(serde::Serialize, Clone)]
 struct FramePayload {
     x: u32,
     y: u32,
-    w: u32,
-    h: u32,
     data: String,
 }
 
-/// Spawns a background thread that base64-encodes raw RGBA frames and emits
-/// Tauri events.  There is no CPU-heavy encoding step, so the thread keeps up
-/// with dirty-rect updates even in unoptimised debug builds.
+/// Spawns a background thread that JPEG-encodes dirty-rect frames and emits
+/// Tauri events.  JPEG compresses 1280×800 to ~100 KB vs 5 MB for raw RGBA —
+/// critical for keeping Tauri's IPC channel responsive.
 fn spawn_encoder(app: AppHandle, session_id: String, rx: mpsc::Receiver<FrameMsg>) {
     std::thread::spawn(move || {
         while let Ok(msg) = rx.recv() {
+            // Higher quality for small dirty rects; lower for large/full frames.
+            let quality = if msg.w * msg.h < 100_000 { 75u8 } else { 55u8 };
+            let mut jpeg = Vec::new();
+            if JpegEncoder::new_with_quality(&mut jpeg, quality)
+                .encode(&msg.rgb, msg.w, msg.h, ExtendedColorType::Rgb8)
+                .is_err()
+            {
+                continue;
+            }
             let payload = FramePayload {
                 x: msg.x,
                 y: msg.y,
-                w: msg.w,
-                h: msg.h,
-                data: BASE64.encode(&msg.rgba),
+                data: BASE64.encode(&jpeg),
             };
             app.emit(&format!("rdp-frame-{}", session_id), payload).ok();
         }
@@ -219,9 +223,11 @@ fn spawn_encoder(app: AppHandle, session_id: String, rx: mpsc::Receiver<FrameMsg
 struct FrameState {
     app: AppHandle,
     session_id: String,
-    /// Bounded channel (capacity 2): on_frame sends here without blocking;
-    /// frames are dropped when the encoder falls behind rather than backing up.
+    /// Bounded channel: on_frame sends here without blocking.
     tx: mpsc::SyncSender<FrameMsg>,
+    /// Dirty rect accumulated from frames dropped when the channel was full.
+    /// Merged into the next successful send so no screen region is permanently lost.
+    overflow: Mutex<Option<(u32, u32, u32, u32)>>,
 }
 
 /// Called on the FreeRDP event-loop thread for each dirty-rect update.
@@ -240,26 +246,54 @@ unsafe extern "C" fn on_frame(
     }
     let state = &*(user_ctx as *const FrameState);
 
-    // Slice only the rows we need to avoid reading the full framebuffer.
-    let row_offset = (y * stride) as usize;
-    let row_bytes  = (h * stride) as usize;
+    // Union current dirty rect with any previously dropped region so no pixels
+    // are permanently lost when the encoder falls behind.
+    let (ex, ey, ew, eh) = {
+        let mut ov = state.overflow.lock().unwrap();
+        match ov.take() {
+            None => (x, y, w, h),
+            Some((ox, oy, ow, oh)) => {
+                let x1 = x.min(ox);
+                let y1 = y.min(oy);
+                let x2 = (x + w).max(ox + ow);
+                let y2 = (y + h).max(oy + oh);
+                (x1, y1, x2 - x1, y2 - y1)
+            }
+        }
+    };
+
+    // Slice only the rows we need.
+    let row_offset = (ey * stride) as usize;
+    let row_bytes  = (eh * stride) as usize;
     let raw = std::slice::from_raw_parts(data.add(row_offset), row_bytes);
 
-    // Convert BGRX → RGBA for the dirty sub-image.
-    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-    for row in 0..h as usize {
-        let row_start = row * stride as usize + x as usize * 4;
-        let row_slice = &raw[row_start..row_start + w as usize * 4];
+    // Convert BGRX → RGB for the expanded dirty sub-image.
+    let mut rgb = Vec::with_capacity((ew * eh * 3) as usize);
+    for row in 0..eh as usize {
+        let row_start = row * stride as usize + ex as usize * 4;
+        let row_slice = &raw[row_start..row_start + ew as usize * 4];
         for chunk in row_slice.chunks_exact(4) {
-            rgba.push(chunk[2]); // R  (BGRX: B=0, G=1, R=2, X=3)
-            rgba.push(chunk[1]); // G
-            rgba.push(chunk[0]); // B
-            rgba.push(255);      // A
+            rgb.push(chunk[2]); // R  (BGRX: B=0, G=1, R=2, X=3)
+            rgb.push(chunk[1]); // G
+            rgb.push(chunk[0]); // B
         }
     }
 
-    // Non-blocking: drop the frame if the encoder is busy.
-    let _ = state.tx.try_send(FrameMsg { x, y, w, h, rgba });
+    // Non-blocking: if the encoder is busy, save the expanded dirty rect so the
+    // next successful frame covers this region too.
+    if state.tx.try_send(FrameMsg { x: ex, y: ey, w: ew, h: eh, rgb }).is_err() {
+        let mut ov = state.overflow.lock().unwrap();
+        *ov = Some(match ov.take() {
+            None => (ex, ey, ew, eh),
+            Some((ox, oy, ow, oh)) => {
+                let x1 = ex.min(ox);
+                let y1 = ey.min(oy);
+                let x2 = (ex + ew).max(ox + ow);
+                let y2 = (ey + eh).max(oy + oh);
+                (x1, y1, x2 - x1, y2 - y1)
+            }
+        });
+    }
 }
 
 unsafe extern "C" fn on_error(
@@ -350,6 +384,7 @@ pub fn launch(
         app: app.clone(),
         session_id: session_id.to_string(),
         tx,
+        overflow: Mutex::new(None),
     });
     let user_ctx = &*state as *const FrameState as *mut std::ffi::c_void;
 
