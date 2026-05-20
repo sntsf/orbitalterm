@@ -9,8 +9,6 @@ import {
   rdpKeyInput,
   rdpResizeSession,
   rdpRefreshSession,
-  rdpGetLinuxClipboard,
-  rdpSetClipboard,
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import type { Tab } from "../../types";
@@ -139,25 +137,6 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
 
   function onKeyDown(e: React.KeyboardEvent<HTMLCanvasElement>) {
     e.preventDefault();
-    // Ctrl+Shift+V: paste Linux clipboard into Windows.
-    // Reads the host clipboard, pushes it to Windows via the RDP cliprdr
-    // channel, then sends Ctrl+V so Windows pastes it.
-    if (e.ctrlKey && e.shiftKey && e.code === "KeyV") {
-      rdpGetLinuxClipboard().then((text) => {
-        if (!text) return;
-        rdpSetClipboard(sessionId, text).then(() => {
-          setTimeout(() => {
-            rdpKeyInput(sessionId, true,  "ControlLeft").catch(() => {});
-            rdpKeyInput(sessionId, true,  "KeyV").catch(() => {});
-            setTimeout(() => {
-              rdpKeyInput(sessionId, false, "KeyV").catch(() => {});
-              rdpKeyInput(sessionId, false, "ControlLeft").catch(() => {});
-            }, 50);
-          }, 100);
-        }).catch(() => {});
-      }).catch(() => {});
-      return;
-    }
     rdpKeyInput(sessionId, true, e.code).catch(() => {});
   }
 
