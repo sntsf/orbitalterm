@@ -31,6 +31,7 @@
 /* winpr threading */
 #include <winpr/synch.h>
 #include <winpr/thread.h>
+#include <winpr/wlog.h>
 
 /* -------------------------------------------------------------------------
  * Extended context  (rdpContext MUST be the first member)
@@ -442,6 +443,12 @@ OrbRdpSession *orb_session_new(const char   *host,
                                 orb_error_fn  on_error,
                                 void         *user_ctx)
 {
+    /* Silence expected-but-harmless warnings that appear on every connection:
+     * - com.winpr.library: optional rdpdr plugin not installed (drive redirect)
+     * - com.winpr.sspi.Kerberos: Kerberos unavailable, NTLM used instead */
+    WLog_SetLogLevel(WLog_Get("com.winpr.library"),       WLOG_OFF);
+    WLog_SetLogLevel(WLog_Get("com.winpr.sspi.Kerberos"), WLOG_OFF);
+
     OrbRdpSession *sess = (OrbRdpSession *)calloc(1, sizeof(*sess));
     if (!sess) return NULL;
 
