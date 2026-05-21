@@ -14,7 +14,8 @@ use commands::sessions::{
     rdp_resize_session, rdp_set_clipboard, rdp_status, resize_pty, save_password, send_input,
 };
 use commands::sftp::{
-    sftp_connect, sftp_delete, sftp_disconnect, sftp_list_dir, sftp_mkdir, sftp_upload,
+    sftp_connect, sftp_create_file, sftp_delete, sftp_disconnect, sftp_download, sftp_list_dir,
+    sftp_mkdir, sftp_rename, sftp_upload,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -60,7 +61,10 @@ pub fn run() {
             sftp_connect,
             sftp_list_dir,
             sftp_upload,
+            sftp_download,
             sftp_mkdir,
+            sftp_create_file,
+            sftp_rename,
             sftp_delete,
             sftp_disconnect,
         ])

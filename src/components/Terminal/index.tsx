@@ -5,7 +5,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
 import { HardDrive } from "lucide-react";
-import { connectSsh, disconnectSsh, resizePty, sendInput, sftpDisconnect } from "../../lib/commands";
+import { connectSsh, disconnectSsh, resizePty, sendInput, sftpConnect, sftpDisconnect } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import { SftpBrowser } from "../SftpBrowser";
 import type { Tab } from "../../types";
@@ -18,11 +18,12 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
+  const { setTabStatus, setTabSessionId, getConnectionById, closeTab } = useAppStore();
 
   // SFTP panel state
   const [showSftp, setShowSftp] = useState(false);
   const [sftpSessionId, setSftpSessionId] = useState<string | null>(null);
+  const sftpSessionIdRef = useRef<string | null>(null);
   const [sftpWidth, setSftpWidth] = useState(35); // percentage
 
   // Drag handle state
@@ -57,6 +58,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
 
   const handleSftpConnect = useCallback((sid: string) => {
     setSftpSessionId(sid);
+    sftpSessionIdRef.current = sid;
   }, []);
 
   const toggleSftp = () => {
@@ -128,16 +130,28 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         setTabSessionId(tab.id, sessionId);
         setTabStatus(tab.id, "connected");
 
+        // Auto-open SFTP panel and connect
+        setShowSftp(true);
+        setTimeout(() => fitAddonRef.current?.fit(), 50);
+        sftpConnect(connection.id).then((sid) => {
+          setSftpSessionId(sid);
+          sftpSessionIdRef.current = sid;
+        }).catch(console.error);
+
         // Stream SSH output into xterm
         const unlistenData = await listen<string>(`ssh-data-${sessionId}`, (e) => {
           term.write(e.payload);
         });
         cleanups.push(unlistenData);
 
-        // Handle SSH process exit
+        // Handle SSH process exit — close SFTP and the tab
         const unlistenClosed = await listen(`ssh-closed-${sessionId}`, () => {
           term.writeln("\r\n\x1b[2m[Connection closed]\x1b[0m");
-          setTabStatus(tab.id, "idle");
+          if (sftpSessionIdRef.current) {
+            sftpDisconnect(sftpSessionIdRef.current).catch(console.error);
+            sftpSessionIdRef.current = null;
+          }
+          setTimeout(() => closeTab(tab.id), 1500);
         });
         cleanups.push(unlistenClosed);
 

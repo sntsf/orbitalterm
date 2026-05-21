@@ -181,6 +181,62 @@ pub async fn sftp_delete(
 }
 
 #[tauri::command]
+pub async fn sftp_download(
+    sftp_sessions: State<'_, SftpSessionMap>,
+    session_id: String,
+    remote_path: String,
+    local_path: String,
+) -> Result<(), String> {
+    use std::io::Read;
+    let map = sftp_sessions.lock().unwrap();
+    let conn = map.get(&session_id).ok_or("SFTP session not found")?;
+    let sftp = conn.session.sftp().map_err(|e| format!("SFTP subsystem error: {e}"))?;
+    let mut remote_file = sftp
+        .open(std::path::Path::new(&remote_path))
+        .map_err(|e| format!("Failed to open remote file: {e}"))?;
+    let mut data = Vec::new();
+    remote_file
+        .read_to_end(&mut data)
+        .map_err(|e| format!("Failed to read remote file: {e}"))?;
+    std::fs::write(&local_path, &data)
+        .map_err(|e| format!("Failed to write local file: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_rename(
+    sftp_sessions: State<'_, SftpSessionMap>,
+    session_id: String,
+    old_path: String,
+    new_path: String,
+) -> Result<(), String> {
+    let map = sftp_sessions.lock().unwrap();
+    let conn = map.get(&session_id).ok_or("SFTP session not found")?;
+    let sftp = conn.session.sftp().map_err(|e| format!("SFTP subsystem error: {e}"))?;
+    sftp.rename(
+        std::path::Path::new(&old_path),
+        std::path::Path::new(&new_path),
+        None,
+    )
+    .map_err(|e| format!("rename error: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_create_file(
+    sftp_sessions: State<'_, SftpSessionMap>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    let map = sftp_sessions.lock().unwrap();
+    let conn = map.get(&session_id).ok_or("SFTP session not found")?;
+    let sftp = conn.session.sftp().map_err(|e| format!("SFTP subsystem error: {e}"))?;
+    sftp.create(std::path::Path::new(&path))
+        .map_err(|e| format!("Failed to create file: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn sftp_disconnect(
     sftp_sessions: State<'_, SftpSessionMap>,
     session_id: String,

@@ -160,6 +160,26 @@ export async function sftpMkdir(sessionId: string, path: string): Promise<void> 
   return invoke("sftp_mkdir", { sessionId, path });
 }
 
+export async function sftpDownload(
+  sessionId: string,
+  remotePath: string,
+  localPath: string,
+): Promise<void> {
+  return invoke("sftp_download", { sessionId, remotePath, localPath });
+}
+
+export async function sftpRename(
+  sessionId: string,
+  oldPath: string,
+  newPath: string,
+): Promise<void> {
+  return invoke("sftp_rename", { sessionId, oldPath, newPath });
+}
+
+export async function sftpCreateFile(sessionId: string, path: string): Promise<void> {
+  return invoke("sftp_create_file", { sessionId, path });
+}
+
 export async function sftpDelete(
   sessionId: string,
   path: string,
