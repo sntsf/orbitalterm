@@ -192,6 +192,32 @@ export async function sftpDisconnect(sessionId: string): Promise<void> {
   return invoke("sftp_disconnect", { sessionId });
 }
 
+// ── Local filesystem ──────────────────────────────────────────────────────────
+
+export interface LocalEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified: number;
+}
+
+export async function localListDir(path: string): Promise<LocalEntry[]> {
+  return invoke("local_list_dir", { path });
+}
+
+export async function localGetHome(): Promise<string> {
+  return invoke("local_get_home");
+}
+
+export async function localGetParent(path: string): Promise<string> {
+  return invoke("local_get_parent", { path });
+}
+
+export async function localMkdir(path: string): Promise<void> {
+  return invoke("local_mkdir", { path });
+}
+
 // ── FTP sessions ───────────────────────────────────────────────────────────────
 
 export interface FtpEntry {

@@ -5,49 +5,11 @@ import { TerminalPane } from "./components/Terminal";
 import { RdpPane } from "./components/RdpPane";
 import { VncPane } from "./components/VncPane";
 import { FtpBrowser } from "./components/FtpBrowser";
-import { SftpBrowser } from "./components/SftpBrowser";
+import { SftpDualPane } from "./components/SftpDualPane";
 import { Welcome } from "./components/Welcome";
 import { useAppStore } from "./store/useAppStore";
 import { ftpConnect, ftpDisconnect } from "./lib/commands";
-import { sftpConnect, sftpDisconnect } from "./lib/commands";
 import type { Tab } from "./types";
-
-// ── Standalone SFTP pane ───────────────────────────────────────────────────────
-
-function SftpStandalonePane({ tab }: { tab: Tab }) {
-  const { getConnectionById, setTabStatus } = useAppStore();
-  const connection = getConnectionById(tab.connection_id);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-
-  const handleConnect = (sid: string) => {
-    setSessionId(sid);
-    setTabStatus(tab.id, "connected");
-  };
-
-  useEffect(() => {
-    if (!connection) return;
-    let cancelled = false;
-    sftpConnect(connection.id)
-      .then((sid) => { if (!cancelled) handleConnect(sid); })
-      .catch(() => { if (!cancelled) setTabStatus(tab.id, "error"); });
-    return () => { cancelled = true; };
-  }, [tab.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    return () => {
-      if (sessionId) sftpDisconnect(sessionId).catch(console.error);
-    };
-  }, [sessionId]);
-
-  return (
-    <SftpBrowser
-      sessionId={sessionId}
-      connectionId={tab.connection_id}
-      username={connection?.username}
-      onConnect={handleConnect}
-    />
-  );
-}
 
 // ── Standalone FTP pane ────────────────────────────────────────────────────────
 
@@ -115,7 +77,7 @@ export default function App() {
                   ) : tab.connection_type === "vnc" ? (
                     <VncPane tab={tab} />
                   ) : tab.connection_type === "sftp" ? (
-                    <SftpStandalonePane tab={tab} />
+                    <SftpDualPane tab={tab} />
                   ) : tab.connection_type === "ftp" ? (
                     <FtpStandalonePane tab={tab} />
                   ) : (

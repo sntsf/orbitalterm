@@ -10,6 +10,7 @@ use commands::connections::{
     delete_connection, delete_folder, export_connections, get_connections, get_folders,
     import_connections, reorder_connections, save_connection, save_folder, update_connection,
 };
+use commands::local_fs::{local_get_home, local_get_parent, local_list_dir, local_mkdir};
 use commands::ftp::{
     ftp_connect, ftp_delete, ftp_disconnect, ftp_download, ftp_list_dir, ftp_mkdir, ftp_pwd,
     ftp_rename, ftp_upload,
@@ -48,6 +49,11 @@ pub fn run() {
             delete_folder,
             export_connections,
             import_connections,
+            // Local filesystem
+            local_list_dir,
+            local_get_home,
+            local_get_parent,
+            local_mkdir,
             // SSH
             connect_ssh,
             send_input,
