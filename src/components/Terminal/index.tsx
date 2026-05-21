@@ -240,6 +240,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
           <SftpBrowser
             sessionId={sftpSessionId}
             connectionId={connection?.id ?? tab.connection_id}
+            username={connection?.username}
             onConnect={handleSftpConnect}
           />
         </div>

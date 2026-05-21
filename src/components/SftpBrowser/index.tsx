@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
-  Folder, File, Upload, FolderPlus, RefreshCw, ChevronRight, HardDrive,
+  Folder, File, Upload, FolderPlus, RefreshCw, HardDrive,
 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -11,11 +11,14 @@ import type { SftpEntry } from "../../types";
 interface SftpBrowserProps {
   sessionId: string | null;
   connectionId: string;
+  username?: string;
   onConnect: (sessionId: string) => void;
 }
 
-export function SftpBrowser({ sessionId, connectionId, onConnect }: SftpBrowserProps) {
+export function SftpBrowser({ sessionId, connectionId, username, onConnect }: SftpBrowserProps) {
   const [currentPath, setCurrentPath] = useState("/");
+  const [pathInput, setPathInput] = useState("/");
+  const [editingPath, setEditingPath] = useState(false);
   const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,6 +27,7 @@ export function SftpBrowser({ sessionId, connectionId, onConnect }: SftpBrowserP
   const [newFolderMode, setNewFolderMode] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const newFolderInputRef = useRef<HTMLInputElement>(null);
+  const pathInputRef = useRef<HTMLInputElement>(null);
 
   const loadDir = useCallback(
     async (sid: string, path: string) => {
@@ -33,6 +37,7 @@ export function SftpBrowser({ sessionId, connectionId, onConnect }: SftpBrowserP
         const result = await sftpListDir(sid, path);
         setEntries(result);
         setCurrentPath(path);
+        setPathInput(path);
       } catch (err) {
         setError(String(err));
       } finally {
@@ -43,16 +48,29 @@ export function SftpBrowser({ sessionId, connectionId, onConnect }: SftpBrowserP
   );
 
   useEffect(() => {
-    if (sessionId) {
-      loadDir(sessionId, "/");
-    }
-  }, [sessionId, loadDir]);
+    if (!sessionId) return;
+    const home = username ? `/home/${username}` : "/";
+    sftpListDir(sessionId, home)
+      .then((result) => {
+        setEntries(result);
+        setCurrentPath(home);
+        setPathInput(home);
+      })
+      .catch(() => loadDir(sessionId, "/"));
+  }, [sessionId, username, loadDir]);
 
   useEffect(() => {
     if (newFolderMode && newFolderInputRef.current) {
       newFolderInputRef.current.focus();
     }
   }, [newFolderMode]);
+
+  useEffect(() => {
+    if (editingPath && pathInputRef.current) {
+      pathInputRef.current.focus();
+      pathInputRef.current.select();
+    }
+  }, [editingPath]);
 
   const handleConnect = async () => {
     setConnecting(true);
@@ -76,14 +94,11 @@ export function SftpBrowser({ sessionId, connectionId, onConnect }: SftpBrowserP
     if (currentPath === "/") return;
     const parts = currentPath.split("/").filter(Boolean);
     parts.pop();
-    const parent = "/" + parts.join("/");
-    navigateTo(parent || "/");
+    navigateTo("/" + parts.join("/") || "/");
   };
 
   const handleEntryClick = (entry: SftpEntry) => {
-    if (entry.is_dir) {
-      navigateTo(entry.path);
-    }
+    if (entry.is_dir) navigateTo(entry.path);
   };
 
   const handleUpload = async () => {
@@ -136,12 +151,14 @@ export function SftpBrowser({ sessionId, connectionId, onConnect }: SftpBrowserP
     if (sessionId) loadDir(sessionId, currentPath);
   };
 
-  // Drag-and-drop
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragging(true);
+  const commitPathInput = () => {
+    setEditingPath(false);
+    const p = pathInput.trim() || "/";
+    if (p !== currentPath) navigateTo(p);
   };
 
+  // Drag-and-drop upload
+  const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setDragging(true); };
   const handleDragLeave = () => setDragging(false);
 
   const handleDrop = async (e: React.DragEvent) => {
@@ -149,22 +166,23 @@ export function SftpBrowser({ sessionId, connectionId, onConnect }: SftpBrowserP
     setDragging(false);
     if (!sessionId) return;
     const files = Array.from(e.dataTransfer.files);
+    let anyUploaded = false;
     for (const file of files) {
-      // In Tauri, dropped files have a path
       const localPath = (file as File & { path?: string }).path;
-      if (!localPath) continue;
-      const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
+      if (!localPath) {
+        setError("No se pudo obtener la ruta del archivo. Usá el botón Upload.");
+        continue;
+      }
       try {
+        const remotePath = currentPath === "/" ? `/${file.name}` : `${currentPath}/${file.name}`;
         await sftpUpload(sessionId, localPath, remotePath);
+        anyUploaded = true;
       } catch (err) {
         setError(String(err));
       }
     }
-    loadDir(sessionId, currentPath);
+    if (anyUploaded) loadDir(sessionId, currentPath);
   };
-
-  // Breadcrumb segments
-  const pathSegments = currentPath.split("/").filter(Boolean);
 
   const formatSize = (bytes: number): string => {
     if (bytes === 0) return "—";
@@ -204,34 +222,34 @@ export function SftpBrowser({ sessionId, connectionId, onConnect }: SftpBrowserP
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {/* Breadcrumb */}
-      <div className="flex items-center gap-1 px-2 py-1.5 border-b border-[var(--color-border)] shrink-0 overflow-x-auto">
-        <button
-          onClick={() => navigateTo("/")}
-          className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] shrink-0"
-        >
-          /
-        </button>
-        {pathSegments.map((seg, i) => {
-          const segPath = "/" + pathSegments.slice(0, i + 1).join("/");
-          return (
-            <span key={segPath} className="flex items-center gap-1 shrink-0">
-              <ChevronRight size={10} className="text-[var(--color-text-muted)]" />
-              <button
-                onClick={() => navigateTo(segPath)}
-                className="text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] max-w-[80px] truncate"
-                title={seg}
-              >
-                {seg}
-              </button>
-            </span>
-          );
-        })}
+      {/* Path bar */}
+      <div className="flex items-center px-2 py-1.5 border-b border-[var(--color-border)] shrink-0 gap-1">
+        {editingPath ? (
+          <input
+            ref={pathInputRef}
+            value={pathInput}
+            onChange={(e) => setPathInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitPathInput();
+              if (e.key === "Escape") { setEditingPath(false); setPathInput(currentPath); }
+            }}
+            onBlur={commitPathInput}
+            className="flex-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-2 py-0.5 text-[10px] font-mono text-[var(--color-text-primary)] outline-none"
+          />
+        ) : (
+          <button
+            className="flex-1 text-left text-[10px] font-mono text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] truncate"
+            title="Click to edit path"
+            onClick={() => setEditingPath(true)}
+          >
+            {currentPath}
+          </button>
+        )}
       </div>
 
       {/* Error */}
       {error && (
-        <div className="px-2 py-1 text-[10px] text-[var(--color-danger)] bg-[var(--color-danger)]/10 shrink-0">
+        <div className="px-2 py-1 text-[10px] text-[var(--color-danger)] bg-[var(--color-danger)]/10 shrink-0 cursor-pointer" onClick={() => setError(null)}>
           {error}
         </div>
       )}
@@ -253,10 +271,7 @@ export function SftpBrowser({ sessionId, connectionId, onConnect }: SftpBrowserP
             </thead>
             <tbody>
               {currentPath !== "/" && (
-                <tr
-                  className="hover:bg-[var(--color-bg-hover)] cursor-pointer"
-                  onClick={navigateUp}
-                >
+                <tr className="hover:bg-[var(--color-bg-hover)] cursor-pointer" onClick={navigateUp}>
                   <td className="px-2 py-1 flex items-center gap-2">
                     <Folder size={12} className="text-[var(--color-text-muted)] shrink-0" />
                     <span className="text-[var(--color-text-muted)]">..</span>
@@ -277,15 +292,9 @@ export function SftpBrowser({ sessionId, connectionId, onConnect }: SftpBrowserP
                         onChange={(e) => setNewFolderName(e.target.value)}
                         onKeyDown={(e) => {
                           if (e.key === "Enter") handleMkdir();
-                          if (e.key === "Escape") {
-                            setNewFolderMode(false);
-                            setNewFolderName("");
-                          }
+                          if (e.key === "Escape") { setNewFolderMode(false); setNewFolderName(""); }
                         }}
-                        onBlur={() => {
-                          setNewFolderMode(false);
-                          setNewFolderName("");
-                        }}
+                        onBlur={() => { setNewFolderMode(false); setNewFolderName(""); }}
                         placeholder="New folder name…"
                         className="flex-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-2 py-0.5 text-xs text-[var(--color-text-primary)] outline-none"
                       />
@@ -298,10 +307,7 @@ export function SftpBrowser({ sessionId, connectionId, onConnect }: SftpBrowserP
                   key={entry.path}
                   className="hover:bg-[var(--color-bg-hover)] cursor-pointer group"
                   onClick={() => handleEntryClick(entry)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    handleDelete(entry);
-                  }}
+                  onContextMenu={(e) => { e.preventDefault(); handleDelete(entry); }}
                 >
                   <td className="px-2 py-1">
                     <div className="flex items-center gap-2">

@@ -288,7 +288,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
         const s = await rdpStatus(sessionIdRef.current);
         if (s === "disconnected") {
           setStatus("error");
-          setErrorMsg("La sesión RDP terminó. La ventana fue cerrada o se perdió la conexión.");
+          setErrorMsg("SESSION_ENDED");
           clearInterval(interval);
         }
       } catch { /* ignore */ }
@@ -322,7 +322,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
         className={
           status === "connected"
             ? "text-[var(--color-accent)] opacity-80"
-            : status === "error"
+            : status === "error" && errorMsg !== "SESSION_ENDED"
             ? "text-[var(--color-danger)] opacity-60"
             : "text-[var(--color-text-muted)] opacity-40 animate-pulse"
         }
