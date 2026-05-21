@@ -40,6 +40,12 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   // Multi-select
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const lastClickedRef = useRef<string | null>(null);
+
+  // Path autocomplete
+  const [pathSuggestions, setPathSuggestions] = useState<string[]>([]);
+  const [suggestionIdx, setSuggestionIdx] = useState(-1);
+  const suggestionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Inline creation / rename
   const [newFolderMode, setNewFolderMode] = useState(false);
@@ -186,6 +192,28 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
   useEffect(() => { if (renamingEntry) { renameRef.current?.focus(); renameRef.current?.select(); } }, [renamingEntry]);
   useEffect(() => { if (editingPath) { pathInputRef.current?.focus(); pathInputRef.current?.select(); } }, [editingPath]);
 
+  // ── path autocomplete ──────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!editingPath || !sessionId) { setPathSuggestions([]); return; }
+    if (suggestionTimer.current) clearTimeout(suggestionTimer.current);
+    suggestionTimer.current = setTimeout(async () => {
+      const lastSlash = pathInput.lastIndexOf("/");
+      const dir = pathInput.substring(0, lastSlash) || "/";
+      const fragment = pathInput.substring(lastSlash + 1).toLowerCase();
+      try {
+        const result = await sftpListDir(sessionId, dir);
+        const matches = result
+          .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(fragment))
+          .map((e) => e.path)
+          .slice(0, 8);
+        setPathSuggestions(matches);
+        setSuggestionIdx(-1);
+      } catch { setPathSuggestions([]); }
+    }, 250);
+    return () => { if (suggestionTimer.current) clearTimeout(suggestionTimer.current); };
+  }, [pathInput, editingPath, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── navigation ─────────────────────────────────────────────────────────────
 
   const navigateTo = (path: string) => { if (sessionId) loadDir(sessionId, path); };
@@ -288,7 +316,15 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
   // ── selection ──────────────────────────────────────────────────────────────
 
   const toggleSelect = (e: React.MouseEvent, entry: SftpEntry) => {
-    if (entry.is_dir) { navigateTo(entry.path); return; }
+    if (e.shiftKey && lastClickedRef.current) {
+      const lastIdx = entries.findIndex((en) => en.path === lastClickedRef.current);
+      const currIdx = entries.findIndex((en) => en.path === entry.path);
+      const start = Math.min(lastIdx, currIdx);
+      const end = Math.max(lastIdx, currIdx);
+      setSelected(new Set(entries.slice(start, end + 1).map((en) => en.path)));
+      return;
+    }
+    lastClickedRef.current = entry.path;
     if (e.ctrlKey || e.metaKey) {
       setSelected((prev) => {
         const next = new Set(prev);
@@ -348,17 +384,58 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
       onContextMenu={(e) => { e.preventDefault(); openCtxMenu(e); }}
     >
       {/* Path bar */}
-      <div className="flex items-center gap-1 px-1.5 py-1 border-b border-[var(--color-border)] shrink-0">
+      <div className="relative flex items-center gap-1 px-1.5 py-1 border-b border-[var(--color-border)] shrink-0">
         <button onClick={navigateUp} disabled={currentPath === "/"} title="Subir un nivel"
           className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-30 transition-colors">
           <ChevronLeft size={12} />
         </button>
         {editingPath ? (
-          <input ref={pathInputRef} value={pathInput} onChange={(e) => setPathInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") commitPathInput(); if (e.key === "Escape") { setEditingPath(false); setPathInput(currentPath); } }}
-            onBlur={commitPathInput}
-            className="flex-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-2 py-0.5 text-[10px] font-mono text-[var(--color-text-primary)] outline-none"
-          />
+          <div className="flex-1 relative">
+            <input
+              ref={pathInputRef}
+              value={pathInput}
+              onChange={(e) => { setPathInput(e.target.value); setSuggestionIdx(-1); }}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown") { e.preventDefault(); setSuggestionIdx((i) => Math.min(i + 1, pathSuggestions.length - 1)); return; }
+                if (e.key === "ArrowUp") { e.preventDefault(); setSuggestionIdx((i) => Math.max(i - 1, -1)); return; }
+                if (e.key === "Tab") {
+                  e.preventDefault();
+                  const pick = suggestionIdx >= 0 ? pathSuggestions[suggestionIdx] : pathSuggestions[0];
+                  if (pick) { setPathInput(pick + "/"); setPathSuggestions([]); }
+                  return;
+                }
+                if (e.key === "Enter") {
+                  if (suggestionIdx >= 0 && pathSuggestions[suggestionIdx]) {
+                    navigateTo(pathSuggestions[suggestionIdx]);
+                    setEditingPath(false);
+                    setPathSuggestions([]);
+                  } else {
+                    commitPathInput();
+                    setPathSuggestions([]);
+                  }
+                  return;
+                }
+                if (e.key === "Escape") { setEditingPath(false); setPathInput(currentPath); setPathSuggestions([]); }
+              }}
+              onBlur={() => { commitPathInput(); setPathSuggestions([]); }}
+              className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-2 py-0.5 text-[10px] font-mono text-[var(--color-text-primary)] outline-none"
+            />
+            {pathSuggestions.length > 0 && (
+              <div className="absolute top-full left-0 right-0 z-50 mt-0.5 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded shadow-lg max-h-40 overflow-y-auto">
+                {pathSuggestions.map((s, i) => (
+                  <button
+                    key={s}
+                    onMouseDown={(e) => { e.preventDefault(); setPathInput(s + "/"); setPathSuggestions([]); pathInputRef.current?.focus(); }}
+                    className={`w-full text-left px-2 py-0.5 text-[10px] font-mono truncate transition-colors ${
+                      i === suggestionIdx
+                        ? "bg-[var(--color-accent)]/20 text-[var(--color-text-primary)]"
+                        : "text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)]"
+                    }`}
+                  >{s}</button>
+                ))}
+              </div>
+            )}
+          </div>
         ) : (
           <button className="flex-1 text-left text-[10px] font-mono text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] truncate"
             title="Click para editar ruta" onClick={(e) => { e.stopPropagation(); setEditingPath(true); }}>
@@ -449,7 +526,7 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
                     className={`cursor-pointer ${isSelected ? "bg-[var(--color-accent)]/15" : "hover:bg-[var(--color-bg-hover)]"}`}
                     onClick={(e) => toggleSelect(e, entry)}
                     onContextMenu={(e) => { e.stopPropagation(); openCtxMenu(e, entry); }}
-                    onDoubleClick={() => { if (!entry.is_dir) handleDownloadEntry(entry); }}
+                    onDoubleClick={() => { entry.is_dir ? navigateTo(entry.path) : handleDownloadEntry(entry); }}
                   >
                     <td className="px-2 py-1">
                       <div className="flex items-center gap-2">

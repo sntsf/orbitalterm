@@ -228,27 +228,24 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
       </div>
 
       {/* Drag handle */}
-      {showSftp && (
-        <div
-          onMouseDown={onDividerMouseDown}
-          className="w-1 cursor-col-resize bg-[var(--color-border)] hover:bg-[var(--color-accent)] transition-colors shrink-0"
-        />
-      )}
+      <div
+        onMouseDown={onDividerMouseDown}
+        className="w-1 cursor-col-resize bg-[var(--color-border)] hover:bg-[var(--color-accent)] transition-colors shrink-0"
+        style={{ display: showSftp ? undefined : "none" }}
+      />
 
-      {/* SFTP panel */}
-      {showSftp && (
-        <div
-          className="overflow-hidden shrink-0"
-          style={{ width: `${sftpWidth}%` }}
-        >
-          <SftpBrowser
-            sessionId={sftpSessionId}
-            connectionId={connection?.id ?? tab.connection_id}
-            username={connection?.username}
-            onConnect={handleSftpConnect}
-          />
-        </div>
-      )}
+      {/* SFTP panel — always mounted to preserve navigation state */}
+      <div
+        className="overflow-hidden shrink-0"
+        style={{ width: `${sftpWidth}%`, display: showSftp ? undefined : "none" }}
+      >
+        <SftpBrowser
+          sessionId={sftpSessionId}
+          connectionId={connection?.id ?? tab.connection_id}
+          username={connection?.username}
+          onConnect={handleSftpConnect}
+        />
+      </div>
     </div>
   );
 }
