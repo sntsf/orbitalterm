@@ -52,6 +52,35 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
   const renameRef = useRef<HTMLInputElement>(null);
   const pathInputRef = useRef<HTMLInputElement>(null);
 
+  const loadDir = useCallback(async (sid: string, path: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await sftpListDir(sid, path);
+      setEntries(result);
+      setCurrentPath(path);
+      setPathInput(path);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const doUpload = useCallback(async (localPaths: string[]) => {
+    if (!sessionId) return;
+    for (const localPath of localPaths) {
+      const fileName = localPath.split(/[\\/]/).pop() ?? "file";
+      // flushSync forces React to paint the progress bar before the upload starts
+      flushSync(() => { setUploadFile(fileName); setUploadPct(0); });
+      const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
+      try { await sftpUpload(sessionId, localPath, remotePath); }
+      catch (err) { setError(String(err)); }
+    }
+    setUploadFile(null);
+    loadDir(sessionId, currentPath);
+  }, [sessionId, currentPath, loadDir]);
+
   // Upload progress events from Rust
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -68,7 +97,6 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     getCurrentWebviewWindow().onDragDropEvent((event) => {
       const p = event.payload;
       if (p.type === "enter" || p.type === "over") {
-        // Only highlight when hovering over this panel
         const rect = containerRef.current?.getBoundingClientRect();
         if (rect) {
           const dpr = window.devicePixelRatio || 1;
@@ -93,21 +121,6 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     }).then((fn) => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, [sessionId, doUpload]);
-
-  const loadDir = useCallback(async (sid: string, path: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await sftpListDir(sid, path);
-      setEntries(result);
-      setCurrentPath(path);
-      setPathInput(path);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -144,20 +157,6 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     catch (err) { setError(String(err)); }
     finally { setConnecting(false); }
   };
-
-  const doUpload = useCallback(async (localPaths: string[]) => {
-    if (!sessionId) return;
-    for (const localPath of localPaths) {
-      const fileName = localPath.split(/[\\/]/).pop() ?? "file";
-      // flushSync forces React to paint the progress bar before the upload starts
-      flushSync(() => { setUploadFile(fileName); setUploadPct(0); });
-      const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
-      try { await sftpUpload(sessionId, localPath, remotePath); }
-      catch (err) { setError(String(err)); }
-    }
-    setUploadFile(null);
-    loadDir(sessionId, currentPath);
-  }, [sessionId, currentPath, loadDir]);
 
   const handleUpload = async () => {
     const selected = await openDialog({ multiple: true }).catch(() => null);
