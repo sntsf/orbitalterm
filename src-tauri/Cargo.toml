@@ -32,10 +32,12 @@ dirs = "5"
 portable-pty = "0.8"
 tempfile = "3"
 ssh2 = "0.9"
-
-[target.'cfg(target_os = "linux")'.dependencies]
+suppaftp = "6"
+des = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 base64 = "0.22"
+
+[target.'cfg(target_os = "linux")'.dependencies]
 
 # Compile image-encoding crates at full optimization even in dev builds.
 # JPEG encoding in the `image` crate is ~20x slower in debug than release;

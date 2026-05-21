@@ -1,12 +1,18 @@
 mod commands;
 mod db;
+mod ftp;
 mod rdp;
 mod sftp;
 mod ssh;
+mod vnc;
 
 use commands::connections::{
     delete_connection, delete_folder, export_connections, get_connections, get_folders,
     import_connections, reorder_connections, save_connection, save_folder, update_connection,
+};
+use commands::ftp::{
+    ftp_connect, ftp_delete, ftp_disconnect, ftp_download, ftp_list_dir, ftp_mkdir, ftp_pwd,
+    ftp_rename, ftp_upload,
 };
 use commands::sessions::{
     connect_rdp, connect_ssh, delete_password, disconnect_rdp, disconnect_ssh, has_password,
@@ -17,6 +23,7 @@ use commands::sftp::{
     sftp_connect, sftp_create_file, sftp_delete, sftp_disconnect, sftp_download, sftp_list_dir,
     sftp_mkdir, sftp_rename, sftp_upload,
 };
+use commands::vnc::{vnc_connect, vnc_disconnect, vnc_key_event, vnc_pointer_event};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -27,6 +34,8 @@ pub fn run() {
         .manage(rdp::new_rdp_sessions())
         .manage(rdp::new_embedded_rdp_sessions())
         .manage(sftp::new_sftp_sessions())
+        .manage(ftp::new_ftp_sessions())
+        .manage(vnc::new_vnc_sessions())
         .invoke_handler(tauri::generate_handler![
             // connections
             get_connections,
@@ -39,11 +48,12 @@ pub fn run() {
             delete_folder,
             export_connections,
             import_connections,
-            // sessions
+            // SSH
             connect_ssh,
             send_input,
             resize_pty,
             disconnect_ssh,
+            // RDP
             connect_rdp,
             rdp_status,
             disconnect_rdp,
@@ -57,7 +67,7 @@ pub fn run() {
             save_password,
             delete_password,
             has_password,
-            // sftp
+            // SFTP
             sftp_connect,
             sftp_list_dir,
             sftp_upload,
@@ -67,6 +77,21 @@ pub fn run() {
             sftp_rename,
             sftp_delete,
             sftp_disconnect,
+            // FTP
+            ftp_connect,
+            ftp_list_dir,
+            ftp_upload,
+            ftp_download,
+            ftp_mkdir,
+            ftp_delete,
+            ftp_rename,
+            ftp_pwd,
+            ftp_disconnect,
+            // VNC
+            vnc_connect,
+            vnc_key_event,
+            vnc_pointer_event,
+            vnc_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("error while running OrbitalTerm");

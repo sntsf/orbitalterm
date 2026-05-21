@@ -1,33 +1,300 @@
-import { MonitorDot } from "lucide-react";
-import type { Tab } from "../../types";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Monitor, WifiOff, Loader } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { vncConnect, vncDisconnect, vncKeyEvent, vncPointerEvent } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
+import type { Tab } from "../../types";
 
 interface VncPaneProps {
   tab: Tab;
 }
 
+// Map DOM KeyboardEvent.code → X11 keysym (RFB uses X11 keysyms)
+function domKeyToKeysym(e: KeyboardEvent): number {
+  // Printable ASCII: keysym = Unicode codepoint
+  if (e.key.length === 1) {
+    return e.key.charCodeAt(0);
+  }
+  switch (e.code) {
+    // Function keys
+    case "F1":  return 0xffbe;
+    case "F2":  return 0xffbf;
+    case "F3":  return 0xffc0;
+    case "F4":  return 0xffc1;
+    case "F5":  return 0xffc2;
+    case "F6":  return 0xffc3;
+    case "F7":  return 0xffc4;
+    case "F8":  return 0xffc5;
+    case "F9":  return 0xffc6;
+    case "F10": return 0xffc7;
+    case "F11": return 0xffc8;
+    case "F12": return 0xffc9;
+    // Navigation
+    case "Escape":    return 0xff1b;
+    case "Tab":       return 0xff09;
+    case "Enter":     return 0xff0d;
+    case "Backspace": return 0xff08;
+    case "Delete":    return 0xffff;
+    case "Insert":    return 0xff63;
+    case "Home":      return 0xff50;
+    case "End":       return 0xff57;
+    case "PageUp":    return 0xff55;
+    case "PageDown":  return 0xff56;
+    case "ArrowLeft":  return 0xff51;
+    case "ArrowUp":    return 0xff52;
+    case "ArrowRight": return 0xff53;
+    case "ArrowDown":  return 0xff54;
+    // Modifiers
+    case "ShiftLeft":   case "ShiftRight":   return 0xffe1;
+    case "ControlLeft": case "ControlRight": return 0xffe3;
+    case "AltLeft":     return 0xffe9;
+    case "AltRight":    return 0xffea;
+    case "MetaLeft":    case "MetaRight":    return 0xffeb;
+    case "CapsLock":    return 0xffe5;
+    case "NumLock":     return 0xff7f;
+    case "ScrollLock":  return 0xff14;
+    // Numpad
+    case "Numpad0": return 0xffb0;
+    case "Numpad1": return 0xffb1;
+    case "Numpad2": return 0xffb2;
+    case "Numpad3": return 0xffb3;
+    case "Numpad4": return 0xffb4;
+    case "Numpad5": return 0xffb5;
+    case "Numpad6": return 0xffb6;
+    case "Numpad7": return 0xffb7;
+    case "Numpad8": return 0xffb8;
+    case "Numpad9": return 0xffb9;
+    case "NumpadAdd":      return 0xffab;
+    case "NumpadSubtract": return 0xffad;
+    case "NumpadMultiply": return 0xffaa;
+    case "NumpadDivide":   return 0xffaf;
+    case "NumpadDecimal":  return 0xffae;
+    case "NumpadEnter":    return 0xff8d;
+    default: return 0;
+  }
+}
+
+interface VncFrame {
+  data: string;
+  width: number;
+  height: number;
+}
+
 export function VncPane({ tab }: VncPaneProps) {
-  const { getConnectionById } = useAppStore();
+  const { getConnectionById, setTabStatus } = useAppStore();
   const connection = getConnectionById(tab.connection_id);
-  const host = connection?.host ?? "unknown";
-  const port = connection?.port ?? 5900;
+
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const sessionIdRef = useRef<string | null>(null);
+
+  const [status, setStatus] = useState<"connecting" | "connected" | "disconnected" | "error">("connecting");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [vncSize, setVncSize] = useState({ width: 1024, height: 768 });
+  const [reconnecting, setReconnecting] = useState(false);
+
+  // Draw a received JPEG frame onto the canvas
+  const drawFrame = useCallback((payload: VncFrame) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const img = new Image();
+    img.onload = () => { ctx.drawImage(img, 0, 0); };
+    img.src = `data:image/jpeg;base64,${payload.data}`;
+  }, []);
+
+  const connect = useCallback(async () => {
+    if (!connection) return;
+    setStatus("connecting");
+    setErrorMsg(null);
+    try {
+      const result = await vncConnect(connection.id);
+      sessionIdRef.current = result.session_id;
+      setVncSize({ width: result.width, height: result.height });
+      setStatus("connected");
+      setTabStatus(tab.id, "connected");
+    } catch (err) {
+      setStatus("error");
+      setErrorMsg(String(err));
+      setTabStatus(tab.id, "error");
+    }
+  }, [connection, tab.id, setTabStatus]);
+
+  // Connect on mount
+  useEffect(() => {
+    connect();
+    return () => {
+      if (sessionIdRef.current) {
+        vncDisconnect(sessionIdRef.current).catch(console.error);
+        sessionIdRef.current = null;
+      }
+    };
+  }, [tab.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Listen to frames and disconnection events
+  useEffect(() => {
+    if (status !== "connected" || !sessionIdRef.current) return;
+    const sid = sessionIdRef.current;
+    const cleanups: (() => void)[] = [];
+
+    listen<VncFrame>(`vnc-frame-${sid}`, (e) => drawFrame(e.payload))
+      .then((fn) => cleanups.push(fn));
+    listen(`vnc-disconnected-${sid}`, () => {
+      setStatus("disconnected");
+      setTabStatus(tab.id, "error");
+    }).then((fn) => cleanups.push(fn));
+
+    return () => cleanups.forEach((fn) => fn());
+  }, [status, drawFrame, tab.id, setTabStatus]);
+
+  // Mouse event handlers
+  const getVncCoords = (e: React.MouseEvent): { x: number; y: number } => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = vncSize.width / rect.width;
+    const scaleY = vncSize.height / rect.height;
+    return {
+      x: Math.round((e.clientX - rect.left) * scaleX),
+      y: Math.round((e.clientY - rect.top) * scaleY),
+    };
+  };
+
+  const getButtons = (e: React.MouseEvent, isDown: boolean): number => {
+    if (!isDown) return 0;
+    // RFB button mask: bit0=left, bit1=middle, bit2=right
+    switch (e.button) {
+      case 0: return 0x01;
+      case 1: return 0x02;
+      case 2: return 0x04;
+      default: return 0;
+    }
+  };
+
+  const sendPointer = (e: React.MouseEvent, buttons: number) => {
+    if (!sessionIdRef.current) return;
+    const { x, y } = getVncCoords(e);
+    vncPointerEvent(sessionIdRef.current, buttons, x, y).catch(console.error);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!sessionIdRef.current) return;
+    // Send current button state with position
+    const { x, y } = getVncCoords(e);
+    const buttons = (e.buttons & 1) | ((e.buttons & 4) >> 1) | ((e.buttons & 2) << 1);
+    vncPointerEvent(sessionIdRef.current, buttons, x, y).catch(console.error);
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    if (!sessionIdRef.current) return;
+    const { x, y } = getVncCoords(e as unknown as React.MouseEvent);
+    // Wheel up = button 4 (0x08), wheel down = button 5 (0x10)
+    const btn = e.deltaY < 0 ? 0x08 : 0x10;
+    vncPointerEvent(sessionIdRef.current, btn, x, y).catch(console.error);
+    vncPointerEvent(sessionIdRef.current, 0, x, y).catch(console.error);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (!sessionIdRef.current) return;
+    e.preventDefault();
+    const key = domKeyToKeysym(e.nativeEvent);
+    if (key) vncKeyEvent(sessionIdRef.current, true, key).catch(console.error);
+  };
+
+  const handleKeyUp = (e: React.KeyboardEvent) => {
+    if (!sessionIdRef.current) return;
+    e.preventDefault();
+    const key = domKeyToKeysym(e.nativeEvent);
+    if (key) vncKeyEvent(sessionIdRef.current, false, key).catch(console.error);
+  };
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+  };
+
+  const handleReconnect = async () => {
+    if (sessionIdRef.current) {
+      vncDisconnect(sessionIdRef.current).catch(console.error);
+      sessionIdRef.current = null;
+    }
+    setReconnecting(true);
+    try { await connect(); }
+    finally { setReconnecting(false); }
+  };
+
+  // ── Error / disconnected states ────────────────────────────────────────────
+
+  if (status === "connecting" || status === "error" || status === "disconnected") {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-4 text-[var(--color-text-muted)] bg-[var(--color-bg-base)]">
+        {status === "connecting" ? (
+          <>
+            <Loader size={32} className="animate-spin opacity-40" />
+            <p className="text-xs">Conectando a VNC…</p>
+            {connection && (
+              <p className="text-[10px] text-[var(--color-text-muted)]">
+                {connection.host}:{connection.port}
+              </p>
+            )}
+          </>
+        ) : (
+          <>
+            <WifiOff size={32} className={status === "disconnected" ? "opacity-40" : "text-[var(--color-danger)] opacity-70"} />
+            <p className="text-xs font-medium text-[var(--color-text-primary)]">
+              {status === "disconnected" ? "Sesión VNC desconectada" : "Error de conexión VNC"}
+            </p>
+            {errorMsg && (
+              <p className="text-[10px] text-[var(--color-danger)] max-w-xs text-center px-4">{errorMsg}</p>
+            )}
+            <button
+              onClick={handleReconnect}
+              disabled={reconnecting}
+              className="px-4 py-1.5 bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white text-xs rounded transition-colors disabled:opacity-50"
+            >
+              {reconnecting ? "Reconectando…" : "Reconectar"}
+            </button>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // ── Connected: canvas viewer ───────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-4 text-[var(--color-text-muted)]">
-      <MonitorDot size={40} className="opacity-40" />
-      <p className="text-sm font-medium text-[var(--color-text-primary)]">VNC Connection</p>
-      <p className="text-xs">
-        Target: <span className="text-[var(--color-accent)]">{host}:{port}</span>
-      </p>
-      <div className="max-w-xs text-center text-xs leading-relaxed">
-        <p className="mb-2">VNC is not yet natively embedded. To connect, use a VNC client:</p>
-        <code className="block bg-[var(--color-bg-elevated)] rounded px-3 py-2 text-[var(--color-text-primary)] font-mono">
-          vncviewer {host}:{port}
-        </code>
-        <p className="mt-2 text-[10px] text-[var(--color-text-muted)]">
-          Install: <code>sudo apt install tigervnc-viewer</code>
-        </p>
+    <div
+      ref={containerRef}
+      className="flex items-center justify-center w-full h-full bg-black overflow-hidden focus:outline-none"
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      onKeyUp={handleKeyUp}
+    >
+      {/* Status bar */}
+      <div className="absolute top-1 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 bg-black/60 rounded px-2 py-0.5 opacity-0 hover:opacity-100 transition-opacity">
+        <Monitor size={10} className="text-green-400" />
+        <span className="text-[10px] text-[var(--color-text-muted)] font-mono">
+          {connection?.host}:{connection?.port} — {vncSize.width}×{vncSize.height}
+        </span>
       </div>
+
+      <canvas
+        ref={canvasRef}
+        width={vncSize.width}
+        height={vncSize.height}
+        style={{
+          maxWidth: "100%",
+          maxHeight: "100%",
+          objectFit: "contain",
+          cursor: "crosshair",
+          display: "block",
+        }}
+        onMouseDown={(e) => { sendPointer(e, getButtons(e, true)); (e.currentTarget.parentElement as HTMLDivElement)?.focus(); }}
+        onMouseUp={(e) => sendPointer(e, 0)}
+        onMouseMove={handleMouseMove}
+        onWheel={handleWheel}
+        onContextMenu={handleContextMenu}
+      />
     </div>
   );
 }

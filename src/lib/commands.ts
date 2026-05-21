@@ -191,3 +191,98 @@ export async function sftpDelete(
 export async function sftpDisconnect(sessionId: string): Promise<void> {
   return invoke("sftp_disconnect", { sessionId });
 }
+
+// ── FTP sessions ───────────────────────────────────────────────────────────────
+
+export interface FtpEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified: string;
+}
+
+export async function ftpConnect(connectionId: string): Promise<string> {
+  return invoke("ftp_connect", { connectionId });
+}
+
+export async function ftpListDir(sessionId: string, path: string): Promise<FtpEntry[]> {
+  return invoke("ftp_list_dir", { sessionId, path });
+}
+
+export async function ftpUpload(
+  sessionId: string,
+  localPath: string,
+  remotePath: string,
+): Promise<void> {
+  return invoke("ftp_upload", { sessionId, localPath, remotePath });
+}
+
+export async function ftpDownload(
+  sessionId: string,
+  remotePath: string,
+  localPath: string,
+): Promise<void> {
+  return invoke("ftp_download", { sessionId, remotePath, localPath });
+}
+
+export async function ftpMkdir(sessionId: string, path: string): Promise<void> {
+  return invoke("ftp_mkdir", { sessionId, path });
+}
+
+export async function ftpDelete(
+  sessionId: string,
+  path: string,
+  isDir: boolean,
+): Promise<void> {
+  return invoke("ftp_delete", { sessionId, path, isDir });
+}
+
+export async function ftpRename(
+  sessionId: string,
+  oldPath: string,
+  newPath: string,
+): Promise<void> {
+  return invoke("ftp_rename", { sessionId, oldPath, newPath });
+}
+
+export async function ftpPwd(sessionId: string): Promise<string> {
+  return invoke("ftp_pwd", { sessionId });
+}
+
+export async function ftpDisconnect(sessionId: string): Promise<void> {
+  return invoke("ftp_disconnect", { sessionId });
+}
+
+// ── VNC sessions ───────────────────────────────────────────────────────────────
+
+export interface VncConnectResult {
+  session_id: string;
+  width: number;
+  height: number;
+}
+
+export async function vncConnect(connectionId: string): Promise<VncConnectResult> {
+  return invoke("vnc_connect", { connectionId });
+}
+
+export async function vncKeyEvent(
+  sessionId: string,
+  down: boolean,
+  key: number,
+): Promise<void> {
+  return invoke("vnc_key_event", { sessionId, down, key });
+}
+
+export async function vncPointerEvent(
+  sessionId: string,
+  buttons: number,
+  x: number,
+  y: number,
+): Promise<void> {
+  return invoke("vnc_pointer_event", { sessionId, buttons, x, y });
+}
+
+export async function vncDisconnect(sessionId: string): Promise<void> {
+  return invoke("vnc_disconnect", { sessionId });
+}
