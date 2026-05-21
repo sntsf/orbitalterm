@@ -2,7 +2,7 @@ use serde::Serialize;
 use ssh2::Session;
 use std::net::TcpStream;
 use std::path::Path;
-use tauri::State;
+use tauri::{Emitter, State};
 use uuid::Uuid;
 
 use crate::{commands::sessions::load_connection, sftp::{SftpConn, SftpSessionMap}};
@@ -118,6 +118,7 @@ pub async fn sftp_list_dir(
 
 #[tauri::command]
 pub async fn sftp_upload(
+    app: tauri::AppHandle,
     sftp_sessions: State<'_, SftpSessionMap>,
     session_id: String,
     local_path: String,
@@ -125,19 +126,24 @@ pub async fn sftp_upload(
 ) -> Result<(), String> {
     let data = std::fs::read(&local_path)
         .map_err(|e| format!("Failed to read local file: {e}"))?;
+    let total = data.len() as u64;
 
     let map = sftp_sessions.lock().unwrap();
     let conn = map.get(&session_id).ok_or("SFTP session not found")?;
-
     let sftp = conn.session.sftp().map_err(|e| format!("SFTP subsystem error: {e}"))?;
-
-    let remote = std::path::Path::new(&remote_path);
     let mut file = sftp
-        .create(remote)
+        .create(std::path::Path::new(&remote_path))
         .map_err(|e| format!("Failed to create remote file: {e}"))?;
 
     use std::io::Write;
-    file.write_all(&data).map_err(|e| format!("Failed to write remote file: {e}"))?;
+    let chunk_size: usize = 32 * 1024;
+    let mut written: u64 = 0;
+    for chunk in data.chunks(chunk_size) {
+        file.write_all(chunk).map_err(|e| format!("Failed to write remote file: {e}"))?;
+        written += chunk.len() as u64;
+        let pct = if total > 0 { (written * 100 / total) as u8 } else { 100 };
+        app.emit("sftp-upload-progress", pct).ok();
+    }
 
     Ok(())
 }
