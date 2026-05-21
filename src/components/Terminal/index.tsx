@@ -62,17 +62,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
   }, []);
 
   const toggleSftp = () => {
-    setShowSftp((v) => {
-      if (v) {
-        // Closing sftp panel — disconnect
-        if (sftpSessionId) {
-          sftpDisconnect(sftpSessionId).catch(console.error);
-          setSftpSessionId(null);
-        }
-      }
-      return !v;
-    });
-    // Re-fit after toggle
+    setShowSftp((v) => !v);
     setTimeout(() => fitAddonRef.current?.fit(), 50);
   };
 

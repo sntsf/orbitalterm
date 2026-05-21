@@ -1,9 +1,11 @@
 import { useEffect, useState, useCallback, useRef } from "react";
+import { flushSync } from "react-dom";
 import {
   Folder, File, Upload, Download, FolderPlus, FilePlus, RefreshCw,
   HardDrive, ChevronLeft, Pencil, Trash2,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   sftpConnect, sftpListDir, sftpUpload, sftpDownload, sftpMkdir,
@@ -29,7 +31,6 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [dragging, setDragging] = useState(false);
-  const dragCounter = useRef(0);
 
   // Transfer progress (0-100 | null = idle)
   const [uploadFile, setUploadFile] = useState<string | null>(null);
@@ -45,12 +46,13 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null);
 
+  const containerRef = useRef<HTMLDivElement>(null);
   const newFolderRef = useRef<HTMLInputElement>(null);
   const newFileRef = useRef<HTMLInputElement>(null);
   const renameRef = useRef<HTMLInputElement>(null);
   const pathInputRef = useRef<HTMLInputElement>(null);
 
-  // Listen to upload progress events from Rust
+  // Upload progress events from Rust
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     listen<number>("sftp-upload-progress", (e) => {
@@ -58,6 +60,39 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     }).then((fn) => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, []);
+
+  // Tauri native drag-drop (gives real OS file paths on Linux)
+  useEffect(() => {
+    if (!sessionId) return;
+    let unlisten: (() => void) | null = null;
+    getCurrentWebviewWindow().onDragDropEvent((event) => {
+      const p = event.payload;
+      if (p.type === "enter" || p.type === "over") {
+        // Only highlight when hovering over this panel
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (rect) {
+          const dpr = window.devicePixelRatio || 1;
+          const cx = p.position.x / dpr;
+          const cy = p.position.y / dpr;
+          setDragging(cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom);
+        }
+      } else if (p.type === "drop") {
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (rect && p.paths?.length) {
+          const dpr = window.devicePixelRatio || 1;
+          const cx = p.position.x / dpr;
+          const cy = p.position.y / dpr;
+          if (cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom) {
+            doUpload(p.paths);
+          }
+        }
+        setDragging(false);
+      } else if (p.type === "leave") {
+        setDragging(false);
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [sessionId, doUpload]);
 
   const loadDir = useCallback(async (sid: string, path: string) => {
     setLoading(true);
@@ -110,19 +145,19 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     finally { setConnecting(false); }
   };
 
-  const doUpload = async (localPaths: string[]) => {
+  const doUpload = useCallback(async (localPaths: string[]) => {
     if (!sessionId) return;
     for (const localPath of localPaths) {
       const fileName = localPath.split(/[\\/]/).pop() ?? "file";
-      setUploadFile(fileName);
-      setUploadPct(0);
+      // flushSync forces React to paint the progress bar before the upload starts
+      flushSync(() => { setUploadFile(fileName); setUploadPct(0); });
       const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
       try { await sftpUpload(sessionId, localPath, remotePath); }
       catch (err) { setError(String(err)); }
     }
     setUploadFile(null);
     loadDir(sessionId, currentPath);
-  };
+  }, [sessionId, currentPath, loadDir]);
 
   const handleUpload = async () => {
     const selected = await openDialog({ multiple: true }).catch(() => null);
@@ -141,28 +176,10 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     finally { setTimeout(() => setUploadFile(null), 800); }
   };
 
-  // Drag-and-drop with counter so dragging over children doesn't flicker
-  const handleDragEnter = (e: React.DragEvent) => {
-    e.preventDefault();
-    dragCounter.current++;
-    setDragging(true);
-  };
-  const handleDragLeave = () => {
-    dragCounter.current--;
-    if (dragCounter.current <= 0) { dragCounter.current = 0; setDragging(false); }
-  };
+  // HTML5 drag handlers kept only to prevent browser default (open file).
+  // Actual file paths come from Tauri's onDragDropEvent above.
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); };
-  const handleDrop = async (e: React.DragEvent) => {
-    e.preventDefault();
-    dragCounter.current = 0;
-    setDragging(false);
-    if (!sessionId) return;
-    const paths = Array.from(e.dataTransfer.files)
-      .map((f) => (f as File & { path?: string }).path)
-      .filter((p): p is string => !!p);
-    if (paths.length === 0) { setError("No se pudo obtener la ruta. Usá el botón Upload."); return; }
-    await doUpload(paths);
-  };
+  const handleDrop = (e: React.DragEvent) => { e.preventDefault(); };
 
   const handleMkdir = async () => {
     const name = newFolderName.trim();
@@ -225,11 +242,10 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   return (
     <div
+      ref={containerRef}
       className={`flex flex-col h-full bg-[var(--color-bg-surface)] border-l border-[var(--color-border)] select-none ${
         dragging ? "ring-2 ring-inset ring-[var(--color-accent)]" : ""
       }`}
-      onDragEnter={handleDragEnter}
-      onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       onClick={() => setCtxMenu(null)}
