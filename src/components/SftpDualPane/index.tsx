@@ -68,6 +68,14 @@ interface PanelProps {
   onRenameCancel?: () => void;
   fetchDir: (path: string) => Promise<AnyEntry[]>;
   onFlatRowsChange?: (rows: AnyEntry[]) => void;
+  // Drag-and-drop props
+  isDragOver: boolean;
+  dragOverFolderPath: string | null;
+  onRowDragStart: (entry: AnyEntry, selectedFileEntries: AnyEntry[]) => void;
+  onPanelDragOver: (e: React.DragEvent) => void;
+  onFolderDragOver: (path: string) => void;
+  onDropOnPanel: (targetFolder: string | null) => void;
+  onDragLeave: () => void;
 }
 
 function FilePanel({
@@ -77,6 +85,8 @@ function FilePanel({
   onMkdir,
   renamingPath, renameValue, onRenameChange, onRenameCommit, onRenameCancel,
   fetchDir, onFlatRowsChange,
+  isDragOver, dragOverFolderPath,
+  onRowDragStart, onPanelDragOver, onFolderDragOver, onDropOnPanel, onDragLeave,
 }: PanelProps) {
   const [editingPath, setEditingPath] = useState(false);
   const [pathInput, setPathInput] = useState(path);
@@ -212,9 +222,14 @@ function FilePanel({
 
   return (
     <div
-      className="flex flex-col h-full bg-[var(--color-bg-surface)] min-w-0"
+      className="flex flex-col h-full bg-[var(--color-bg-surface)] min-w-0 relative"
       onContextMenu={(e) => { e.preventDefault(); onCtxMenu(e); }}
     >
+      {/* Drag-over overlay */}
+      {isDragOver && (
+        <div className="absolute inset-0 bg-[var(--color-accent)]/10 border-2 border-[var(--color-accent)] pointer-events-none z-20" />
+      )}
+
       {/* Header */}
       <div className={`flex items-center gap-2 px-3 py-1.5 border-b border-[var(--color-border)] shrink-0 ${accentClass}`}>
         <span className="text-[10px] font-semibold uppercase tracking-wider">{title}</span>
@@ -320,7 +335,12 @@ function FilePanel({
       )}
 
       {/* File list */}
-      <div className="flex-1 overflow-y-auto min-h-0 text-xs">
+      <div
+        className="flex-1 overflow-y-auto min-h-0 text-xs"
+        onDragOver={(e) => { e.preventDefault(); onPanelDragOver(e); }}
+        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) onDragLeave(); }}
+        onDrop={(e) => { e.preventDefault(); onDropOnPanel(null); }}
+      >
         {loading ? (
           <div className="flex items-center justify-center h-full">
             <Loader size={16} className="animate-spin text-[var(--color-text-muted)]" />
@@ -367,15 +387,31 @@ function FilePanel({
               {flatRows.map(({ entry, depth, isExpanded, isLoading }) => {
                 const isSel = selected.has(entry.path);
                 const ext = fileExt(entry.name, entry.is_dir);
+                const isFolderDragTarget = entry.is_dir && dragOverFolderPath === entry.path;
                 return (
                   <tr
                     key={entry.path}
+                    draggable={!entry.is_dir}
                     className={`cursor-pointer border-b border-[var(--color-border)]/30 ${
-                      isSel ? "bg-[var(--color-accent)]/20" : "hover:bg-[var(--color-bg-hover)]"
+                      isFolderDragTarget
+                        ? "bg-[var(--color-accent)]/30"
+                        : isSel
+                          ? "bg-[var(--color-accent)]/20"
+                          : "hover:bg-[var(--color-bg-hover)]"
                     }`}
                     onClick={(e) => onSelect(e, entry)}
                     onDoubleClick={() => { if (entry.is_dir) onNavigate(entry.path); }}
                     onContextMenu={(e) => { e.stopPropagation(); onCtxMenu(e, entry); }}
+                    onDragStart={(e) => {
+                      if (entry.is_dir) { e.preventDefault(); return; }
+                      e.dataTransfer.effectAllowed = "copy";
+                      const selFiles = flatRows
+                        .map((r) => r.entry)
+                        .filter((en) => !en.is_dir && selected.has(en.path));
+                      onRowDragStart(entry, selFiles.length > 0 ? selFiles : [entry]);
+                    }}
+                    onDragOver={entry.is_dir ? (e) => { e.stopPropagation(); e.preventDefault(); if (dragOverFolderPath !== entry.path) onFolderDragOver(entry.path); } : undefined}
+                    onDrop={entry.is_dir ? (e) => { e.stopPropagation(); e.preventDefault(); onDropOnPanel(entry.path); } : undefined}
                   >
                     <td className="py-0.5" style={{ paddingLeft: `${depth * 14 + 4}px`, paddingRight: "4px" }}>
                       <div className="flex items-center gap-1 min-w-0">
@@ -500,6 +536,11 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
 
   // Context menu
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null);
+
+  // Drag-and-drop state
+  const dragSrcRef = useRef<{ side: "local" | "remote"; entries: AnyEntry[] } | null>(null);
+  const [dragOverPanel, setDragOverPanel] = useState<"local" | "remote" | null>(null);
+  const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
 
   // ── fetchDir helpers ────────────────────────────────────────────────────────
 
@@ -800,6 +841,82 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
     setCtxMenu({ x: e.clientX, y: e.clientY, side, entry });
   };
 
+  // ── Drag-and-drop handlers ──────────────────────────────────────────────────
+
+  const handleRowDragStart = (side: "local" | "remote", _entry: AnyEntry, files: AnyEntry[]) => {
+    dragSrcRef.current = { side, entries: files };
+  };
+
+  const handlePanelDragOver = (_e: React.DragEvent, side: "local" | "remote") => {
+    if (!dragSrcRef.current || dragSrcRef.current.side === side) return;
+    setDragOverPanel(side);
+    setDragOverFolder(null);
+  };
+
+  const handleFolderDragOver = (side: "local" | "remote", folderPath: string) => {
+    if (!dragSrcRef.current || dragSrcRef.current.side === side) return;
+    setDragOverPanel(side);
+    setDragOverFolder(folderPath);
+  };
+
+  const handleDragLeave = (side: "local" | "remote") => {
+    if (dragOverPanel === side) {
+      setDragOverPanel(null);
+      setDragOverFolder(null);
+    }
+  };
+
+  const handleDropOnPanel = async (targetSide: "local" | "remote", targetFolder: string | null) => {
+    const src = dragSrcRef.current;
+    setDragOverPanel(null);
+    setDragOverFolder(null);
+    dragSrcRef.current = null;
+    if (!src || src.side === targetSide || src.entries.length === 0) return;
+    if (!sessionIdRef.current) return;
+
+    const filesToTransfer = src.entries.filter((e) => !e.is_dir);
+    if (filesToTransfer.length === 0) return;
+
+    setTransferring(true);
+    if (src.side === "local" && targetSide === "remote") {
+      const destDir = targetFolder ?? remotePath;
+      for (const entry of filesToTransfer) {
+        const remoteDest = destDir === "/" ? `/${entry.name}` : `${destDir}/${entry.name}`;
+        flushSync(() => {
+          setTransferLabel(`↑ ${entry.name}`);
+          setProgress({ transferred: 0, total: entry.size });
+        });
+        try {
+          await sftpUpload(sessionIdRef.current!, entry.path, remoteDest);
+        } catch (err) {
+          setRemoteError(String(err));
+          break;
+        }
+      }
+      setTransferLabel(null);
+      setTransferring(false);
+      loadRemote(sessionIdRef.current!, targetFolder ?? remotePath);
+    } else {
+      const destDir = targetFolder ?? localPath;
+      for (const entry of filesToTransfer) {
+        const localDest = destDir.endsWith("/") ? `${destDir}${entry.name}` : `${destDir}/${entry.name}`;
+        flushSync(() => {
+          setTransferLabel(`↓ ${entry.name}`);
+          setProgress({ transferred: 0, total: entry.size });
+        });
+        try {
+          await sftpDownload(sessionIdRef.current!, entry.path, localDest);
+        } catch (err) {
+          setLocalError(String(err));
+          break;
+        }
+      }
+      setTransferLabel(null);
+      setTransferring(false);
+      loadLocal(targetFolder ?? localPath);
+    }
+  };
+
   const pct = progress.total > 0 ? Math.round((progress.transferred * 100) / progress.total) : 0;
 
   // ── Connecting state ────────────────────────────────────────────────────────
@@ -902,6 +1019,13 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
               onMkdir={() => { setNewFolderMode("local"); setNewFolderName(""); }}
               fetchDir={localFetchDir}
               onFlatRowsChange={(rows) => { localFlatRowsRef.current = rows; }}
+              isDragOver={dragOverPanel === "local"}
+              dragOverFolderPath={dragOverPanel === "local" ? dragOverFolder : null}
+              onRowDragStart={(entry, sel) => handleRowDragStart("local", entry, sel)}
+              onPanelDragOver={(e) => handlePanelDragOver(e, "local")}
+              onFolderDragOver={(p) => handleFolderDragOver("local", p)}
+              onDropOnPanel={(f) => handleDropOnPanel("local", f)}
+              onDragLeave={() => handleDragLeave("local")}
             />
           </div>
         </div>
@@ -985,6 +1109,13 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
               onRenameCancel={() => { setRenamingPath(null); setRenameValue(""); }}
               fetchDir={remoteFetchDir}
               onFlatRowsChange={(rows) => { remoteFlatRowsRef.current = rows; }}
+              isDragOver={dragOverPanel === "remote"}
+              dragOverFolderPath={dragOverPanel === "remote" ? dragOverFolder : null}
+              onRowDragStart={(entry, sel) => handleRowDragStart("remote", entry, sel)}
+              onPanelDragOver={(e) => handlePanelDragOver(e, "remote")}
+              onFolderDragOver={(p) => handleFolderDragOver("remote", p)}
+              onDropOnPanel={(f) => handleDropOnPanel("remote", f)}
+              onDragLeave={() => handleDragLeave("remote")}
             />
           </div>
         </div>
