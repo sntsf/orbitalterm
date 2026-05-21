@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
-  ChevronLeft, ChevronRight, RefreshCw, FolderPlus, Pencil, Trash2,
+  ChevronLeft, ChevronRight, ChevronDown, RefreshCw, FolderPlus, Pencil, Trash2,
   ArrowRight, ArrowLeft, Loader, WifiOff, HardDrive, Home, Eye, EyeOff,
   File, Folder,
 } from "lucide-react";
@@ -16,11 +16,11 @@ import type { LocalEntry } from "../../lib/commands";
 import type { SftpEntry } from "../../types";
 import type { Tab } from "../../types";
 
-// Re-export LocalEntry so the rest of the file can use it without duplication
 type AnyEntry = (SftpEntry | LocalEntry) & { is_dir: boolean; name: string; path: string; size: number };
 
 interface SftpProgress { transferred: number; total: number }
 interface CtxMenu { x: number; y: number; side: "local" | "remote"; entry?: AnyEntry }
+type SortCol = "name" | "type" | "size" | "modified";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -36,11 +36,17 @@ function formatDate(ts: number) {
   return ts ? new Date(ts * 1000).toLocaleDateString() : "—";
 }
 
+function fileExt(name: string, isDir: boolean): string {
+  if (isDir) return "";
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1) : "";
+}
+
 // ── File Panel ────────────────────────────────────────────────────────────────
 
 interface PanelProps {
   title: string;
-  accentClass: string;           // tailwind text-color class for header
+  accentClass: string;
   path: string;
   entries: AnyEntry[];
   selected: Set<string>;
@@ -60,6 +66,8 @@ interface PanelProps {
   onRenameChange?: (v: string) => void;
   onRenameCommit?: () => void;
   onRenameCancel?: () => void;
+  fetchDir: (path: string) => Promise<AnyEntry[]>;
+  onFlatRowsChange?: (rows: AnyEntry[]) => void;
 }
 
 function FilePanel({
@@ -68,23 +76,139 @@ function FilePanel({
   onNavigate, onUp, onHome, onRefresh, onSelect, onCtxMenu,
   onMkdir,
   renamingPath, renameValue, onRenameChange, onRenameCommit, onRenameCancel,
+  fetchDir, onFlatRowsChange,
 }: PanelProps) {
   const [editingPath, setEditingPath] = useState(false);
   const [pathInput, setPathInput] = useState(path);
   const pathRef = useRef<HTMLInputElement>(null);
   const renameRef = useRef<HTMLInputElement>(null);
 
+  // Tree state
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [dirChildren, setDirChildren] = useState<Map<string, AnyEntry[]>>(new Map());
+  const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
+
+  // Sort state
+  const [sortBy, setSortBy] = useState<SortCol>("name");
+  const [sortAsc, setSortAsc] = useState(true);
+
+  // Path autocomplete
+  const [pathSuggestions, setPathSuggestions] = useState<string[]>([]);
+  const [suggestionIdx, setSuggestionIdx] = useState(-1);
+  const suggestionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Reset tree on navigation
+  useEffect(() => {
+    setExpandedDirs(new Set());
+    setDirChildren(new Map());
+    setLoadingDirs(new Set());
+  }, [path]);
+
   useEffect(() => { setPathInput(path); }, [path]);
   useEffect(() => { if (editingPath) { pathRef.current?.focus(); pathRef.current?.select(); } }, [editingPath]);
   useEffect(() => { if (renamingPath) { renameRef.current?.focus(); renameRef.current?.select(); } }, [renamingPath]);
 
+  // Path autocomplete effect
+  useEffect(() => {
+    if (!editingPath) { setPathSuggestions([]); return; }
+    if (suggestionTimer.current) clearTimeout(suggestionTimer.current);
+    suggestionTimer.current = setTimeout(async () => {
+      try {
+        const lastSlash = pathInput.lastIndexOf("/");
+        const dir = pathInput.substring(0, lastSlash) || "/";
+        const fragment = pathInput.substring(lastSlash + 1).toLowerCase();
+        const result = await fetchDir(dir);
+        const matches = result
+          .filter((e) => e.is_dir && e.name.toLowerCase().startsWith(fragment))
+          .map((e) => e.path)
+          .slice(0, 8);
+        setPathSuggestions(matches);
+        setSuggestionIdx(-1);
+      } catch { setPathSuggestions([]); }
+    }, 250);
+    return () => { if (suggestionTimer.current) clearTimeout(suggestionTimer.current); };
+  }, [pathInput, editingPath, fetchDir]);
+
   const commitPath = () => {
     setEditingPath(false);
+    setPathSuggestions([]);
     const p = pathInput.trim() || "/";
     if (p !== path) onNavigate(p);
   };
 
-  const visible = showHidden ? entries : entries.filter((e) => !e.name.startsWith("."));
+  const acceptSuggestion = (s: string) => {
+    setPathInput(s + "/");
+    setPathSuggestions([]);
+    setSuggestionIdx(-1);
+    pathRef.current?.focus();
+  };
+
+  // Sort comparator
+  const sortFn = useCallback((a: AnyEntry, b: AnyEntry): number => {
+    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+    let cmp = 0;
+    if (sortBy === "name") cmp = a.name.localeCompare(b.name);
+    else if (sortBy === "type") cmp = fileExt(a.name, a.is_dir).localeCompare(fileExt(b.name, b.is_dir));
+    else if (sortBy === "size") cmp = a.size - b.size;
+    else if (sortBy === "modified") cmp = ((a.modified as number) ?? 0) - ((b.modified as number) ?? 0);
+    return sortAsc ? cmp : -cmp;
+  }, [sortBy, sortAsc]);
+
+  // Recursive flatten
+  const flattenTree = useCallback((
+    items: AnyEntry[],
+    depth: number,
+  ): Array<{ entry: AnyEntry; depth: number; isExpanded: boolean; isLoading: boolean }> => {
+    const visible = (showHidden ? items : items.filter((e) => !e.name.startsWith(".")))
+      .slice()
+      .sort(sortFn);
+    const result: Array<{ entry: AnyEntry; depth: number; isExpanded: boolean; isLoading: boolean }> = [];
+    for (const entry of visible) {
+      const isExp = entry.is_dir && expandedDirs.has(entry.path);
+      const isLoad = entry.is_dir && loadingDirs.has(entry.path);
+      result.push({ entry, depth, isExpanded: isExp, isLoading: isLoad });
+      if (isExp) {
+        const kids = dirChildren.get(entry.path) ?? [];
+        result.push(...flattenTree(kids, depth + 1));
+      }
+    }
+    return result;
+  }, [showHidden, sortFn, expandedDirs, loadingDirs, dirChildren]);
+
+  const flatRows = useMemo(() => flattenTree(entries, 0), [entries, flattenTree]);
+
+  // Notify parent of flat row order (for shift-select)
+  useEffect(() => {
+    onFlatRowsChange?.(flatRows.map((r) => r.entry));
+  }, [flatRows]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Expand/collapse a folder inline
+  const handleToggleExpand = async (e: React.MouseEvent, entry: AnyEntry) => {
+    e.stopPropagation();
+    if (!entry.is_dir) return;
+    if (expandedDirs.has(entry.path)) {
+      setExpandedDirs((prev) => { const n = new Set(prev); n.delete(entry.path); return n; });
+    } else {
+      if (!dirChildren.has(entry.path)) {
+        setLoadingDirs((prev) => new Set(prev).add(entry.path));
+        try {
+          const kids = await fetchDir(entry.path);
+          setDirChildren((prev) => new Map(prev).set(entry.path, kids as AnyEntry[]));
+        } catch { /* ignore fetch errors for tree */ } finally {
+          setLoadingDirs((prev) => { const n = new Set(prev); n.delete(entry.path); return n; });
+        }
+      }
+      setExpandedDirs((prev) => new Set(prev).add(entry.path));
+    }
+  };
+
+  const toggleSort = (col: SortCol) => {
+    if (sortBy === col) setSortAsc((v) => !v);
+    else { setSortBy(col); setSortAsc(true); }
+  };
+
+  const sortArrow = (col: SortCol) =>
+    sortBy === col ? <span className="ml-0.5 opacity-70">{sortAsc ? "▲" : "▼"}</span> : null;
 
   return (
     <div
@@ -94,7 +218,7 @@ function FilePanel({
       {/* Header */}
       <div className={`flex items-center gap-2 px-3 py-1.5 border-b border-[var(--color-border)] shrink-0 ${accentClass}`}>
         <span className="text-[10px] font-semibold uppercase tracking-wider">{title}</span>
-        <span className="ml-auto text-[10px] opacity-60">{visible.length} elementos</span>
+        <span className="ml-auto text-[10px] opacity-60">{flatRows.length} elementos</span>
       </div>
 
       {/* Path bar */}
@@ -107,22 +231,71 @@ function FilePanel({
           className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors">
           <Home size={11} />
         </button>
-        {editingPath ? (
-          <input ref={pathRef} value={pathInput}
-            onChange={(e) => setPathInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commitPath();
-              if (e.key === "Escape") { setEditingPath(false); setPathInput(path); }
-            }}
-            onBlur={commitPath}
-            className="flex-1 bg-transparent border border-[var(--color-accent)] rounded px-1.5 py-0 text-[10px] font-mono text-[var(--color-text-primary)] outline-none"
-          />
-        ) : (
-          <button onClick={() => setEditingPath(true)}
-            className="flex-1 text-left text-[10px] font-mono text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] truncate px-1"
-            title={path}>{path}
-          </button>
-        )}
+
+        {/* Path input with autocomplete */}
+        <div className="flex-1 relative">
+          {editingPath ? (
+            <>
+              <input
+                ref={pathRef}
+                value={pathInput}
+                onChange={(e) => setPathInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Tab") {
+                    e.preventDefault();
+                    const target = suggestionIdx >= 0 ? pathSuggestions[suggestionIdx] : pathSuggestions[0];
+                    if (target) acceptSuggestion(target);
+                  } else if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setSuggestionIdx((i) => Math.min(i + 1, pathSuggestions.length - 1));
+                  } else if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setSuggestionIdx((i) => Math.max(i - 1, -1));
+                  } else if (e.key === "Enter") {
+                    if (suggestionIdx >= 0 && pathSuggestions[suggestionIdx]) {
+                      acceptSuggestion(pathSuggestions[suggestionIdx]);
+                    } else {
+                      commitPath();
+                    }
+                  } else if (e.key === "Escape") {
+                    setEditingPath(false);
+                    setPathInput(path);
+                    setPathSuggestions([]);
+                  }
+                }}
+                onBlur={commitPath}
+                className="w-full bg-transparent border border-[var(--color-accent)] rounded px-1.5 py-0 text-[10px] font-mono text-[var(--color-text-primary)] outline-none"
+              />
+              {pathSuggestions.length > 0 && (
+                <div className="absolute left-0 right-0 top-full z-50 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded shadow-lg mt-0.5 max-h-48 overflow-y-auto">
+                  {pathSuggestions.map((s, i) => (
+                    <button
+                      key={s}
+                      onMouseDown={(e) => { e.preventDefault(); acceptSuggestion(s); }}
+                      className={`flex items-center gap-1.5 w-full px-2 py-0.5 text-[10px] font-mono text-left transition-colors ${
+                        i === suggestionIdx
+                          ? "bg-[var(--color-accent)]/20 text-[var(--color-text-primary)]"
+                          : "text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]"
+                      }`}
+                    >
+                      <Folder size={9} className="shrink-0 opacity-60" />
+                      {s.split("/").filter(Boolean).pop() || s}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <button
+              onClick={() => setEditingPath(true)}
+              className="w-full text-left text-[10px] font-mono text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] truncate px-1"
+              title={path}
+            >
+              {path}
+            </button>
+          )}
+        </div>
+
         <button onClick={onToggleHidden} title={showHidden ? "Ocultar archivos ocultos" : "Mostrar archivos ocultos"}
           className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors">
           {showHidden ? <EyeOff size={11} /> : <Eye size={11} />}
@@ -156,28 +329,72 @@ function FilePanel({
           <table className="w-full border-collapse">
             <thead className="sticky top-0 bg-[var(--color-bg-surface)] z-10">
               <tr className="border-b border-[var(--color-border)] text-[var(--color-text-muted)] text-[10px]">
-                <th className="text-left px-2 py-0.5 font-medium">Nombre</th>
-                <th className="text-right px-2 py-0.5 font-medium w-16">Tamaño</th>
-                <th className="text-right px-2 py-0.5 font-medium w-20">Modificado</th>
+                <th className="text-left px-2 py-0.5 font-medium">
+                  <button
+                    className="flex items-center gap-0.5 hover:text-[var(--color-text-primary)] transition-colors"
+                    onClick={() => toggleSort("name")}
+                  >
+                    Nombre{sortArrow("name")}
+                  </button>
+                </th>
+                <th className="text-right px-2 py-0.5 font-medium w-10">
+                  <button
+                    className="flex items-center justify-end gap-0.5 w-full hover:text-[var(--color-text-primary)] transition-colors"
+                    onClick={() => toggleSort("type")}
+                  >
+                    {sortArrow("type")}Ext
+                  </button>
+                </th>
+                <th className="text-right px-2 py-0.5 font-medium w-16">
+                  <button
+                    className="flex items-center justify-end gap-0.5 w-full hover:text-[var(--color-text-primary)] transition-colors"
+                    onClick={() => toggleSort("size")}
+                  >
+                    {sortArrow("size")}Tamaño
+                  </button>
+                </th>
+                <th className="text-right px-2 py-0.5 font-medium w-20">
+                  <button
+                    className="flex items-center justify-end gap-0.5 w-full hover:text-[var(--color-text-primary)] transition-colors"
+                    onClick={() => toggleSort("modified")}
+                  >
+                    {sortArrow("modified")}Modificado
+                  </button>
+                </th>
               </tr>
             </thead>
             <tbody>
-              {visible.map((entry) => {
+              {flatRows.map(({ entry, depth, isExpanded, isLoading }) => {
                 const isSel = selected.has(entry.path);
+                const ext = fileExt(entry.name, entry.is_dir);
                 return (
                   <tr
                     key={entry.path}
                     className={`cursor-pointer border-b border-[var(--color-border)]/30 ${
-                      isSel
-                        ? "bg-[var(--color-accent)]/20"
-                        : "hover:bg-[var(--color-bg-hover)]"
+                      isSel ? "bg-[var(--color-accent)]/20" : "hover:bg-[var(--color-bg-hover)]"
                     }`}
                     onClick={(e) => onSelect(e, entry)}
                     onDoubleClick={() => { if (entry.is_dir) onNavigate(entry.path); }}
                     onContextMenu={(e) => { e.stopPropagation(); onCtxMenu(e, entry); }}
                   >
-                    <td className="px-2 py-0.5">
-                      <div className="flex items-center gap-1.5 min-w-0">
+                    <td className="py-0.5" style={{ paddingLeft: `${depth * 14 + 4}px`, paddingRight: "4px" }}>
+                      <div className="flex items-center gap-1 min-w-0">
+                        {/* Expand toggle for dirs, spacer for files */}
+                        {entry.is_dir ? (
+                          <button
+                            className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors p-0.5 rounded"
+                            onClick={(e) => handleToggleExpand(e, entry)}
+                            title={isExpanded ? "Colapsar" : "Expandir"}
+                          >
+                            {isLoading
+                              ? <Loader size={9} className="animate-spin" />
+                              : isExpanded
+                                ? <ChevronDown size={9} />
+                                : <ChevronRight size={9} />}
+                          </button>
+                        ) : (
+                          <span className="w-[14px] shrink-0" />
+                        )}
                         {entry.is_dir
                           ? <Folder size={11} className="text-[var(--color-accent)] shrink-0" />
                           : <File size={11} className={isSel ? "text-[var(--color-accent)] shrink-0" : "text-[var(--color-text-muted)] shrink-0"} />}
@@ -201,6 +418,9 @@ function FilePanel({
                         )}
                       </div>
                     </td>
+                    <td className="px-2 py-0.5 text-right text-[var(--color-text-muted)] text-[9px] whitespace-nowrap">
+                      {ext}
+                    </td>
                     <td className="px-2 py-0.5 text-right text-[var(--color-text-muted)] text-[10px] whitespace-nowrap">
                       {entry.is_dir ? "—" : formatBytes(entry.size)}
                     </td>
@@ -210,9 +430,9 @@ function FilePanel({
                   </tr>
                 );
               })}
-              {visible.length === 0 && !loading && (
+              {flatRows.length === 0 && !loading && (
                 <tr>
-                  <td colSpan={3} className="px-2 py-6 text-center text-[var(--color-text-muted)] text-xs">
+                  <td colSpan={4} className="px-2 py-6 text-center text-[var(--color-text-muted)] text-xs">
                     Carpeta vacía
                   </td>
                 </tr>
@@ -226,7 +446,7 @@ function FilePanel({
       <div className="px-2 py-0.5 border-t border-[var(--color-border)] shrink-0 text-[10px] text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]">
         {selected.size > 0
           ? `${selected.size} seleccionado${selected.size > 1 ? "s" : ""}`
-          : `${visible.length} elemento${visible.length !== 1 ? "s" : ""}`}
+          : `${flatRows.length} elemento${flatRows.length !== 1 ? "s" : ""}`}
       </div>
     </div>
   );
@@ -250,6 +470,7 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   const [localEntries, setLocalEntries] = useState<LocalEntry[]>([]);
   const [localSelected, setLocalSelected] = useState<Set<string>>(new Set());
   const localLastClick = useRef<string | null>(null);
+  const localFlatRowsRef = useRef<AnyEntry[]>([]);
   const [localLoading, setLocalLoading] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [showLocalHidden, setShowLocalHidden] = useState(false);
@@ -259,6 +480,7 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   const [remoteEntries, setRemoteEntries] = useState<SftpEntry[]>([]);
   const [remoteSelected, setRemoteSelected] = useState<Set<string>>(new Set());
   const remoteLastClick = useRef<string | null>(null);
+  const remoteFlatRowsRef = useRef<AnyEntry[]>([]);
   const [remoteLoading, setRemoteLoading] = useState(false);
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [showRemoteHidden, setShowRemoteHidden] = useState(false);
@@ -279,15 +501,30 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   // Context menu
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null);
 
+  // ── fetchDir helpers ────────────────────────────────────────────────────────
+
+  const localFetchDir = useCallback(
+    (p: string) => localListDir(p).then((r) => r as AnyEntry[]),
+    [],
+  );
+
+  const remoteFetchDir = useCallback(
+    (p: string): Promise<AnyEntry[]> => {
+      if (!sessionIdRef.current) return Promise.resolve([]);
+      return sftpListDir(sessionIdRef.current, p) as Promise<AnyEntry[]>;
+    },
+    [],
+  );
+
   // ── Local navigation ────────────────────────────────────────────────────────
 
-  const loadLocal = useCallback(async (path: string) => {
+  const loadLocal = useCallback(async (p: string) => {
     setLocalLoading(true);
     setLocalError(null);
     try {
-      const result = await localListDir(path);
+      const result = await localListDir(p);
       setLocalEntries(result as LocalEntry[]);
-      setLocalPath(path);
+      setLocalPath(p);
       setLocalSelected(new Set());
       localLastClick.current = null;
     } catch (err) {
@@ -309,13 +546,13 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
 
   // ── Remote navigation ───────────────────────────────────────────────────────
 
-  const loadRemote = useCallback(async (sid: string, path: string) => {
+  const loadRemote = useCallback(async (sid: string, p: string) => {
     setRemoteLoading(true);
     setRemoteError(null);
     try {
-      const result = await sftpListDir(sid, path);
+      const result = await sftpListDir(sid, p);
       setRemoteEntries(result);
-      setRemotePath(path);
+      setRemotePath(p);
       setRemoteSelected(new Set());
       remoteLastClick.current = null;
     } catch (err) {
@@ -352,7 +589,6 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
       sessionIdRef.current = sid;
       setTabStatus(tab.id, "connected");
       const home = connection.username ? `/home/${connection.username}` : "/";
-      // Try home dir, fall back to root
       try { await loadRemote(sid, home); } catch { await loadRemote(sid, "/"); }
     } catch (err) {
       setConnError(String(err));
@@ -388,18 +624,21 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   // ── Selection helpers ───────────────────────────────────────────────────────
 
   function makeToggle<T extends AnyEntry>(
-    entries: T[],
+    getFlatRows: () => AnyEntry[],
     setSelected: React.Dispatch<React.SetStateAction<Set<string>>>,
     lastClick: React.MutableRefObject<string | null>,
   ) {
     return (e: React.MouseEvent, entry: T) => {
       if (e.shiftKey && lastClick.current) {
-        const li = entries.findIndex((en) => en.path === lastClick.current);
-        const ci = entries.findIndex((en) => en.path === entry.path);
-        const start = Math.min(li, ci);
-        const end = Math.max(li, ci);
-        setSelected(new Set(entries.slice(start, end + 1).map((en) => en.path)));
-        return;
+        const flatRows = getFlatRows();
+        const li = flatRows.findIndex((en) => en.path === lastClick.current);
+        const ci = flatRows.findIndex((en) => en.path === entry.path);
+        if (li >= 0 && ci >= 0) {
+          const start = Math.min(li, ci);
+          const end = Math.max(li, ci);
+          setSelected(new Set(flatRows.slice(start, end + 1).map((en) => en.path)));
+          return;
+        }
       }
       lastClick.current = entry.path;
       if (e.ctrlKey || e.metaKey) {
@@ -415,32 +654,39 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   }
 
   const toggleLocal = makeToggle(
-    localEntries as AnyEntry[],
+    () => localFlatRowsRef.current,
     setLocalSelected,
     localLastClick,
   );
 
   const toggleRemote = makeToggle(
-    remoteEntries as AnyEntry[],
+    () => remoteFlatRowsRef.current,
     setRemoteSelected,
     remoteLastClick,
   );
+
+  // ── Transfer counts (use flat rows to include tree-expanded items) ──────────
+
+  const uploadCount = localFlatRowsRef.current.filter(
+    (e) => localSelected.has(e.path) && !e.is_dir,
+  ).length;
+
+  const downloadCount = remoteFlatRowsRef.current.filter(
+    (e) => remoteSelected.has(e.path) && !e.is_dir,
+  ).length;
 
   // ── Transfer: local → remote (upload) ──────────────────────────────────────
 
   const handleUpload = async () => {
     if (!sessionIdRef.current || transferring) return;
-    const toUpload = localEntries.filter(
+    const toUpload = localFlatRowsRef.current.filter(
       (e) => localSelected.has(e.path) && !e.is_dir,
     );
     if (toUpload.length === 0) return;
 
     setTransferring(true);
     for (const entry of toUpload) {
-      const remoteDest =
-        remotePath === "/"
-          ? `/${entry.name}`
-          : `${remotePath}/${entry.name}`;
+      const remoteDest = remotePath === "/" ? `/${entry.name}` : `${remotePath}/${entry.name}`;
       flushSync(() => {
         setTransferLabel(`↑ ${entry.name}`);
         setProgress({ transferred: 0, total: entry.size });
@@ -461,7 +707,7 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
 
   const handleDownload = async () => {
     if (!sessionIdRef.current || transferring) return;
-    const toDownload = remoteEntries.filter(
+    const toDownload = remoteFlatRowsRef.current.filter(
       (e) => remoteSelected.has(e.path) && !e.is_dir,
     );
     if (toDownload.length === 0) return;
@@ -494,9 +740,9 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
     setNewFolderMode(null);
     setNewFolderName("");
     if (!name || !sessionIdRef.current) return;
-    const path = remotePath === "/" ? `/${name}` : `${remotePath}/${name}`;
+    const p = remotePath === "/" ? `/${name}` : `${remotePath}/${name}`;
     try {
-      await sftpMkdir(sessionIdRef.current, path);
+      await sftpMkdir(sessionIdRef.current, p);
       loadRemote(sessionIdRef.current, remotePath);
     } catch (err) {
       setRemoteError(String(err));
@@ -508,9 +754,9 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
     setNewFolderMode(null);
     setNewFolderName("");
     if (!name) return;
-    const path = localPath.endsWith("/") ? `${localPath}${name}` : `${localPath}/${name}`;
+    const p = localPath.endsWith("/") ? `${localPath}${name}` : `${localPath}/${name}`;
     try {
-      await localMkdir(path);
+      await localMkdir(p);
     } catch (err) {
       setLocalError(String(err));
     }
@@ -554,14 +800,6 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
     setCtxMenu({ x: e.clientX, y: e.clientY, side, entry });
   };
 
-  // ── Derived values ──────────────────────────────────────────────────────────
-
-  const uploadCount = localEntries.filter(
-    (e) => localSelected.has(e.path) && !e.is_dir,
-  ).length;
-  const downloadCount = remoteEntries.filter(
-    (e) => remoteSelected.has(e.path) && !e.is_dir,
-  ).length;
   const pct = progress.total > 0 ? Math.round((progress.transferred * 100) / progress.total) : 0;
 
   // ── Connecting state ────────────────────────────────────────────────────────
@@ -645,30 +883,31 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
             </div>
           )}
           <div className="flex-1 min-h-0">
-          <FilePanel
-            title="PC Local"
-            accentClass="text-green-400 bg-green-400/5"
-            path={localPath}
-            entries={localEntries as AnyEntry[]}
-            selected={localSelected}
-            loading={localLoading}
-            error={localError}
-            showHidden={showLocalHidden}
-            onToggleHidden={() => setShowLocalHidden((v) => !v)}
-            onNavigate={loadLocal}
-            onUp={localUp}
-            onHome={localHome}
-            onRefresh={() => loadLocal(localPath)}
-            onSelect={(e, entry) => toggleLocal(e, entry as LocalEntry)}
-            onCtxMenu={(e, entry) => openCtxMenu(e, "local", entry)}
-            onMkdir={() => { setNewFolderMode("local"); setNewFolderName(""); }}
-          />
+            <FilePanel
+              title="PC Local"
+              accentClass="text-green-400 bg-green-400/5"
+              path={localPath}
+              entries={localEntries as AnyEntry[]}
+              selected={localSelected}
+              loading={localLoading}
+              error={localError}
+              showHidden={showLocalHidden}
+              onToggleHidden={() => setShowLocalHidden((v) => !v)}
+              onNavigate={loadLocal}
+              onUp={localUp}
+              onHome={localHome}
+              onRefresh={() => loadLocal(localPath)}
+              onSelect={(e, entry) => toggleLocal(e, entry as LocalEntry)}
+              onCtxMenu={(e, entry) => openCtxMenu(e, "local", entry)}
+              onMkdir={() => { setNewFolderMode("local"); setNewFolderName(""); }}
+              fetchDir={localFetchDir}
+              onFlatRowsChange={(rows) => { localFlatRowsRef.current = rows; }}
+            />
           </div>
         </div>
 
         {/* Transfer column */}
         <div className="w-14 shrink-0 flex flex-col items-center justify-center gap-3 bg-[var(--color-bg-elevated)] border-r border-[var(--color-border)]">
-          {/* Upload: local → remote */}
           <button
             onClick={handleUpload}
             disabled={uploadCount === 0 || transferring}
@@ -685,7 +924,6 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
             )}
           </button>
 
-          {/* Download: remote → local */}
           <button
             onClick={handleDownload}
             disabled={downloadCount === 0 || transferring}
@@ -704,9 +942,9 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
         </div>
 
         {/* Remote panel */}
-        <div className="flex-1 min-w-0">
-          {newFolderMode === "remote" ? (
-            <div className="px-3 pt-2 pb-1 border-b border-[var(--color-border)] flex items-center gap-2">
+        <div className="flex-1 min-w-0 flex flex-col">
+          {newFolderMode === "remote" && (
+            <div className="px-3 pt-2 pb-1 border-b border-[var(--color-border)] flex items-center gap-2 shrink-0">
               <Folder size={12} className="text-[var(--color-accent)] shrink-0" />
               <input
                 ref={newFolderRef}
@@ -721,30 +959,34 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
                 className="flex-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-2 py-0.5 text-xs text-[var(--color-text-primary)] outline-none"
               />
             </div>
-          ) : null}
-          <FilePanel
-            title="Servidor Remoto"
-            accentClass="text-cyan-400 bg-cyan-400/5"
-            path={remotePath}
-            entries={remoteEntries as AnyEntry[]}
-            selected={remoteSelected}
-            loading={remoteLoading}
-            error={remoteError}
-            showHidden={showRemoteHidden}
-            onToggleHidden={() => setShowRemoteHidden((v) => !v)}
-            onNavigate={(p) => sessionIdRef.current && loadRemote(sessionIdRef.current, p)}
-            onUp={remoteUp}
-            onHome={remoteHome}
-            onRefresh={() => sessionIdRef.current && loadRemote(sessionIdRef.current, remotePath)}
-            onSelect={(e, entry) => toggleRemote(e, entry as SftpEntry)}
-            onCtxMenu={(e, entry) => openCtxMenu(e, "remote", entry)}
-            onMkdir={() => { setNewFolderMode("remote"); setNewFolderName(""); }}
-            renamingPath={renamingPath ?? undefined}
-            renameValue={renameValue}
-            onRenameChange={setRenameValue}
-            onRenameCommit={commitRename}
-            onRenameCancel={() => { setRenamingPath(null); setRenameValue(""); }}
-          />
+          )}
+          <div className="flex-1 min-h-0">
+            <FilePanel
+              title="Servidor Remoto"
+              accentClass="text-cyan-400 bg-cyan-400/5"
+              path={remotePath}
+              entries={remoteEntries as AnyEntry[]}
+              selected={remoteSelected}
+              loading={remoteLoading}
+              error={remoteError}
+              showHidden={showRemoteHidden}
+              onToggleHidden={() => setShowRemoteHidden((v) => !v)}
+              onNavigate={(p) => sessionIdRef.current && loadRemote(sessionIdRef.current, p)}
+              onUp={remoteUp}
+              onHome={remoteHome}
+              onRefresh={() => sessionIdRef.current && loadRemote(sessionIdRef.current, remotePath)}
+              onSelect={(e, entry) => toggleRemote(e, entry as SftpEntry)}
+              onCtxMenu={(e, entry) => openCtxMenu(e, "remote", entry)}
+              onMkdir={() => { setNewFolderMode("remote"); setNewFolderName(""); }}
+              renamingPath={renamingPath ?? undefined}
+              renameValue={renameValue}
+              onRenameChange={setRenameValue}
+              onRenameCommit={commitRename}
+              onRenameCancel={() => { setRenamingPath(null); setRenameValue(""); }}
+              fetchDir={remoteFetchDir}
+              onFlatRowsChange={(rows) => { remoteFlatRowsRef.current = rows; }}
+            />
+          </div>
         </div>
       </div>
 
