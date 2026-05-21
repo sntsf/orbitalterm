@@ -149,6 +149,8 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     let unlisten: (() => void) | null = null;
     getCurrentWebviewWindow().onDragDropEvent((event) => {
       const p = event.payload;
+      if (p.type === "leave") { setDragging(false); return; }
+
       const rect = containerRef.current?.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       const inside = rect
@@ -161,8 +163,6 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
       } else if (p.type === "drop") {
         setDragging(false);
         if (inside && p.paths?.length) doUpload(p.paths);
-      } else if (p.type === "leave") {
-        setDragging(false);
       }
     }).then((fn) => { unlisten = fn; });
     return () => { unlisten?.(); };
