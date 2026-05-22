@@ -26,10 +26,27 @@ export function Sidebar() {
 
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
 
-  const [panelHeight, setPanelHeight] = useState(220);
+  const [panelHeight, setPanelHeight] = useState(() => {
+    const saved = localStorage.getItem("orbitalterm:panelHeight");
+    return saved ? Math.max(120, Math.min(600, Number(saved))) : 320;
+  });
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const saved = localStorage.getItem("orbitalterm:sidebarWidth");
+    return saved ? Math.max(180, Math.min(520, Number(saved))) : 256;
+  });
+
+  // Persist sizes
+  useEffect(() => { localStorage.setItem("orbitalterm:panelHeight", String(panelHeight)); }, [panelHeight]);
+  useEffect(() => { localStorage.setItem("orbitalterm:sidebarWidth", String(sidebarWidth)); }, [sidebarWidth]);
+
   const dragging = useRef(false);
   const startY = useRef(0);
   const startH = useRef(0);
+
+  // Sidebar horizontal resize
+  const sidebarDragging = useRef(false);
+  const startX = useRef(0);
+  const startW = useRef(0);
 
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
@@ -196,10 +213,29 @@ export function Sidebar() {
     const onMove = (ev: MouseEvent) => {
       if (!dragging.current) return;
       const delta = startY.current - ev.clientY;
-      setPanelHeight(Math.max(120, Math.min(480, startH.current + delta)));
+      setPanelHeight(Math.max(120, Math.min(600, startH.current + delta)));
     };
     const onUp = () => {
       dragging.current = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  const onSidebarResizeDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    sidebarDragging.current = true;
+    startX.current = e.clientX;
+    startW.current = sidebarWidth;
+    const onMove = (ev: MouseEvent) => {
+      if (!sidebarDragging.current) return;
+      const delta = ev.clientX - startX.current;
+      setSidebarWidth(Math.max(180, Math.min(520, startW.current + delta)));
+    };
+    const onUp = () => {
+      sidebarDragging.current = false;
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
@@ -240,7 +276,16 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="flex flex-col h-full bg-[var(--color-bg-surface)] border-r border-[var(--color-border)] w-64 shrink-0">
+    <aside
+      className="flex flex-col h-full bg-[var(--color-bg-surface)] border-r border-[var(--color-border)] shrink-0 relative"
+      style={{ width: sidebarWidth }}
+    >
+      {/* Right-edge drag handle for sidebar width */}
+      <div
+        onMouseDown={onSidebarResizeDown}
+        className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize z-20 hover:bg-[var(--color-accent)] transition-colors"
+        title="Drag to resize sidebar"
+      />
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] shrink-0">
         <span className="font-semibold text-[var(--color-text-primary)] tracking-wide text-xs uppercase">
@@ -389,7 +434,7 @@ export function Sidebar() {
       />
 
       {/* Properties panel */}
-      <div className="border-t border-[var(--color-border)] shrink-0 overflow-hidden" style={{ height: panelHeight }}>
+      <div className="border-t border-[var(--color-border)] shrink-0 overflow-y-auto" style={{ height: panelHeight }}>
         <PropertiesPanel />
       </div>
 

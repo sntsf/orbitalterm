@@ -19,10 +19,10 @@ const DEFAULT_PORTS: Record<ConnectionType, number> = {
   sftp: 22,
 };
 
-// Which auth modes each type supports
+// Which auth modes each type supports — order determines dropdown order
 const AUTH_FOR_TYPE: Record<ConnectionType, AuthType[]> = {
-  ssh: ["agent", "password", "key"],
-  sftp: ["agent", "password", "key"],
+  ssh: ["password", "key", "agent"],
+  sftp: ["password", "key", "agent"],
   rdp: ["password"],
   vnc: ["password"],
   ftp: ["password"],
@@ -91,7 +91,7 @@ export function PropertiesPanel() {
       setUsername("");
       setDomain("");
       setRdpAdmin(false);
-      setAuthType("agent");
+      setAuthType("password");
       setKeyPath("");
       setPassword("");
       setFolderId("");
@@ -173,10 +173,10 @@ export function PropertiesPanel() {
     );
   }
 
-  const authLabels: Record<AuthType, string> = {
-    agent: "Agent",
+    const authLabels: Record<AuthType, string> = {
     password: "Password",
     key: "Key File",
+    agent: "Agent",
   };
 
   const supportedAuthTypes = AUTH_FOR_TYPE[type];
@@ -255,23 +255,15 @@ export function PropertiesPanel() {
         {/* Auth — SSH and SFTP support all 3; others only password */}
         {showAuthSection && (
           <Row label="Autent.">
-            <div className="flex gap-1 bg-[var(--color-bg-elevated)] rounded p-0.5">
+            <select
+              value={authType}
+              onChange={(e) => setAuthType(e.target.value as AuthType)}
+              className={inp}
+            >
               {supportedAuthTypes.map((a) => (
-                <button
-                  key={a}
-                  type="button"
-                  onClick={() => setAuthType(a)}
-                  className={[
-                    "flex-1 py-0.5 rounded text-[10px] transition-colors",
-                    authType === a
-                      ? "bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] font-medium"
-                      : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]",
-                  ].join(" ")}
-                >
-                  {authLabels[a]}
-                </button>
+                <option key={a} value={a}>{authLabels[a]}</option>
               ))}
-            </div>
+            </select>
           </Row>
         )}
 
