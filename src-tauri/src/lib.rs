@@ -25,6 +25,7 @@ use commands::sftp::{
     sftp_mkdir, sftp_rename, sftp_upload,
 };
 use commands::vnc::{vnc_connect, vnc_disconnect, vnc_key_event, vnc_pointer_event};
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
