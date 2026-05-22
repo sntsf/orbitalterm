@@ -218,6 +218,10 @@ export async function localMkdir(path: string): Promise<void> {
   return invoke("local_mkdir", { path });
 }
 
+export async function localDelete(path: string, isDir: boolean): Promise<void> {
+  return invoke("local_delete", { path, isDir });
+}
+
 // ── FTP sessions ───────────────────────────────────────────────────────────────
 
 export interface FtpEntry {

@@ -3,20 +3,29 @@ import { flushSync } from "react-dom";
 import {
   ChevronLeft, ChevronRight, ChevronDown, RefreshCw, FolderPlus, Pencil, Trash2,
   ArrowRight, ArrowLeft, Loader, WifiOff, HardDrive, Home, Eye, EyeOff,
-  File, Folder,
+  File, Folder, Scissors, ClipboardPaste,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "../../store/useAppStore";
 import {
   sftpConnect, sftpDisconnect, sftpListDir, sftpUpload, sftpDownload,
   sftpMkdir, sftpRename, sftpDelete,
-  localListDir, localGetHome, localGetParent, localMkdir,
+  localListDir, localGetHome, localGetParent, localMkdir, localDelete,
 } from "../../lib/commands";
 import type { LocalEntry } from "../../lib/commands";
 import type { SftpEntry } from "../../types";
 import type { Tab } from "../../types";
 
 type AnyEntry = (SftpEntry | LocalEntry) & { is_dir: boolean; name: string; path: string; size: number };
+
+type FlatRow = {
+  entry: AnyEntry;
+  depth: number;
+  isExpanded: boolean;
+  isLoading: boolean;
+  isLast: boolean;
+  continuations: boolean[];
+};
 
 interface SftpProgress { transferred: number; total: number }
 interface CtxMenu { x: number; y: number; side: "local" | "remote"; entry?: AnyEntry }
@@ -76,6 +85,7 @@ interface PanelProps {
   onFolderDragOver: (path: string) => void;
   onDropOnPanel: (targetFolder: string | null) => void;
   onDragLeave: () => void;
+  cutPaths?: Set<string>;
 }
 
 function FilePanel({
@@ -87,6 +97,7 @@ function FilePanel({
   fetchDir, onFlatRowsChange,
   isDragOver, dragOverFolderPath,
   onRowDragStart, onPanelDragOver, onFolderDragOver, onDropOnPanel, onDragLeave,
+  cutPaths,
 }: PanelProps) {
   const [editingPath, setEditingPath] = useState(false);
   const [pathInput, setPathInput] = useState(path);
@@ -168,24 +179,27 @@ function FilePanel({
   const flattenTree = useCallback((
     items: AnyEntry[],
     depth: number,
-  ): Array<{ entry: AnyEntry; depth: number; isExpanded: boolean; isLoading: boolean }> => {
+    continuations: boolean[],
+  ): FlatRow[] => {
     const visible = (showHidden ? items : items.filter((e) => !e.name.startsWith(".")))
       .slice()
       .sort(sortFn);
-    const result: Array<{ entry: AnyEntry; depth: number; isExpanded: boolean; isLoading: boolean }> = [];
-    for (const entry of visible) {
+    const result: FlatRow[] = [];
+    for (let i = 0; i < visible.length; i++) {
+      const entry = visible[i];
+      const isLast = i === visible.length - 1;
       const isExp = entry.is_dir && expandedDirs.has(entry.path);
       const isLoad = entry.is_dir && loadingDirs.has(entry.path);
-      result.push({ entry, depth, isExpanded: isExp, isLoading: isLoad });
+      result.push({ entry, depth, isExpanded: isExp, isLoading: isLoad, isLast, continuations });
       if (isExp) {
         const kids = dirChildren.get(entry.path) ?? [];
-        result.push(...flattenTree(kids, depth + 1));
+        result.push(...flattenTree(kids, depth + 1, [...continuations, !isLast]));
       }
     }
     return result;
   }, [showHidden, sortFn, expandedDirs, loadingDirs, dirChildren]);
 
-  const flatRows = useMemo(() => flattenTree(entries, 0), [entries, flattenTree]);
+  const flatRows = useMemo(() => flattenTree(entries, 0, []), [entries, flattenTree]);
 
   // Notify parent of flat row order (for shift-select)
   useEffect(() => {
@@ -384,38 +398,47 @@ function FilePanel({
               </tr>
             </thead>
             <tbody>
-              {flatRows.map(({ entry, depth, isExpanded, isLoading }) => {
+              {flatRows.map(({ entry, depth, isExpanded, isLoading, isLast, continuations }) => {
                 const isSel = selected.has(entry.path);
                 const ext = fileExt(entry.name, entry.is_dir);
                 const isFolderDragTarget = entry.is_dir && dragOverFolderPath === entry.path;
+                const isCut = cutPaths?.has(entry.path) ?? false;
                 return (
                   <tr
                     key={entry.path}
-                    draggable={!entry.is_dir}
+                    draggable
                     className={`cursor-pointer border-b border-[var(--color-border)]/30 ${
                       isFolderDragTarget
                         ? "bg-[var(--color-accent)]/30"
                         : isSel
                           ? "bg-[var(--color-accent)]/20"
                           : "hover:bg-[var(--color-bg-hover)]"
-                    }`}
+                    } ${isCut ? "opacity-40" : ""}`}
                     onClick={(e) => onSelect(e, entry)}
                     onDoubleClick={() => { if (entry.is_dir) onNavigate(entry.path); }}
                     onContextMenu={(e) => { e.stopPropagation(); onCtxMenu(e, entry); }}
                     onDragStart={(e) => {
-                      if (entry.is_dir) { e.preventDefault(); return; }
                       e.dataTransfer.effectAllowed = "copy";
                       e.dataTransfer.setData("text/plain", entry.path);
                       const selFiles = flatRows
                         .map((r) => r.entry)
-                        .filter((en) => !en.is_dir && selected.has(en.path));
+                        .filter((en) => selected.has(en.path));
                       onRowDragStart(entry, selFiles.length > 0 ? selFiles : [entry]);
                     }}
                     onDragOver={entry.is_dir ? (e) => { e.stopPropagation(); e.preventDefault(); e.dataTransfer.dropEffect = "copy"; if (dragOverFolderPath !== entry.path) onFolderDragOver(entry.path); } : undefined}
                     onDrop={entry.is_dir ? (e) => { e.stopPropagation(); e.preventDefault(); onDropOnPanel(entry.path); } : undefined}
                   >
-                    <td className="py-0.5" style={{ paddingLeft: `${depth * 14 + 4}px`, paddingRight: "4px" }}>
-                      <div className="flex items-center gap-1 min-w-0">
+                    <td className="py-0.5 pl-1 pr-1">
+                      <div className="flex items-center gap-0.5 min-w-0">
+                        {/* ASCII tree prefix */}
+                        {depth > 0 && (
+                          <span
+                            className="font-mono shrink-0 select-none text-[var(--color-border)]"
+                            style={{ fontSize: "10px", whiteSpace: "pre", lineHeight: 1 }}
+                          >
+                            {continuations.map((c) => (c ? "│  " : "   ")).join("")}{isLast ? "└─" : "├─"}{" "}
+                          </span>
+                        )}
                         {/* Expand toggle for dirs, spacer for files */}
                         {entry.is_dir ? (
                           <button
@@ -489,6 +512,30 @@ function FilePanel({
   );
 }
 
+// ── Recursive transfer helpers ────────────────────────────────────────────────
+
+async function uploadEntryRecursive(sid: string, entry: AnyEntry, remoteDir: string): Promise<void> {
+  const dest = remoteDir === "/" ? `/${entry.name}` : `${remoteDir}/${entry.name}`;
+  if (!entry.is_dir) {
+    await sftpUpload(sid, entry.path, dest);
+  } else {
+    try { await sftpMkdir(sid, dest); } catch { /* may already exist */ }
+    const kids = await localListDir(entry.path) as AnyEntry[];
+    for (const kid of kids) await uploadEntryRecursive(sid, kid, dest);
+  }
+}
+
+async function downloadEntryRecursive(sid: string, entry: AnyEntry, localDir: string): Promise<void> {
+  const dest = localDir.endsWith("/") ? `${localDir}${entry.name}` : `${localDir}/${entry.name}`;
+  if (!entry.is_dir) {
+    await sftpDownload(sid, entry.path, dest);
+  } else {
+    try { await localMkdir(dest); } catch { /* may already exist */ }
+    const kids = await sftpListDir(sid, entry.path) as AnyEntry[];
+    for (const kid of kids) await downloadEntryRecursive(sid, kid, dest);
+  }
+}
+
 // ── Main dual-pane component ──────────────────────────────────────────────────
 
 export function SftpDualPane({ tab }: { tab: Tab }) {
@@ -537,6 +584,9 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
 
   // Context menu
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null);
+
+  // Clipboard/cut state
+  const [clipboard, setClipboard] = useState<{ entries: AnyEntry[]; side: "local" | "remote" } | null>(null);
 
   // Drag-and-drop state
   const dragSrcRef = useRef<{ side: "local" | "remote"; entries: AnyEntry[] } | null>(null);
@@ -710,11 +760,11 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   // ── Transfer counts (use flat rows to include tree-expanded items) ──────────
 
   const uploadCount = localFlatRowsRef.current.filter(
-    (e) => localSelected.has(e.path) && !e.is_dir,
+    (e) => localSelected.has(e.path),
   ).length;
 
   const downloadCount = remoteFlatRowsRef.current.filter(
-    (e) => remoteSelected.has(e.path) && !e.is_dir,
+    (e) => remoteSelected.has(e.path),
   ).length;
 
   // ── Transfer: local → remote (upload) ──────────────────────────────────────
@@ -722,19 +772,18 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   const handleUpload = async () => {
     if (!sessionIdRef.current || transferring) return;
     const toUpload = localFlatRowsRef.current.filter(
-      (e) => localSelected.has(e.path) && !e.is_dir,
+      (e) => localSelected.has(e.path),
     );
     if (toUpload.length === 0) return;
 
     setTransferring(true);
     for (const entry of toUpload) {
-      const remoteDest = remotePath === "/" ? `/${entry.name}` : `${remotePath}/${entry.name}`;
       flushSync(() => {
-        setTransferLabel(`↑ ${entry.name}`);
+        setTransferLabel(`↑ ${entry.name}${entry.is_dir ? "/" : ""}`);
         setProgress({ transferred: 0, total: entry.size });
       });
       try {
-        await sftpUpload(sessionIdRef.current!, entry.path, remoteDest);
+        await uploadEntryRecursive(sessionIdRef.current!, entry, remotePath);
       } catch (err) {
         setRemoteError(String(err));
         break;
@@ -750,21 +799,18 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   const handleDownload = async () => {
     if (!sessionIdRef.current || transferring) return;
     const toDownload = remoteFlatRowsRef.current.filter(
-      (e) => remoteSelected.has(e.path) && !e.is_dir,
+      (e) => remoteSelected.has(e.path),
     );
     if (toDownload.length === 0) return;
 
     setTransferring(true);
     for (const entry of toDownload) {
-      const localDest = localPath.endsWith("/")
-        ? `${localPath}${entry.name}`
-        : `${localPath}/${entry.name}`;
       flushSync(() => {
-        setTransferLabel(`↓ ${entry.name}`);
+        setTransferLabel(`↓ ${entry.name}${entry.is_dir ? "/" : ""}`);
         setProgress({ transferred: 0, total: entry.size });
       });
       try {
-        await sftpDownload(sessionIdRef.current!, entry.path, localDest);
+        await downloadEntryRecursive(sessionIdRef.current!, entry, localPath);
       } catch (err) {
         setLocalError(String(err));
         break;
@@ -875,47 +921,94 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
     if (!src || src.side === targetSide || src.entries.length === 0) return;
     if (!sessionIdRef.current) return;
 
-    const filesToTransfer = src.entries.filter((e) => !e.is_dir);
-    if (filesToTransfer.length === 0) return;
-
     setTransferring(true);
     if (src.side === "local" && targetSide === "remote") {
       const destDir = targetFolder ?? remotePath;
-      for (const entry of filesToTransfer) {
-        const remoteDest = destDir === "/" ? `/${entry.name}` : `${destDir}/${entry.name}`;
+      for (const entry of src.entries) {
         flushSync(() => {
-          setTransferLabel(`↑ ${entry.name}`);
+          setTransferLabel(`↑ ${entry.name}${entry.is_dir ? "/" : ""}`);
           setProgress({ transferred: 0, total: entry.size });
         });
-        try {
-          await sftpUpload(sessionIdRef.current!, entry.path, remoteDest);
-        } catch (err) {
-          setRemoteError(String(err));
-          break;
-        }
+        try { await uploadEntryRecursive(sessionIdRef.current!, entry, destDir); }
+        catch (err) { setRemoteError(String(err)); break; }
       }
       setTransferLabel(null);
       setTransferring(false);
       loadRemote(sessionIdRef.current!, targetFolder ?? remotePath);
     } else {
       const destDir = targetFolder ?? localPath;
-      for (const entry of filesToTransfer) {
-        const localDest = destDir.endsWith("/") ? `${destDir}${entry.name}` : `${destDir}/${entry.name}`;
+      for (const entry of src.entries) {
         flushSync(() => {
-          setTransferLabel(`↓ ${entry.name}`);
+          setTransferLabel(`↓ ${entry.name}${entry.is_dir ? "/" : ""}`);
           setProgress({ transferred: 0, total: entry.size });
         });
-        try {
-          await sftpDownload(sessionIdRef.current!, entry.path, localDest);
-        } catch (err) {
-          setLocalError(String(err));
-          break;
-        }
+        try { await downloadEntryRecursive(sessionIdRef.current!, entry, destDir); }
+        catch (err) { setLocalError(String(err)); break; }
       }
       setTransferLabel(null);
       setTransferring(false);
       loadLocal(targetFolder ?? localPath);
     }
+  };
+
+  // ── Cut handlers ────────────────────────────────────────────────────────────
+
+  const handleCutLocal = () => {
+    const entries = localFlatRowsRef.current.filter(e => localSelected.has(e.path));
+    if (entries.length > 0) setClipboard({ entries, side: "local" });
+  };
+
+  const handleCutRemote = () => {
+    const entries = remoteFlatRowsRef.current.filter(e => remoteSelected.has(e.path));
+    if (entries.length > 0) setClipboard({ entries, side: "remote" });
+  };
+
+  // ── Local delete ────────────────────────────────────────────────────────────
+
+  const handleLocalDelete = async () => {
+    const targets = localFlatRowsRef.current.filter(e => localSelected.has(e.path));
+    if (targets.length === 0 || !confirm(`¿Eliminar ${targets.length} elemento(s)?`)) return;
+    for (const entry of targets) {
+      try { await localDelete(entry.path, entry.is_dir); }
+      catch (err) { setLocalError(String(err)); break; }
+    }
+    loadLocal(localPath);
+  };
+
+  // ── Paste handler ───────────────────────────────────────────────────────────
+
+  const handlePaste = async (targetSide: "local" | "remote", targetFolder?: string) => {
+    if (!clipboard || !sessionIdRef.current) return;
+    const destDir = targetFolder ?? (targetSide === "remote" ? remotePath : localPath);
+    setTransferring(true);
+    if (clipboard.side === "local" && targetSide === "remote") {
+      for (const entry of clipboard.entries) {
+        flushSync(() => { setTransferLabel(`↑ ${entry.name}`); setProgress({ transferred: 0, total: entry.size }); });
+        try { await uploadEntryRecursive(sessionIdRef.current!, entry, destDir); }
+        catch (err) { setRemoteError(String(err)); break; }
+      }
+      // delete sources
+      for (const entry of clipboard.entries) {
+        try { await localDelete(entry.path, entry.is_dir); } catch { /* ignore */ }
+      }
+      loadRemote(sessionIdRef.current!, destDir);
+      loadLocal(localPath);
+    } else if (clipboard.side === "remote" && targetSide === "local") {
+      for (const entry of clipboard.entries) {
+        flushSync(() => { setTransferLabel(`↓ ${entry.name}`); setProgress({ transferred: 0, total: entry.size }); });
+        try { await downloadEntryRecursive(sessionIdRef.current!, entry, destDir); }
+        catch (err) { setLocalError(String(err)); break; }
+      }
+      // delete sources
+      for (const entry of clipboard.entries) {
+        try { await sftpDelete(sessionIdRef.current!, entry.path, entry.is_dir); } catch { /* ignore */ }
+      }
+      loadLocal(destDir);
+      loadRemote(sessionIdRef.current!, remotePath);
+    }
+    setTransferLabel(null);
+    setTransferring(false);
+    setClipboard(null);
   };
 
   const pct = progress.total > 0 ? Math.round((progress.transferred * 100) / progress.total) : 0;
@@ -1027,6 +1120,7 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
               onFolderDragOver={(p) => handleFolderDragOver("local", p)}
               onDropOnPanel={(f) => handleDropOnPanel("local", f)}
               onDragLeave={() => handleDragLeave("local")}
+              cutPaths={clipboard?.side === "local" ? new Set(clipboard.entries.map(e => e.path)) : undefined}
             />
           </div>
         </div>
@@ -1117,6 +1211,7 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
               onFolderDragOver={(p) => handleFolderDragOver("remote", p)}
               onDropOnPanel={(f) => handleDropOnPanel("remote", f)}
               onDragLeave={() => handleDragLeave("remote")}
+              cutPaths={clipboard?.side === "remote" ? new Set(clipboard.entries.map(e => e.path)) : undefined}
             />
           </div>
         </div>
@@ -1173,25 +1268,46 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
                 )}
                 <CtxItem icon={<Pencil size={12} />} label="Renombrar"
                   onClick={() => { setRenamingPath(ctxMenu.entry!.path); setRenameValue(ctxMenu.entry!.name); setCtxMenu(null); }} />
+                <CtxItem icon={<Scissors size={12} />} label="Cortar"
+                  onClick={() => { handleCutRemote(); setCtxMenu(null); }} />
                 <div className="my-0.5 border-t border-[var(--color-border)]" />
                 <CtxItem icon={<Trash2 size={12} />} label="Eliminar" danger
                   onClick={() => { handleRemoteDelete(ctxMenu.entry as SftpEntry); setCtxMenu(null); }} />
               </>
             ) : (
-              <CtxItem icon={<FolderPlus size={12} />} label="Nueva carpeta"
-                onClick={() => { setNewFolderMode("remote"); setNewFolderName(""); setCtxMenu(null); }} />
+              <>
+                <CtxItem icon={<FolderPlus size={12} />} label="Nueva carpeta"
+                  onClick={() => { setNewFolderMode("remote"); setNewFolderName(""); setCtxMenu(null); }} />
+                {clipboard?.side === "local" && (
+                  <CtxItem icon={<ClipboardPaste size={12} />} label="Pegar aquí"
+                    onClick={() => { handlePaste("remote"); setCtxMenu(null); }} />
+                )}
+              </>
             )
           ) : (
-            ctxMenu.entry && !ctxMenu.entry.is_dir ? (
-              <CtxItem icon={<ArrowRight size={12} />} label="Subir al servidor"
-                onClick={() => {
-                  if (ctxMenu.entry) setLocalSelected(new Set([ctxMenu.entry.path]));
-                  handleUpload();
-                  setCtxMenu(null);
-                }} />
+            ctxMenu.entry ? (
+              <>
+                <CtxItem icon={<ArrowRight size={12} />} label="Subir al servidor"
+                  onClick={() => {
+                    if (ctxMenu.entry) setLocalSelected(new Set([ctxMenu.entry.path]));
+                    handleUpload();
+                    setCtxMenu(null);
+                  }} />
+                <CtxItem icon={<Scissors size={12} />} label="Cortar"
+                  onClick={() => { handleCutLocal(); setCtxMenu(null); }} />
+                <div className="my-0.5 border-t border-[var(--color-border)]" />
+                <CtxItem icon={<Trash2 size={12} />} label="Eliminar" danger
+                  onClick={() => { handleLocalDelete(); setCtxMenu(null); }} />
+              </>
             ) : (
-              <CtxItem icon={<FolderPlus size={12} />} label="Nueva carpeta"
-                onClick={() => { setNewFolderMode("local"); setNewFolderName(""); setCtxMenu(null); }} />
+              <>
+                <CtxItem icon={<FolderPlus size={12} />} label="Nueva carpeta"
+                  onClick={() => { setNewFolderMode("local"); setNewFolderName(""); setCtxMenu(null); }} />
+                {clipboard?.side === "remote" && (
+                  <CtxItem icon={<ClipboardPaste size={12} />} label="Pegar aquí"
+                    onClick={() => { handlePaste("local"); setCtxMenu(null); }} />
+                )}
+              </>
             )
           )}
         </div>
