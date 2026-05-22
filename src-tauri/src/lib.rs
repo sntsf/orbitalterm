@@ -38,6 +38,15 @@ pub fn run() {
         .manage(sftp::new_sftp_sessions())
         .manage(ftp::new_ftp_sessions())
         .manage(vnc::new_vnc_sessions())
+        .setup(|app| {
+            // Embed the icon at compile time so it works at any install path.
+            let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+                .expect("icon.png not found");
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_icon(icon).ok();
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // connections
             get_connections,
