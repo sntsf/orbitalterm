@@ -1,8 +1,8 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { flushSync } from "react-dom";
 import {
-  Folder, File, Upload, Download, FolderPlus, FilePlus, RefreshCw,
-  HardDrive, ChevronLeft, Pencil, Trash2, WifiOff,
+  Folder, FolderOpen, File, Upload, Download, FolderPlus, FilePlus, RefreshCw,
+  HardDrive, ChevronLeft, Pencil, Trash2, WifiOff, ChevronRight,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -23,6 +23,26 @@ interface SftpBrowserProps {
 interface CtxMenu { x: number; y: number; entry?: SftpEntry }
 interface SftpProgress { transferred: number; total: number }
 
+type FlatRow = {
+  entry: SftpEntry;
+  depth: number;
+  isExpanded: boolean;
+  isLoading: boolean;
+  isLast: boolean;
+  continuations: boolean[];
+};
+
+function TreePrefix({ continuations, isLast }: { continuations: boolean[]; isLast: boolean }) {
+  return (
+    <span
+      className="font-mono shrink-0 select-none text-[var(--color-border)]"
+      style={{ fontSize: "10px", whiteSpace: "pre", lineHeight: 1 }}
+    >
+      {continuations.map((c) => (c ? "│  " : "   ")).join("")}{isLast ? "└─" : "├─"}{" "}
+    </span>
+  );
+}
+
 export function SftpBrowser({ sessionId, connectionId, username, onConnect }: SftpBrowserProps) {
   const [currentPath, setCurrentPath] = useState("/");
   const [pathInput, setPathInput] = useState("/");
@@ -33,6 +53,11 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
   const [disconnected, setDisconnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [dragging, setDragging] = useState(false);
+
+  // Tree expansion
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [dirChildren, setDirChildren] = useState<Map<string, SftpEntry[]>>(new Map());
+  const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
 
   // Transfer progress
   const [transferFile, setTransferFile] = useState<string | null>(null);
@@ -96,12 +121,65 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
       setCurrentPath(path);
       setPathInput(path);
       setSelected(new Set());
+      setExpandedDirs(new Set());
+      setDirChildren(new Map());
     } catch (err) {
       handleError(err);
     } finally {
       setLoading(false);
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── tree expansion ─────────────────────────────────────────────────────────
+
+  const toggleExpand = useCallback(async (entry: SftpEntry) => {
+    if (!sessionId || !entry.is_dir) return;
+    const path = entry.path;
+
+    setExpandedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) { next.delete(path); return next; }
+      next.add(path);
+      return next;
+    });
+
+    if (!dirChildren.has(path)) {
+      setLoadingDirs((prev) => new Set(prev).add(path));
+      try {
+        const kids = await sftpListDir(sessionId, path);
+        setDirChildren((prev) => new Map(prev).set(path, kids));
+      } catch (err) {
+        handleError(err);
+        setExpandedDirs((prev) => { const next = new Set(prev); next.delete(path); return next; });
+      } finally {
+        setLoadingDirs((prev) => { const next = new Set(prev); next.delete(path); return next; });
+      }
+    }
+  }, [sessionId, dirChildren]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── flatten tree ───────────────────────────────────────────────────────────
+
+  const flattenTree = useCallback((items: SftpEntry[], depth: number, continuations: boolean[]): FlatRow[] => {
+    const sorted = [...items].sort((a, b) => {
+      if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    const result: FlatRow[] = [];
+    for (let i = 0; i < sorted.length; i++) {
+      const entry = sorted[i];
+      const isLast = i === sorted.length - 1;
+      const isExp = entry.is_dir && expandedDirs.has(entry.path);
+      const isLoad = entry.is_dir && loadingDirs.has(entry.path);
+      result.push({ entry, depth, isExpanded: isExp, isLoading: isLoad, isLast, continuations });
+      if (isExp) {
+        const kids = dirChildren.get(entry.path) ?? [];
+        result.push(...flattenTree(kids, depth + 1, [...continuations, !isLast]));
+      }
+    }
+    return result;
+  }, [expandedDirs, loadingDirs, dirChildren]);
+
+  const flatRows = useMemo(() => flattenTree(entries, 0, []), [entries, flattenTree]);
 
   // ── transfer helpers ───────────────────────────────────────────────────────
 
@@ -254,8 +332,6 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     if (!sessionId || entry.is_dir) return;
     const localPath = await saveDialog({ defaultPath: entry.name }).catch(() => null);
     if (!localPath) return;
-    await doDownload([entry], localPath.substring(0, localPath.lastIndexOf("/") + 1));
-    // doDownload builds localPath as destDir/name — for single file use the exact path instead
     flushSync(() => { setTransferFile(`↓ ${entry.name}`); setProgress({ transferred: 0, total: 0 }); });
     try { await sftpDownload(sessionId, entry.path, localPath); }
     catch (err) { handleError(err); }
@@ -264,7 +340,7 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   const handleDownloadSelected = async () => {
     if (!sessionId) return;
-    const toDownload = entries.filter((e) => selected.has(e.path) && !e.is_dir);
+    const toDownload = flatRows.map((r) => r.entry).filter((e) => selected.has(e.path) && !e.is_dir);
     if (toDownload.length === 0) return;
     if (toDownload.length === 1) {
       await handleDownloadEntry(toDownload[0]);
@@ -317,11 +393,11 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   const toggleSelect = (e: React.MouseEvent, entry: SftpEntry) => {
     if (e.shiftKey && lastClickedRef.current) {
-      const lastIdx = entries.findIndex((en) => en.path === lastClickedRef.current);
-      const currIdx = entries.findIndex((en) => en.path === entry.path);
+      const lastIdx = flatRows.findIndex((r) => r.entry.path === lastClickedRef.current);
+      const currIdx = flatRows.findIndex((r) => r.entry.path === entry.path);
       const start = Math.min(lastIdx, currIdx);
       const end = Math.max(lastIdx, currIdx);
-      setSelected(new Set(entries.slice(start, end + 1).map((en) => en.path)));
+      setSelected(new Set(flatRows.slice(start, end + 1).map((r) => r.entry.path)));
       return;
     }
     lastClickedRef.current = entry.path;
@@ -338,7 +414,6 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   const openCtxMenu = (e: React.MouseEvent, entry?: SftpEntry) => {
     e.preventDefault();
-    // If right-clicking an unselected file, select it
     if (entry && !entry.is_dir && !selected.has(entry.path)) {
       setSelected(new Set([entry.path]));
     }
@@ -347,10 +422,9 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   // ── derived values ─────────────────────────────────────────────────────────
 
-  const selectedFiles = entries.filter((e) => selected.has(e.path) && !e.is_dir);
+  const selectedFiles = flatRows.map((r) => r.entry).filter((e) => selected.has(e.path) && !e.is_dir);
   const pct = progress.total > 0 ? Math.round(progress.transferred * 100 / progress.total) : 0;
 
-  // HTML5 events: prevent browser from opening files
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); };
   const handleDrop = (e: React.DragEvent) => { e.preventDefault(); };
 
@@ -519,7 +593,7 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
                 </td></tr>
               )}
 
-              {entries.map((entry) => {
+              {flatRows.map(({ entry, isExpanded, isLoading, isLast, continuations, depth }) => {
                 const isSelected = selected.has(entry.path);
                 return (
                   <tr key={entry.path}
@@ -528,11 +602,32 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
                     onContextMenu={(e) => { e.stopPropagation(); openCtxMenu(e, entry); }}
                     onDoubleClick={() => { entry.is_dir ? navigateTo(entry.path) : handleDownloadEntry(entry); }}
                   >
-                    <td className="px-2 py-1">
-                      <div className="flex items-center gap-2">
+                    <td className="py-0.5 pl-1 pr-1">
+                      <div className="flex items-center gap-0.5 min-w-0">
+                        {depth > 0 && <TreePrefix continuations={continuations} isLast={isLast} />}
+                        {entry.is_dir ? (
+                          <button
+                            className="p-0.5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] shrink-0 transition-colors"
+                            onClick={(e) => { e.stopPropagation(); toggleExpand(entry); }}
+                            title={isExpanded ? "Contraer" : "Expandir"}
+                          >
+                            {isLoading
+                              ? <RefreshCw size={10} className="animate-spin" />
+                              : isExpanded
+                                ? <ChevronRight size={10} className="rotate-90 transition-transform" />
+                                : <ChevronRight size={10} className="transition-transform" />
+                            }
+                          </button>
+                        ) : (
+                          <span className="w-[18px] shrink-0" />
+                        )}
                         {entry.is_dir
-                          ? <Folder size={12} className="text-[var(--color-accent)] shrink-0" />
-                          : <File size={12} className={isSelected ? "text-[var(--color-accent)] shrink-0" : "text-[var(--color-text-muted)] shrink-0"} />}
+                          ? isExpanded
+                            ? <FolderOpen size={12} className="text-amber-400 shrink-0" />
+                            : <Folder size={12} className="text-amber-400 shrink-0" />
+                          : <File size={12} className={isSelected ? "text-[var(--color-accent)] shrink-0" : "text-[var(--color-text-muted)] shrink-0"} />
+                        }
+                        <span className="w-1 shrink-0" />
                         {renamingEntry?.path === entry.path ? (
                           <input ref={renameRef} value={renameValue} onChange={(e) => setRenameValue(e.target.value)}
                             onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingEntry(null); }}
@@ -543,10 +638,10 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
                         )}
                       </div>
                     </td>
-                    <td className="px-2 py-1 text-right text-[var(--color-text-muted)] text-[10px]">
+                    <td className="px-2 py-0.5 text-right text-[var(--color-text-muted)] text-[10px]">
                       {entry.is_dir ? "—" : formatBytes(entry.size)}
                     </td>
-                    <td className="px-2 py-1 text-right text-[var(--color-text-muted)] text-[10px]">
+                    <td className="px-2 py-0.5 text-right text-[var(--color-text-muted)] text-[10px]">
                       {formatDate(entry.modified)}
                     </td>
                   </tr>
@@ -592,8 +687,13 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
                   onClick={() => { selectedFiles.length > 1 ? handleDownloadSelected() : handleDownloadEntry(ctxMenu.entry!); setCtxMenu(null); }} />
               )}
               {ctxMenu.entry.is_dir && (
-                <CtxItem icon={<Folder size={12} />} label="Abrir"
-                  onClick={() => { navigateTo(ctxMenu.entry!.path); setCtxMenu(null); }} />
+                <>
+                  <CtxItem icon={<FolderOpen size={12} />} label="Abrir (navegar)"
+                    onClick={() => { navigateTo(ctxMenu.entry!.path); setCtxMenu(null); }} />
+                  <CtxItem icon={ctxMenu.entry && expandedDirs.has(ctxMenu.entry.path) ? <ChevronRight size={12} className="rotate-90" /> : <ChevronRight size={12} />}
+                    label={ctxMenu.entry && expandedDirs.has(ctxMenu.entry.path) ? "Contraer" : "Expandir"}
+                    onClick={() => { toggleExpand(ctxMenu.entry!); setCtxMenu(null); }} />
+                </>
               )}
               <CtxItem icon={<Pencil size={12} />} label="Renombrar"
                 onClick={() => { setRenamingEntry(ctxMenu.entry!); setRenameValue(ctxMenu.entry!.name); setCtxMenu(null); }} />
