@@ -39,9 +39,13 @@ pub fn run() {
         .manage(ftp::new_ftp_sessions())
         .manage(vnc::new_vnc_sessions())
         .setup(|app| {
-            // Embed the icon at compile time so it works at any install path.
-            let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
-                .expect("icon.png not found");
+            // Embed icon bytes at compile time, decode PNG → raw RGBA, set on window.
+            let png = include_bytes!("../icons/icon.png");
+            let img = image::load_from_memory(png)
+                .expect("icon.png decode failed")
+                .into_rgba8();
+            let (w, h) = img.dimensions();
+            let icon = tauri::image::Image::new_owned(img.into_raw(), w, h);
             if let Some(window) = app.get_webview_window("main") {
                 window.set_icon(icon).ok();
             }
