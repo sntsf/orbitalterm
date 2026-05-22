@@ -66,3 +66,12 @@ pub async fn local_get_parent(path: String) -> String {
         .map(|par| par.to_string_lossy().to_string())
         .unwrap_or(path)
 }
+
+#[tauri::command]
+pub async fn local_delete(path: String, is_dir: bool) -> Result<(), String> {
+    if is_dir {
+        std::fs::remove_dir_all(&path).map_err(|e| format!("Cannot delete dir: {e}"))
+    } else {
+        std::fs::remove_file(&path).map_err(|e| format!("Cannot delete file: {e}"))
+    }
+}
