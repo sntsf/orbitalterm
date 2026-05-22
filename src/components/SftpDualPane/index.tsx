@@ -337,9 +337,9 @@ function FilePanel({
       {/* File list */}
       <div
         className="flex-1 overflow-y-auto min-h-0 text-xs"
-        onDragOver={(e) => { e.preventDefault(); onPanelDragOver(e); }}
+        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; onPanelDragOver(e); }}
         onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) onDragLeave(); }}
-        onDrop={(e) => { e.preventDefault(); onDropOnPanel(null); }}
+        onDrop={(e) => { e.preventDefault(); e.stopPropagation(); onDropOnPanel(null); }}
       >
         {loading ? (
           <div className="flex items-center justify-center h-full">
@@ -405,12 +405,13 @@ function FilePanel({
                     onDragStart={(e) => {
                       if (entry.is_dir) { e.preventDefault(); return; }
                       e.dataTransfer.effectAllowed = "copy";
+                      e.dataTransfer.setData("text/plain", entry.path);
                       const selFiles = flatRows
                         .map((r) => r.entry)
                         .filter((en) => !en.is_dir && selected.has(en.path));
                       onRowDragStart(entry, selFiles.length > 0 ? selFiles : [entry]);
                     }}
-                    onDragOver={entry.is_dir ? (e) => { e.stopPropagation(); e.preventDefault(); if (dragOverFolderPath !== entry.path) onFolderDragOver(entry.path); } : undefined}
+                    onDragOver={entry.is_dir ? (e) => { e.stopPropagation(); e.preventDefault(); e.dataTransfer.dropEffect = "copy"; if (dragOverFolderPath !== entry.path) onFolderDragOver(entry.path); } : undefined}
                     onDrop={entry.is_dir ? (e) => { e.stopPropagation(); e.preventDefault(); onDropOnPanel(entry.path); } : undefined}
                   >
                     <td className="py-0.5" style={{ paddingLeft: `${depth * 14 + 4}px`, paddingRight: "4px" }}>
