@@ -6,13 +6,13 @@ export function Welcome() {
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8 bg-[var(--color-bg-base)] h-full">
-      <div>
-        <div className="flex items-center justify-center gap-2 mb-2">
-          <Terminal size={32} className="text-[var(--color-accent)]" />
-          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">
-            OrbitalTerm
-          </h1>
-        </div>
+      <div className="flex flex-col items-center gap-3">
+        <img
+          src="/logo.png"
+          alt="OrbitalTerm"
+          className="h-28 w-auto object-contain select-none"
+          draggable={false}
+        />
         <p className="text-[var(--color-text-muted)] text-sm">
           Lightweight remote connection manager for sysadmins
         </p>

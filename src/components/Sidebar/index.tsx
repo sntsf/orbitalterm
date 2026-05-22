@@ -288,9 +288,12 @@ export function Sidebar() {
       />
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] shrink-0">
-        <span className="font-semibold text-[var(--color-text-primary)] tracking-wide text-xs uppercase">
-          Connections
-        </span>
+        <img
+          src="/logo_icon.png"
+          alt="OrbitalTerm"
+          className="h-6 w-auto object-contain select-none"
+          draggable={false}
+        />
         <div className="flex gap-0.5">
           <button onClick={startNewConnection}
             className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
