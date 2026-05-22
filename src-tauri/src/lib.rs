@@ -100,6 +100,33 @@ pub fn run() {
             vnc_pointer_event,
             vnc_disconnect,
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Prevent the default close so we can clean up first.
+                api.prevent_close();
+                let app = window.app_handle().clone();
+                std::thread::spawn(move || {
+                    // Send FTP QUIT to every open session (clean protocol-level goodbye).
+                    {
+                        let state = app.state::<ftp::FtpSessionMap>();
+                        let mut map = state.lock().unwrap();
+                        for (_, mut conn) in map.drain() {
+                            conn.stream.quit().ok();
+                        }
+                    }
+                    // Drop SSH sessions — closing the PTY master signals the
+                    // shell to exit (SIGHUP), which logs the user out server-side.
+                    app.state::<ssh::SshSessionMap>().lock().unwrap().clear();
+                    // Drop SFTP sessions — closing the ssh2 Session sends TCP FIN,
+                    // which the SSH server interprets as a clean disconnect.
+                    app.state::<sftp::SftpSessionMap>().lock().unwrap().clear();
+                    // RDP and VNC sessions are intentionally NOT cleared here:
+                    // remote sessions remain active in "Disconnected" state on
+                    // the server, so the user can reconnect without logging out.
+                    app.exit(0);
+                });
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running OrbitalTerm");
 }
