@@ -383,6 +383,86 @@ pub fn export_to_file(path: String) -> Result<(), String> {
     std::fs::write(path, json).map_err(|e| e.to_string())
 }
 
+// ── Selective export ──────────────────────────────────────────────────────────
+
+/// Collect the given folder IDs plus all their descendant folder IDs.
+fn collect_subfolder_ids(
+    folder_ids: &[String],
+    all_folders: &[Folder],
+) -> std::collections::HashSet<String> {
+    let mut result: std::collections::HashSet<String> = folder_ids.iter().cloned().collect();
+    let mut frontier: Vec<String> = folder_ids.to_vec();
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for f in all_folders {
+            if let Some(ref pid) = f.parent_id {
+                if frontier.contains(pid) && !result.contains(&f.id) {
+                    result.insert(f.id.clone());
+                    next.push(f.id.clone());
+                }
+            }
+        }
+        frontier = next;
+    }
+    result
+}
+
+#[tauri::command]
+pub fn export_selected_to_file(
+    folder_ids: Vec<String>,
+    include_root: bool,
+    include_passwords: bool,
+    path: String,
+) -> Result<usize, String> {
+    let all_folders = get_folders()?;
+    let all_conns = get_connections()?;
+    let db = db::open().map_err(|e| e.to_string())?;
+
+    // Expand selected folder IDs to include all descendants
+    let folder_set = collect_subfolder_ids(&folder_ids, &all_folders);
+
+    // Collect folders that are within the selected set (only those selected + descendants)
+    let exported_folders: Vec<&Folder> = all_folders
+        .iter()
+        .filter(|f| folder_set.contains(&f.id))
+        .collect();
+
+    // Filter connections
+    let exported_conns: Vec<serde_json::Value> = all_conns
+        .iter()
+        .filter(|c| match &c.folder_id {
+            None => include_root,
+            Some(fid) => folder_set.contains(fid),
+        })
+        .map(|c| {
+            let mut v = serde_json::to_value(c).unwrap_or_default();
+            if include_passwords {
+                let pw: Option<String> = db.query_row(
+                    "SELECT password FROM passwords WHERE connection_id = ?1",
+                    params![c.id],
+                    |row| row.get(0),
+                ).ok();
+                if let Some(p) = pw {
+                    v["password"] = serde_json::Value::String(p);
+                }
+            }
+            v
+        })
+        .collect();
+
+    let count = exported_conns.len();
+
+    let json = serde_json::to_string_pretty(&serde_json::json!({
+        "version": 2,
+        "connections": exported_conns,
+        "folders": exported_folders,
+    }))
+    .map_err(|e| e.to_string())?;
+
+    std::fs::write(path, json).map_err(|e| e.to_string())?;
+    Ok(count)
+}
+
 #[tauri::command]
 pub fn import_from_file(path: String) -> Result<usize, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;

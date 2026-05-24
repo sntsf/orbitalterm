@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { open as dialogOpen, save as dialogSave } from "@tauri-apps/plugin-dialog";
+import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -11,8 +11,9 @@ import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
 import { usePrefsStore, THEMES, FONT_SIZES } from "../../store/usePrefsStore";
 import {
-  exportToFile, importFromFile, getConnections, getFolders,
+  importFromFile, getConnections, getFolders,
 } from "../../lib/commands";
+import { ExportDialog } from "../ExportDialog";
 
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -37,6 +38,7 @@ export function MenuBar() {
   const { startNewConnection, setConnections, setFolders, toggleSidebar, sidebarVisible } = useAppStore();
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showAbout, setShowAbout] = useState(false);
+  const [showExport, setShowExport] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
@@ -106,19 +108,9 @@ export function MenuBar() {
     }
   };
 
-  const handleExport = async () => {
+  const handleExport = () => {
     setOpenMenuId(null);
-    try {
-      const path = await dialogSave({
-        filters: [{ name: "JSON", extensions: ["json"] }],
-        defaultPath: "orbitalterm-connections.json",
-      });
-      if (!path) return;
-      await exportToFile(path);
-      showToast(t("exportedOk"));
-    } catch (err) {
-      showToast(String(err), false);
-    }
+    setShowExport(true);
   };
 
   const handleExit = () => {
@@ -297,6 +289,14 @@ export function MenuBar() {
 
       {/* About modal */}
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
+
+      {/* Export dialog */}
+      {showExport && (
+        <ExportDialog
+          onClose={() => setShowExport(false)}
+          onDone={(msg, ok) => showToast(msg, ok)}
+        />
+      )}
     </>
   );
 }

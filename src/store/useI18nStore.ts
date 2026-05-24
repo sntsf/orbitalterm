@@ -87,6 +87,15 @@ const T = {
     welcomeImport: "Importar",
     welcomeImportDesc: "Importar desde JSON o mRemoteNG",
     welcomeHint: "Doble clic en una conexión para abrir una pestaña. Todos los datos se guardan localmente.",
+    // Export dialog
+    exportDialogTitle: "Seleccionar grupos a exportar",
+    exportSelectAll: "Seleccionar todo",
+    exportDeselectAll: "Deseleccionar todo",
+    exportRootConnections: "Conexiones raíz (sin carpeta)",
+    exportWithPasswords: "Exportar con contraseñas",
+    exportWithoutPasswords: "Exportar sin contraseñas",
+    exportNothingSelected: "Selecciona al menos un grupo.",
+    exportedNConn: "conexión(es) exportada(s).",
   },
   en: {
     menuFile: "File",
@@ -157,6 +166,15 @@ const T = {
     welcomeImport: "Import",
     welcomeImportDesc: "Import from JSON or mRemoteNG",
     welcomeHint: "Double-click any connection to open a session tab. All data is stored locally.",
+    // Export dialog
+    exportDialogTitle: "Select groups to export",
+    exportSelectAll: "Select all",
+    exportDeselectAll: "Deselect all",
+    exportRootConnections: "Root connections (no folder)",
+    exportWithPasswords: "Export with passwords",
+    exportWithoutPasswords: "Export without passwords",
+    exportNothingSelected: "Select at least one group.",
+    exportedNConn: "connection(s) exported.",
   },
 } as const;
 

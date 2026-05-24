@@ -49,6 +49,15 @@ export async function importFromFile(path: string): Promise<number> {
   return invoke("import_from_file", { path });
 }
 
+export async function exportSelectedToFile(
+  folderIds: string[],
+  includeRoot: boolean,
+  includePasswords: boolean,
+  path: string,
+): Promise<number> {
+  return invoke("export_selected_to_file", { folderIds, includeRoot, includePasswords, path });
+}
+
 export async function importFromMremoteng(path: string): Promise<number> {
   return invoke("import_from_mremoteng", { path });
 }
