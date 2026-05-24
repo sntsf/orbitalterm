@@ -7,6 +7,7 @@ interface AppStore {
   searchQuery: string;
   selectedConnectionId: string | null;
   isCreatingNew: boolean;
+  newConnectionFolderId: string | null;
 
   tabs: Tab[];
   activeTabId: string | null;
@@ -16,7 +17,7 @@ interface AppStore {
   setSearchQuery: (q: string) => void;
   selectConnection: (id: string | null) => void;
   setIsCreatingNew: (v: boolean) => void;
-  startNewConnection: () => void;
+  startNewConnection: (folderId?: string | null) => void;
 
   openTab: (connection: Connection) => void;
   closeTab: (tabId: string) => void;
@@ -35,6 +36,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   searchQuery: "",
   selectedConnectionId: null,
   isCreatingNew: false,
+  newConnectionFolderId: null,
   tabs: [],
   activeTabId: null,
 
@@ -47,8 +49,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   setIsCreatingNew: (isCreatingNew) => set({ isCreatingNew }),
 
-  startNewConnection: () =>
-    set({ isCreatingNew: true, selectedConnectionId: null }),
+  startNewConnection: (folderId = null) =>
+    set({ isCreatingNew: true, selectedConnectionId: null, newConnectionFolderId: folderId }),
 
   openTab: (connection) => {
     const { tabs } = get();

@@ -168,10 +168,17 @@ export function Sidebar() {
 
   const folderMenu = (e: React.MouseEvent, folder: FolderType) =>
     openMenu(e, [
-      { label: "New subfolder", icon: <FolderPlus size={12} />, action: () => startCreateFolder(folder.id) },
+      { label: "New Connection", icon: <Plus size={12} />, action: () => startNewConnection(folder.id) },
+      { label: "New Subfolder", icon: <FolderPlus size={12} />, action: () => startCreateFolder(folder.id) },
       { label: "Rename", icon: <Edit2 size={12} />, action: () => startRenameFolder(folder) },
       { separator: true },
       { label: "Delete", icon: <Trash2 size={12} />, action: () => removeFolder(folder), danger: true },
+    ]);
+
+  const rootMenu = (e: React.MouseEvent) =>
+    openMenu(e, [
+      { label: "New Connection", icon: <Plus size={12} />, action: () => startNewConnection(null) },
+      { label: "New Folder", icon: <FolderPlus size={12} />, action: () => startCreateFolder(null) },
     ]);
 
   const duplicate = async (conn: Connection) => {
@@ -400,6 +407,7 @@ export function Sidebar() {
             {/* Root "Conexiones" node — also a valid drop target (move to root) */}
             <button
               onClick={() => setRootExpanded((v) => !v)}
+              onContextMenu={rootMenu}
               onDragOver={(e) => { e.preventDefault(); setDropTarget("root"); }}
               onDragLeave={() => setDropTarget(null)}
               onDrop={(e) => { e.preventDefault(); handleDropOnFolder(null); }}

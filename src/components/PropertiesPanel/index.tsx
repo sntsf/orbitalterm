@@ -33,6 +33,7 @@ export function PropertiesPanel() {
     connections,
     selectedConnectionId,
     isCreatingNew,
+    newConnectionFolderId,
     setConnections,
     setIsCreatingNew,
     selectConnection,
@@ -94,12 +95,12 @@ export function PropertiesPanel() {
       setAuthType("password");
       setKeyPath("");
       setPassword("");
-      setFolderId("");
+      setFolderId(newConnectionFolderId ?? "");
       setNotes("");
       setHasSaved(false);
       setError("");
     }
-  }, [existing?.id, isCreatingNew]);
+  }, [existing?.id, isCreatingNew, newConnectionFolderId]);
 
   const handleTypeChange = (t: ConnectionType) => {
     setType(t);
