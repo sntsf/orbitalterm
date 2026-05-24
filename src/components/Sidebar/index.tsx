@@ -500,7 +500,7 @@ export function Sidebar() {
           )}
         </div>
         {searchQuery && (
-          <div className="mt-1 text-[9px] text-[var(--color-text-muted)] flex items-center gap-1 px-0.5">
+          <div className="mt-1 text-[11px] text-[var(--color-text-muted)] flex items-center gap-1 px-0.5">
             {searchMatches.length === 0 ? (
               <span className="text-[var(--color-danger)]">Sin resultados</span>
             ) : (
@@ -530,7 +530,7 @@ export function Sidebar() {
               }}
               onBlur={cancelCreateGroup}
               placeholder="Nombre del grupo…"
-              className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[11px] text-[var(--color-text-primary)] outline-none"
+              className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[13px] text-[var(--color-text-primary)] outline-none"
             />
           </div>
         )}
@@ -560,7 +560,7 @@ export function Sidebar() {
                       if (e.key === "Escape") cancelRenameGroup();
                     }}
                     onBlur={cancelRenameGroup}
-                    className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[11px] text-[var(--color-text-primary)] outline-none"
+                    className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[13px] text-[var(--color-text-primary)] outline-none"
                   />
                 </div>
               ) : (
@@ -581,8 +581,8 @@ export function Sidebar() {
                     ? <ChevronDown size={11} className="shrink-0" />
                     : <ChevronRight size={11} className="shrink-0" />}
                   <Database size={13} className="shrink-0 text-[var(--color-accent)]" />
-                  <span className="text-xs font-medium flex-1 text-left text-[var(--color-text-primary)]">{group.name}</span>
-                  <span className="text-[9px] text-[var(--color-text-muted)] opacity-60">{groupConnCount}</span>
+                  <span className="text-[13px] font-medium flex-1 text-left text-[var(--color-text-primary)]">{group.name}</span>
+                  <span className="text-[11px] text-[var(--color-text-muted)] opacity-60">{groupConnCount}</span>
                 </button>
               )}
 
@@ -605,7 +605,7 @@ export function Sidebar() {
                         }}
                         onBlur={cancelCreateFolder}
                         placeholder="Nombre de carpeta…"
-                        className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[11px] text-[var(--color-text-primary)] outline-none"
+                        className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[13px] text-[var(--color-text-primary)] outline-none"
                       />
                     </div>
                   )}
@@ -659,7 +659,7 @@ export function Sidebar() {
                     <div className="px-4 py-3 text-center text-[var(--color-text-muted)] text-xs">
                       <Terminal size={16} className="mx-auto mb-1 opacity-30" />
                       <button onClick={() => startNewConnection(null, group.id)}
-                        className="text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] text-[10px]">
+                        className="text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] text-[12px]">
                         Add the first one
                       </button>
                     </div>
@@ -705,9 +705,9 @@ function TreePrefix({ continuations, isLast }: { continuations: boolean[]; isLas
   return (
     <span
       className="font-mono shrink-0 select-none text-[var(--color-border)]"
-      style={{ fontSize: "10px", whiteSpace: "pre", lineHeight: 1 }}
+      style={{ fontSize: "12px", whiteSpace: "pre", lineHeight: 1 }}
     >
-      {continuations.map((c) => (c ? "│  " : "   ")).join("")}{isLast ? "└─" : "├─"}{" "}
+      {continuations.map((c) => (c ? "│   " : "    ")).join("")}{isLast ? "└──" : "├──"}{" "}
     </span>
   );
 }
@@ -797,7 +797,7 @@ function FolderItem({
               if (e.key === "Escape") onRenameCancel();
             }}
             onBlur={onRenameCancel}
-            className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[11px] text-[var(--color-text-primary)] outline-none"
+            className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[13px] text-[var(--color-text-primary)] outline-none"
           />
         </div>
       ) : (
@@ -816,7 +816,7 @@ function FolderItem({
         >
           <TreePrefix continuations={continuations} isLast={isLast} />
           <Icon size={12} className="text-amber-400 shrink-0" />
-          <span className="text-[11px] truncate flex-1 ml-1 text-left font-medium">{folder.name}</span>
+          <span className="text-[13px] truncate flex-1 ml-1 text-left font-medium">{folder.name}</span>
           {folder.expanded
             ? <ChevronDown size={9} className="shrink-0 opacity-40 mr-0.5" />
             : <ChevronRight size={9} className="shrink-0 opacity-30 mr-0.5" />}
@@ -840,7 +840,7 @@ function FolderItem({
                 }}
                 onBlur={onSubfolderCancel}
                 placeholder="Nombre de carpeta…"
-                className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[11px] text-[var(--color-text-primary)] outline-none"
+                className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[13px] text-[var(--color-text-primary)] outline-none"
               />
             </div>
           )}
@@ -962,8 +962,8 @@ function ConnItem({
     >
       <TreePrefix continuations={continuations} isLast={isLast} />
       <TypeIcon size={11} className="shrink-0" />
-      <span className="text-[11px] truncate flex-1 ml-1">{conn.name}</span>
-      <span className={`text-[8px] uppercase font-semibold px-1 rounded shrink-0 ml-1 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
+      <span className="text-[13px] truncate flex-1 ml-1">{conn.name}</span>
+      <span className={`text-[10px] uppercase font-semibold px-1 rounded shrink-0 ml-1 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
         {conn.type}
       </span>
     </button>

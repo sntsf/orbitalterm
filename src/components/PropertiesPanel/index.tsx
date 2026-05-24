@@ -202,7 +202,7 @@ export function PropertiesPanel() {
     <form onSubmit={handleSave} className="flex flex-col h-full overflow-hidden">
       {/* Panel header */}
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--color-border)] shrink-0">
-        <span className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] font-medium">
+        <span className="text-[12px] uppercase tracking-wider text-[var(--color-text-muted)] font-medium">
           {isCreatingNew ? t("propNewConnection") : t("propProperties")}
         </span>
         <div className="flex gap-1">
@@ -211,18 +211,18 @@ export function PropertiesPanel() {
               type="button"
               onClick={handleConnect}
               title={t("propConnect")}
-              className="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-[var(--color-success)] hover:bg-[var(--color-success)]/10 transition-colors"
+              className="flex items-center gap-1 px-2 py-1 rounded text-[12px] text-[var(--color-success)] hover:bg-[var(--color-success)]/10 transition-colors"
             >
-              <Plug size={11} />
+              <Plug size={13} />
               {t("propConnect")}
             </button>
           )}
           <button
             type="submit"
             disabled={saving}
-            className="flex items-center gap-1 px-2 py-1 rounded text-[10px] bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white transition-colors disabled:opacity-50"
+            className="flex items-center gap-1 px-2 py-1 rounded text-[12px] bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white transition-colors disabled:opacity-50"
           >
-            <Save size={11} />
+            <Save size={13} />
             {saving ? t("propSaving") : t("propSave")}
           </button>
         </div>
@@ -326,7 +326,7 @@ export function PropertiesPanel() {
           />
         </Row>
 
-        {error && <p className="text-[var(--color-danger)] text-[10px]">{error}</p>}
+        {error && <p className="text-[var(--color-danger)] text-[12px]">{error}</p>}
       </div>
     </form>
   );
@@ -334,12 +334,12 @@ export function PropertiesPanel() {
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="grid grid-cols-[72px_1fr] items-start gap-1.5">
-      <span className="text-[10px] text-[var(--color-text-muted)] pt-1.5 truncate">{label}</span>
+    <div className="grid grid-cols-[80px_1fr] items-start gap-1.5">
+      <span className="text-[12px] text-[var(--color-text-muted)] pt-1.5 truncate">{label}</span>
       <div>{children}</div>
     </div>
   );
 }
 
 const inp =
-  "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-1 text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";
+  "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-1 text-[13px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";

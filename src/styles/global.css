@@ -31,7 +31,7 @@
     background: var(--color-bg-base);
     color: var(--color-text-primary);
     font-family: "Inter", system-ui, -apple-system, sans-serif;
-    font-size: 13px;
+    font-size: 15px;
     -webkit-font-smoothing: antialiased;
     color-scheme: dark;
   }
