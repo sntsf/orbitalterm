@@ -319,7 +319,7 @@ export function Sidebar() {
           draggable={false}
         />
         <div className="flex gap-0.5">
-          <button onClick={startNewConnection}
+          <button onClick={() => startNewConnection()}
             className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
             title="New connection">
             <Plus size={14} />
@@ -496,7 +496,7 @@ export function Sidebar() {
                   <div className="px-4 py-6 text-center text-[var(--color-text-muted)] text-xs">
                     <Terminal size={20} className="mx-auto mb-2 opacity-30" />
                     <p>No connections yet.</p>
-                    <button onClick={startNewConnection}
+                    <button onClick={() => startNewConnection()}
                       className="mt-1 text-[var(--color-accent)] hover:text-[var(--color-accent-hover)]">
                       Add the first one
                     </button>

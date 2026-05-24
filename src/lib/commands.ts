@@ -41,6 +41,14 @@ export async function importConnections(json: string): Promise<number> {
   return invoke("import_connections", { json });
 }
 
+export async function exportToFile(path: string): Promise<void> {
+  return invoke("export_to_file", { path });
+}
+
+export async function importFromFile(path: string): Promise<number> {
+  return invoke("import_from_file", { path });
+}
+
 export async function reorderConnections(
   updates: { id: string; sort_order: number; folder_id: string | null }[],
 ): Promise<void> {

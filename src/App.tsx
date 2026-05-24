@@ -7,6 +7,7 @@ import { VncPane } from "./components/VncPane";
 import { FtpBrowser } from "./components/FtpBrowser";
 import { SftpDualPane } from "./components/SftpDualPane";
 import { Welcome } from "./components/Welcome";
+import { MenuBar } from "./components/MenuBar";
 import { useAppStore } from "./store/useAppStore";
 import { ftpConnect, ftpDisconnect } from "./lib/commands";
 import type { Tab } from "./types";
@@ -55,7 +56,8 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-full w-full overflow-hidden">
-      <div className="flex h-full overflow-hidden">
+      <MenuBar />
+      <div className="flex flex-1 overflow-hidden">
         <Sidebar />
 
         <div className="flex flex-col flex-1 overflow-hidden">

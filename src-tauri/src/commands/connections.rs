@@ -236,3 +236,15 @@ pub fn import_connections(json: String) -> Result<usize, String> {
     }
     Ok(count)
 }
+
+#[tauri::command]
+pub fn export_to_file(path: String) -> Result<(), String> {
+    let json = export_connections()?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn import_from_file(path: String) -> Result<usize, String> {
+    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    import_connections(json)
+}
