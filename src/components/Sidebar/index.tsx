@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   Plus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
-  ChevronRight, ChevronDown, Network,
+  ChevronRight, ChevronDown, Network, X,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import {
@@ -43,7 +43,6 @@ export function Sidebar() {
   const startY = useRef(0);
   const startH = useRef(0);
 
-  // Sidebar horizontal resize
   const sidebarDragging = useRef(false);
   const startX = useRef(0);
   const startW = useRef(0);
@@ -62,6 +61,9 @@ export function Sidebar() {
 
   const [rootExpanded, setRootExpanded] = useState(true);
 
+  // Search keyboard navigation
+  const [searchFocusIdx, setSearchFocusIdx] = useState(0);
+
   useEffect(() => {
     getConnections().then(setConnections).catch(console.error);
     getFolders().then(setFolders).catch(console.error);
@@ -78,6 +80,9 @@ export function Sidebar() {
     }
   }, [renamingFolderId]);
 
+  // Reset focus index when query changes
+  useEffect(() => { setSearchFocusIdx(0); }, [searchQuery]);
+
   const filtered = searchQuery
     ? connections.filter(
         (c) =>
@@ -86,15 +91,8 @@ export function Sidebar() {
       )
     : connections;
 
-  // In search mode: show all folders flat (depth=0), no recursive children
-  // In tree mode: show only root folders recursively
-  const displayFolders = searchQuery
-    ? folders
-    : folders.filter((f) => f.parent_id === null);
-
-  const rootConns = searchQuery
-    ? []
-    : connections.filter((c) => !c.folder_id);
+  const displayFolders = folders.filter((f) => f.parent_id === null);
+  const rootConns = connections.filter((c) => !c.folder_id);
 
   const startCreateFolder = (parentId: string | null = null) => {
     setNewFolderName("");
@@ -126,15 +124,8 @@ export function Sidebar() {
     setRenameFolderName(folder.name);
   };
 
-  const confirmRenameFolder = async () => {
-    setRenamingFolderId(null);
-    setRenameFolderName("");
-  };
-
-  const cancelRenameFolder = () => {
-    setRenamingFolderId(null);
-    setRenameFolderName("");
-  };
+  const confirmRenameFolder = async () => { setRenamingFolderId(null); setRenameFolderName(""); };
+  const cancelRenameFolder = () => { setRenamingFolderId(null); setRenameFolderName(""); };
 
   const removeFolder = async (folder: FolderType) => {
     try {
@@ -162,7 +153,8 @@ export function Sidebar() {
     handleDragEnd();
   };
 
-  const handleDropOnFolder = async (folderId: string) => {
+  // null = move to root (no folder)
+  const handleDropOnFolder = async (folderId: string | null) => {
     if (!dragId) { handleDragEnd(); return; }
     const dragged = connections.find((c) => c.id === dragId);
     if (!dragged || dragged.folder_id === folderId) { handleDragEnd(); return; }
@@ -243,10 +235,32 @@ export function Sidebar() {
     window.addEventListener("mouseup", onUp);
   };
 
+  // ── Search keyboard navigation ────────────────────────────────────────────────
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!searchQuery || filtered.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const next = (searchFocusIdx + 1) % filtered.length;
+      setSearchFocusIdx(next);
+      selectConnection(filtered[next].id);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      const prev = (searchFocusIdx - 1 + filtered.length) % filtered.length;
+      setSearchFocusIdx(prev);
+      selectConnection(filtered[prev].id);
+    } else if (e.key === "Enter") {
+      const conn = filtered[searchFocusIdx];
+      if (conn) openTab(conn);
+    } else if (e.key === "Escape") {
+      setSearchQuery("");
+    }
+  };
+
   // Shared props passed down to every FolderItem / ConnItem
   const sharedProps = {
-    allFolders: searchQuery ? ([] as FolderType[]) : folders,
-    allConnections: searchQuery ? filtered : connections,
+    allFolders: folders,
+    allConnections: connections,
     openTab,
     toggleFolder,
     onConnContextMenu: connMenu,
@@ -275,6 +289,8 @@ export function Sidebar() {
     onDropOnFolder: handleDropOnFolder,
   };
 
+  const isRootDropTarget = dropTarget === "root";
+
   return (
     <aside
       className="flex flex-col h-full bg-[var(--color-bg-surface)] border-r border-[var(--color-border)] shrink-0 relative"
@@ -286,6 +302,7 @@ export function Sidebar() {
         className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize z-20 hover:bg-[var(--color-accent)] transition-colors"
         title="Drag to resize sidebar"
       />
+
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] shrink-0">
         <img
@@ -314,118 +331,172 @@ export function Sidebar() {
           <Search size={12} className="text-[var(--color-text-muted)] shrink-0" />
           <input
             type="text"
-            placeholder="Search…"
+            placeholder="Buscar por nombre o IP…"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={handleSearchKeyDown}
             className="bg-transparent outline-none text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] w-full text-xs"
           />
+          {searchQuery && (
+            <button onClick={() => setSearchQuery("")} className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">
+              <X size={11} />
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Connection tree */}
+      {/* Connection list */}
       <div className="flex-1 overflow-y-auto min-h-0 py-0.5">
 
-        {/* Root "Conexiones" node */}
-        {!searchQuery && (
-          <button
-            onClick={() => setRootExpanded((v) => !v)}
-            className="flex items-center gap-1.5 w-full px-2 py-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
-          >
-            {rootExpanded
-              ? <ChevronDown size={11} className="shrink-0 text-[var(--color-text-muted)]" />
-              : <ChevronRight size={11} className="shrink-0 text-[var(--color-text-muted)]" />}
-            <Network size={13} className="shrink-0 text-[var(--color-accent)]" />
-            <span className="text-xs font-medium flex-1 text-left text-[var(--color-text-primary)]">Conexiones</span>
-            <span className="text-[9px] text-[var(--color-text-muted)] opacity-60">{connections.length}</span>
-          </button>
-        )}
-
-        {/* Tree content */}
-        {(searchQuery || rootExpanded) && (
+        {searchQuery ? (
+          /* ── Flat search results with keyboard navigation ── */
           <div>
-            {/* Inline root folder creation */}
-            {creatingFolder && newFolderParentId === null && (
-              <div className="flex items-center gap-1 py-0.5 pr-2">
-                <TreePrefix continuations={[]} isLast={false} />
-                <FolderInputIcon size={11} className="text-[var(--color-text-muted)] shrink-0" />
-                <input
-                  ref={folderInputRef}
-                  type="text"
-                  value={newFolderName}
-                  onChange={(e) => setNewFolderName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") confirmCreateFolder();
-                    if (e.key === "Escape") cancelCreateFolder();
-                  }}
-                  onBlur={cancelCreateFolder}
-                  placeholder="Nombre de carpeta…"
-                  className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[11px] text-[var(--color-text-primary)] outline-none"
-                />
-              </div>
-            )}
-
-            {(() => {
-              // Build combined root child list for correct isLast calculation
-              const rootChildren: Array<
-                { kind: "folder"; item: FolderType } | { kind: "conn"; item: Connection }
-              > = [
-                ...displayFolders.map((f) => ({ kind: "folder" as const, item: f })),
-                ...rootConns.map((c) => ({ kind: "conn" as const, item: c })),
-              ];
-              return rootChildren.map((child, idx) => {
-                const childIsLast = idx === rootChildren.length - 1;
-                if (child.kind === "folder") {
-                  return (
-                    <FolderItem
-                      key={child.item.id}
-                      folder={child.item}
-                      continuations={[]}
-                      isLast={childIsLast}
-                      {...sharedProps}
-                    />
-                  );
-                } else {
-                  const conn = child.item;
-                  return (
-                    <ConnItem
-                      key={conn.id}
-                      conn={conn}
-                      continuations={[]}
-                      isLast={childIsLast}
-                      selected={selectedConnectionId === conn.id}
-                      onSelect={() => selectConnection(conn.id)}
-                      onOpen={() => openTab(conn)}
-                      onContextMenu={(e) => connMenu(e, conn)}
-                      dragging={dragId === conn.id}
-                      isDropTarget={dropTarget === conn.id}
-                      onDragStart={() => setDragId(conn.id)}
-                      onDragEnd={handleDragEnd}
-                      onDragOver={() => setDropTarget(conn.id)}
-                      onDrop={() => handleDropOnConn(conn)}
-                    />
-                  );
-                }
-              });
-            })()}
-
-            {connections.length === 0 && (
-              <div className="px-4 py-6 text-center text-[var(--color-text-muted)] text-xs">
-                <Terminal size={20} className="mx-auto mb-2 opacity-30" />
-                <p>No connections yet.</p>
-                <button onClick={startNewConnection}
-                  className="mt-1 text-[var(--color-accent)] hover:text-[var(--color-accent-hover)]">
-                  Add the first one
-                </button>
-              </div>
-            )}
-
-            {/* Search: flat list of matching connections with folder hint */}
-            {searchQuery && filtered.length === 0 && (
+            {filtered.length === 0 ? (
               <div className="px-4 py-4 text-center text-[var(--color-text-muted)] text-xs">
-                No results
+                Sin resultados
               </div>
+            ) : (
+              <>
+                <div className="px-2 py-0.5 text-[9px] text-[var(--color-text-muted)] flex items-center gap-1">
+                  <span>{filtered.length} resultado{filtered.length !== 1 ? "s" : ""}</span>
+                  <span className="opacity-50">· ↑↓ navegar · Enter abrir</span>
+                </div>
+                {filtered.map((conn, idx) => {
+                  const folder = folders.find((f) => f.id === conn.folder_id);
+                  const isFocused = idx === searchFocusIdx;
+                  const TypeIcon = connTypeIcon(conn.type);
+                  return (
+                    <button
+                      key={conn.id}
+                      onClick={() => { setSearchFocusIdx(idx); selectConnection(conn.id); }}
+                      onDoubleClick={() => openTab(conn)}
+                      onContextMenu={(e) => connMenu(e, conn)}
+                      className={[
+                        "flex items-center gap-2 w-full px-2 py-1 transition-colors text-left",
+                        isFocused || selectedConnectionId === conn.id
+                          ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
+                          : "text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]",
+                      ].join(" ")}
+                    >
+                      <TypeIcon size={11} className="shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[11px] truncate font-medium">{conn.name}</div>
+                        <div className="text-[9px] text-[var(--color-text-muted)] truncate">
+                          {folder ? `${folder.name} · ` : ""}{conn.host}
+                        </div>
+                      </div>
+                      <span className={`text-[8px] uppercase font-semibold px-1 rounded shrink-0 ${connTypeColors[conn.type] ?? ""}`}>
+                        {conn.type}
+                      </span>
+                    </button>
+                  );
+                })}
+              </>
             )}
           </div>
+        ) : (
+          /* ── Normal tree view ── */
+          <>
+            {/* Root "Conexiones" node — also a valid drop target (move to root) */}
+            <button
+              onClick={() => setRootExpanded((v) => !v)}
+              onDragOver={(e) => { e.preventDefault(); setDropTarget("root"); }}
+              onDragLeave={() => setDropTarget(null)}
+              onDrop={(e) => { e.preventDefault(); handleDropOnFolder(null); }}
+              className={[
+                "flex items-center gap-1.5 w-full px-2 py-1 transition-colors",
+                isRootDropTarget
+                  ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
+              ].join(" ")}
+            >
+              {rootExpanded
+                ? <ChevronDown size={11} className="shrink-0" />
+                : <ChevronRight size={11} className="shrink-0" />}
+              <Network size={13} className="shrink-0 text-[var(--color-accent)]" />
+              <span className="text-xs font-medium flex-1 text-left text-[var(--color-text-primary)]">Conexiones</span>
+              <span className="text-[9px] text-[var(--color-text-muted)] opacity-60">{connections.length}</span>
+            </button>
+
+            {rootExpanded && (
+              <div>
+                {/* Inline root folder creation */}
+                {creatingFolder && newFolderParentId === null && (
+                  <div className="flex items-center gap-1 py-0.5 pr-2">
+                    <TreePrefix continuations={[]} isLast={false} />
+                    <FolderInputIcon size={11} className="text-[var(--color-text-muted)] shrink-0" />
+                    <input
+                      ref={folderInputRef}
+                      type="text"
+                      value={newFolderName}
+                      onChange={(e) => setNewFolderName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") confirmCreateFolder();
+                        if (e.key === "Escape") cancelCreateFolder();
+                      }}
+                      onBlur={cancelCreateFolder}
+                      placeholder="Nombre de carpeta…"
+                      className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[11px] text-[var(--color-text-primary)] outline-none"
+                    />
+                  </div>
+                )}
+
+                {(() => {
+                  const rootChildren: Array<
+                    { kind: "folder"; item: FolderType } | { kind: "conn"; item: Connection }
+                  > = [
+                    ...displayFolders.map((f) => ({ kind: "folder" as const, item: f })),
+                    ...rootConns.map((c) => ({ kind: "conn" as const, item: c })),
+                  ];
+                  return rootChildren.map((child, idx) => {
+                    const childIsLast = idx === rootChildren.length - 1;
+                    if (child.kind === "folder") {
+                      return (
+                        <FolderItem
+                          key={child.item.id}
+                          folder={child.item}
+                          continuations={[]}
+                          isLast={childIsLast}
+                          {...sharedProps}
+                        />
+                      );
+                    } else {
+                      const conn = child.item;
+                      return (
+                        <ConnItem
+                          key={conn.id}
+                          conn={conn}
+                          continuations={[]}
+                          isLast={childIsLast}
+                          selected={selectedConnectionId === conn.id}
+                          onSelect={() => selectConnection(conn.id)}
+                          onOpen={() => openTab(conn)}
+                          onContextMenu={(e) => connMenu(e, conn)}
+                          dragging={dragId === conn.id}
+                          isDropTarget={dropTarget === conn.id}
+                          onDragStart={() => setDragId(conn.id)}
+                          onDragEnd={handleDragEnd}
+                          onDragOver={() => setDropTarget(conn.id)}
+                          onDrop={() => handleDropOnConn(conn)}
+                        />
+                      );
+                    }
+                  });
+                })()}
+
+                {connections.length === 0 && (
+                  <div className="px-4 py-6 text-center text-[var(--color-text-muted)] text-xs">
+                    <Terminal size={20} className="mx-auto mb-2 opacity-30" />
+                    <p>No connections yet.</p>
+                    <button onClick={startNewConnection}
+                      className="mt-1 text-[var(--color-accent)] hover:text-[var(--color-accent-hover)]">
+                      Add the first one
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -489,7 +560,7 @@ interface SharedProps {
   onDragEnd: () => void;
   onDropTarget: (id: string | null) => void;
   onDropOnConn: (c: Connection) => void;
-  onDropOnFolder: (folderId: string) => void;
+  onDropOnFolder: (folderId: string | null) => void;
 }
 
 // ── FolderItem (recursive) ────────────────────────────────────────────────────
@@ -520,7 +591,6 @@ function FolderItem({
   const creatingSubfolder = creatingFolder && newFolderParentId === folder.id;
   const childContinuations = [...continuations, !isLast];
 
-  // Combined children for consistent "isLast" calculation
   const childItems: Array<{ kind: "folder"; item: FolderType } | { kind: "conn"; item: Connection }> = [
     ...subfolders.map((f) => ({ kind: "folder" as const, item: f })),
     ...myConns.map((c) => ({ kind: "conn" as const, item: c })),
@@ -640,6 +710,17 @@ const connTypeColors: Record<string, string> = {
   sftp: "text-cyan-400 bg-cyan-400/10",
 };
 
+function connTypeIcon(type: string) {
+  switch (type) {
+    case "ssh":  return TuxIcon;
+    case "rdp":  return WindowsIcon;
+    case "vnc":  return VncIcon;
+    case "ftp":  return FtpIcon;
+    case "sftp": return SftpIcon;
+    default:     return TuxIcon;
+  }
+}
+
 function ConnItem({
   conn, continuations, isLast, selected, onSelect, onOpen, onContextMenu,
   dragging = false, isDropTarget = false,
@@ -659,16 +740,7 @@ function ConnItem({
   onDragOver?: () => void;
   onDrop?: () => void;
 }) {
-  const TypeIcon = () => {
-    switch (conn.type) {
-      case "ssh":  return <TuxIcon size={11} className="shrink-0" />;
-      case "rdp":  return <WindowsIcon size={11} className="shrink-0" />;
-      case "vnc":  return <VncIcon size={11} className="shrink-0" />;
-      case "ftp":  return <FtpIcon size={11} className="shrink-0" />;
-      case "sftp": return <SftpIcon size={11} className="shrink-0" />;
-      default:     return <TuxIcon size={11} className="shrink-0" />;
-    }
-  };
+  const TypeIcon = connTypeIcon(conn.type);
 
   return (
     <button
@@ -676,9 +748,15 @@ function ConnItem({
       onClick={onSelect}
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
-      onDragStart={(e) => { e.stopPropagation(); onDragStart?.(); }}
+      onDragStart={(e) => {
+        e.stopPropagation();
+        // setData is required for the HTML5 drop event to fire on target elements
+        e.dataTransfer.setData("text/plain", conn.id);
+        e.dataTransfer.effectAllowed = "move";
+        onDragStart?.();
+      }}
       onDragEnd={onDragEnd}
-      onDragOver={(e) => { e.preventDefault(); onDragOver?.(); }}
+      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; onDragOver?.(); }}
       onDrop={(e) => { e.preventDefault(); onDrop?.(); }}
       className={[
         "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
@@ -690,7 +768,7 @@ function ConnItem({
       ].join(" ")}
     >
       <TreePrefix continuations={continuations} isLast={isLast} />
-      <TypeIcon />
+      <TypeIcon size={11} className="shrink-0" />
       <span className="text-[11px] truncate flex-1 ml-1">{conn.name}</span>
       <span className={`text-[8px] uppercase font-semibold px-1 rounded shrink-0 ml-1 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
         {conn.type}
