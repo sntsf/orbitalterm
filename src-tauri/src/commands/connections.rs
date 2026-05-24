@@ -195,28 +195,64 @@ pub fn delete_folder(id: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Export ────────────────────────────────────────────────────────────────────
+
 #[tauri::command]
 pub fn export_connections() -> Result<String, String> {
     let conns = get_connections()?;
     let folders = get_folders()?;
+    let db = db::open().map_err(|e| e.to_string())?;
+
+    // Attach saved password for every connection that has one
+    let conns_with_pw: Vec<serde_json::Value> = conns.iter().map(|c| {
+        let pw: Option<String> = db.query_row(
+            "SELECT password FROM passwords WHERE connection_id = ?1",
+            params![c.id],
+            |row| row.get(0),
+        ).ok();
+        let mut v = serde_json::to_value(c).unwrap_or_default();
+        if let Some(p) = pw {
+            v["password"] = serde_json::Value::String(p);
+        }
+        v
+    }).collect();
+
     serde_json::to_string_pretty(&serde_json::json!({
-        "version": 1,
-        "connections": conns,
+        "version": 2,
+        "connections": conns_with_pw,
         "folders": folders,
     }))
     .map_err(|e| e.to_string())
 }
 
+// ── Import JSON ───────────────────────────────────────────────────────────────
+
 #[tauri::command]
 pub fn import_connections(json: String) -> Result<usize, String> {
     let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    let conns = value["connections"].as_array().ok_or("missing connections")?;
     let db = db::open().map_err(|e| e.to_string())?;
     let mut count = 0usize;
+
+    // Import folders first (preserving IDs so connection→folder links stay valid)
+    if let Some(folders) = value["folders"].as_array() {
+        for f in folders {
+            let _ = db.execute(
+                "INSERT OR IGNORE INTO folders (id, name, parent_id) VALUES (?1, ?2, ?3)",
+                params![
+                    f["id"].as_str().unwrap_or(""),
+                    f["name"].as_str().unwrap_or("Imported Folder"),
+                    f["parent_id"].as_str(),
+                ],
+            );
+        }
+    }
+
+    let conns = value["connections"].as_array().ok_or("missing connections")?;
     for item in conns {
         let id = Uuid::new_v4().to_string();
-        if db.execute(
-            "INSERT OR IGNORE INTO connections (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain)
+        let ok = db.execute(
+            "INSERT OR IGNORE INTO connections
+             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 id,
@@ -225,17 +261,121 @@ pub fn import_connections(json: String) -> Result<usize, String> {
                 item["host"].as_str().unwrap_or(""),
                 item["port"].as_i64().unwrap_or(22),
                 item["username"].as_str().unwrap_or(""),
-                item["auth_type"].as_str().unwrap_or("agent"),
+                item["auth_type"].as_str().unwrap_or("password"),
                 item["key_path"].as_str().unwrap_or(""),
                 item["folder_id"].as_str(),
                 item["notes"].as_str().unwrap_or(""),
                 item["description"].as_str().unwrap_or(""),
                 item["domain"].as_str().unwrap_or(""),
             ],
-        ).is_ok() { count += 1; }
+        ).is_ok();
+
+        if ok {
+            // Save password if present in the export
+            if let Some(pw) = item["password"].as_str() {
+                if !pw.is_empty() {
+                    let _ = db.execute(
+                        "INSERT OR REPLACE INTO passwords (connection_id, password) VALUES (?1, ?2)",
+                        params![id, pw],
+                    );
+                }
+            }
+            count += 1;
+        }
     }
     Ok(count)
 }
+
+// ── Import mRemoteNG XML ──────────────────────────────────────────────────────
+
+fn mrng_protocol_to_type(proto: &str) -> &'static str {
+    match proto.to_uppercase().as_str() {
+        "SSH2" | "SSH1"              => "ssh",
+        "RDP"                        => "rdp",
+        "VNC"                        => "vnc",
+        "FTP"                        => "ftp",
+        "SFTP"                       => "sftp",
+        _                            => "ssh",
+    }
+}
+
+fn mrng_default_port(conn_type: &str) -> i64 {
+    match conn_type {
+        "ssh"  => 22,
+        "rdp"  => 3389,
+        "vnc"  => 5900,
+        "ftp"  => 21,
+        "sftp" => 22,
+        _      => 22,
+    }
+}
+
+/// Recurse into mRemoteNG XML tree.
+/// `parent_folder_id` = the OrbitalTerm folder ID to put children into (None = root).
+fn mrng_process_node(
+    node: roxmltree::Node,
+    parent_folder_id: Option<&str>,
+    db: &rusqlite::Connection,
+    count: &mut usize,
+) {
+    for child in node.children().filter(|n| n.is_element() && n.has_tag_name("Node")) {
+        let node_type = child.attribute("Type").unwrap_or("");
+        let name = child.attribute("Name").unwrap_or("Imported");
+
+        match node_type {
+            "Container" => {
+                // Create a folder and recurse
+                let folder_id = Uuid::new_v4().to_string();
+                let _ = db.execute(
+                    "INSERT OR IGNORE INTO folders (id, name, parent_id) VALUES (?1, ?2, ?3)",
+                    params![folder_id, name, parent_folder_id],
+                );
+                mrng_process_node(child, Some(&folder_id), db, count);
+            }
+            "Connection" => {
+                let proto = child.attribute("Protocol").unwrap_or("SSH2");
+                let conn_type = mrng_protocol_to_type(proto);
+                let host = child.attribute("Hostname").unwrap_or("");
+                let port: i64 = child.attribute("Port")
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or_else(|| mrng_default_port(conn_type));
+                let username = child.attribute("Username").unwrap_or("");
+                let description = child.attribute("Description").unwrap_or("");
+                let domain = child.attribute("Domain").unwrap_or("");
+                let rdp_admin = child.attribute("RDPAuthenticationLevel")
+                    .map(|v| v == "2")
+                    .unwrap_or(false);
+
+                let id = Uuid::new_v4().to_string();
+                let ok = db.execute(
+                    "INSERT OR IGNORE INTO connections
+                     (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,rdp_admin)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                    params![
+                        id, name, conn_type, host, port, username,
+                        "password", "", parent_folder_id,
+                        "", description, domain,
+                        rdp_admin as i64,
+                    ],
+                ).is_ok();
+                if ok { *count += 1; }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tauri::command]
+pub fn import_from_mremoteng(path: String) -> Result<usize, String> {
+    let xml = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
+    let db = db::open().map_err(|e| e.to_string())?;
+    let mut count = 0usize;
+    mrng_process_node(doc.root_element(), None, &db, &mut count);
+    Ok(count)
+}
+
+// ── File helpers ──────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub fn export_to_file(path: String) -> Result<(), String> {
@@ -245,6 +385,11 @@ pub fn export_to_file(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn import_from_file(path: String) -> Result<usize, String> {
-    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    import_connections(json)
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    // Detect format by file extension
+    if path.to_lowercase().ends_with(".xml") {
+        import_from_mremoteng(path)
+    } else {
+        import_connections(content)
+    }
 }

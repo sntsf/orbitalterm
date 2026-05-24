@@ -36,6 +36,7 @@ suppaftp = "6"
 des = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
+roxmltree = "0.20"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 

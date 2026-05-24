@@ -49,6 +49,10 @@ export async function importFromFile(path: string): Promise<number> {
   return invoke("import_from_file", { path });
 }
 
+export async function importFromMremoteng(path: string): Promise<number> {
+  return invoke("import_from_mremoteng", { path });
+}
+
 export async function reorderConnections(
   updates: { id: string; sort_order: number; folder_id: string | null }[],
 ): Promise<void> {

@@ -14,6 +14,7 @@ import {
   exportToFile, importFromFile, getConnections, getFolders,
 } from "../../lib/commands";
 
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type MenuItemDef =
@@ -90,9 +91,12 @@ export function MenuBar() {
     try {
       const path = await dialogOpen({
         multiple: false,
-        filters: [{ name: "JSON", extensions: ["json"] }],
+        filters: [
+          { name: "OrbitalTerm / mRemoteNG", extensions: ["json", "xml"] },
+        ],
       });
       if (!path || typeof path !== "string") return;
+      // importFromFile detects .xml vs .json on the Rust side
       const count = await importFromFile(path);
       setConnections(await getConnections());
       setFolders(await getFolders());
