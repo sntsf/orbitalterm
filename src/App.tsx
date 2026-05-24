@@ -51,14 +51,14 @@ function FtpStandalonePane({ tab }: { tab: Tab }) {
 // ── App root ───────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { tabs, activeTabId } = useAppStore();
+  const { tabs, activeTabId, sidebarVisible } = useAppStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
   return (
     <div className="flex flex-col h-full w-full overflow-hidden">
       <MenuBar />
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
+        {sidebarVisible && <Sidebar />}
 
         <div className="flex flex-col flex-1 overflow-hidden">
           <TabBar />

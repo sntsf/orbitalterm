@@ -4,7 +4,8 @@ import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Plus, FolderPlus, Upload, Download, LogOut,
-  Globe, Info, Bug, Check, X,
+  Globe, Info, Bug, Check, X, Maximize2, PanelLeftClose,
+  Heart, RefreshCw, ExternalLink,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
@@ -22,7 +23,7 @@ type MenuItemDef =
       shortcut?: string;
       action?: () => void;
       checked?: boolean;
-      submenu?: MenuItemDef[];
+      disabled?: boolean;
     };
 
 // ── MenuBar ───────────────────────────────────────────────────────────────────
@@ -30,13 +31,19 @@ type MenuItemDef =
 export function MenuBar() {
   const t = useT();
   const { lang, setLang } = useI18nStore();
-  const { startNewConnection, setConnections, setFolders } = useAppStore();
+  const { startNewConnection, setConnections, setFolders, toggleSidebar, sidebarVisible } = useAppStore();
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showAbout, setShowAbout] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
 
-  // Close on click outside
+  // Sync initial fullscreen state
+  useEffect(() => {
+    getCurrentWindow().isFullscreen().then(setIsFullscreen).catch(() => {});
+  }, []);
+
+  // Close dropdown on click outside
   useEffect(() => {
     if (!openMenuId) return;
     const onDown = (e: MouseEvent) => {
@@ -46,7 +53,16 @@ export function MenuBar() {
     return () => window.removeEventListener("mousedown", onDown);
   }, [openMenuId]);
 
-  // Auto-dismiss toast
+  // Keyboard shortcut: F11 → fullscreen
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "F11") { e.preventDefault(); handleFullscreen(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  // Auto-dismiss toast after 3 s
   useEffect(() => {
     if (!toast) return;
     const id = setTimeout(() => setToast(null), 3000);
@@ -54,6 +70,18 @@ export function MenuBar() {
   }, [toast]);
 
   const showToast = (msg: string, ok = true) => setToast({ msg, ok });
+
+  const handleFullscreen = async () => {
+    const next = !isFullscreen;
+    await getCurrentWindow().setFullscreen(next);
+    setIsFullscreen(next);
+    setOpenMenuId(null);
+  };
+
+  const handleToggleSidebar = () => {
+    toggleSidebar();
+    setOpenMenuId(null);
+  };
 
   const handleImport = async () => {
     setOpenMenuId(null);
@@ -92,19 +120,35 @@ export function MenuBar() {
     getCurrentWindow().close();
   };
 
-  const handleReportBug = () => {
+  const handleOpenUrl = (url: string) => {
     setOpenMenuId(null);
-    shellOpen("https://github.com/sntsf/orbitalterm/issues").catch(console.error);
+    shellOpen(url).catch(console.error);
   };
 
-  // Menu definitions — rebuilt whenever lang changes (via useT)
+  const handleCheckUpdates = () => {
+    setOpenMenuId(null);
+    showToast(t("checkUpdatesMsg"));
+    shellOpen("https://github.com/sntsf/orbitalterm/releases").catch(console.error);
+  };
+
+  // Menu definitions — rebuilt on every render so t() picks up lang changes
   const menus: { id: string; label: string; items: MenuItemDef[] }[] = [
     {
       id: "file",
       label: t("menuFile"),
       items: [
-        { label: t("newConnection"), icon: <Plus size={12} />, shortcut: "Ctrl+N", action: () => { setOpenMenuId(null); startNewConnection(); } },
-        { label: t("newFolder"), icon: <FolderPlus size={12} />, shortcut: "Ctrl+Shift+N", action: () => { setOpenMenuId(null); /* sidebar handles this */ } },
+        {
+          label: t("newConnection"),
+          icon: <Plus size={12} />,
+          shortcut: "Ctrl+N",
+          action: () => { setOpenMenuId(null); startNewConnection(); },
+        },
+        {
+          label: t("newFolder"),
+          icon: <FolderPlus size={12} />,
+          shortcut: "Ctrl+Shift+N",
+          action: () => setOpenMenuId(null),
+        },
         { separator: true },
         { label: t("importConnections"), icon: <Upload size={12} />, action: handleImport },
         { label: t("exportConnections"), icon: <Download size={12} />, action: handleExport },
@@ -113,10 +157,30 @@ export function MenuBar() {
       ],
     },
     {
+      id: "view",
+      label: t("menuView"),
+      items: [
+        {
+          label: t("showHideSidebar"),
+          icon: <PanelLeftClose size={12} />,
+          checked: sidebarVisible,
+          action: handleToggleSidebar,
+        },
+        { separator: true },
+        {
+          label: t("fullscreen"),
+          icon: <Maximize2 size={12} />,
+          shortcut: "F11",
+          checked: isFullscreen,
+          action: handleFullscreen,
+        },
+      ],
+    },
+    {
       id: "tools",
       label: t("menuTools"),
       items: [
-        { label: t("language"), icon: <Globe size={12} />, action: undefined },
+        { label: t("language"), icon: <Globe size={12} />, disabled: true },
         ...LANGS.map((l) => ({
           label: l.label,
           checked: lang === l.value,
@@ -128,9 +192,33 @@ export function MenuBar() {
       id: "help",
       label: t("menuHelp"),
       items: [
-        { label: t("about"), icon: <Info size={12} />, action: () => { setOpenMenuId(null); setShowAbout(true); } },
+        {
+          label: t("about"),
+          icon: <Info size={12} />,
+          action: () => { setOpenMenuId(null); setShowAbout(true); },
+        },
         { separator: true },
-        { label: t("reportBug"), icon: <Bug size={12} />, action: handleReportBug },
+        {
+          label: t("website"),
+          icon: <ExternalLink size={12} />,
+          action: () => handleOpenUrl("https://github.com/sntsf/orbitalterm"),
+        },
+        {
+          label: t("donate"),
+          icon: <Heart size={12} />,
+          action: () => handleOpenUrl("https://github.com/sponsors/sntsf"),
+        },
+        { separator: true },
+        {
+          label: t("checkUpdates"),
+          icon: <RefreshCw size={12} />,
+          action: handleCheckUpdates,
+        },
+        {
+          label: t("reportBug"),
+          icon: <Bug size={12} />,
+          action: () => handleOpenUrl("https://github.com/sntsf/orbitalterm/issues"),
+        },
       ],
     },
   ];
@@ -187,37 +275,35 @@ export function MenuBar() {
 
 function Dropdown({ items, onClose }: { items: MenuItemDef[]; onClose: () => void }) {
   return (
-    <div className="absolute top-full left-0 mt-0.5 min-w-[200px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-lg z-50 py-1">
+    <div className="absolute top-full left-0 mt-0.5 min-w-[210px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-xl z-50 py-1">
       {items.map((item, i) => {
         if ("separator" in item) {
           return <div key={i} className="my-1 border-t border-[var(--color-border)]" />;
         }
-        const isHeader = !item.action && !item.checked;
+        const isHeader = item.disabled;
         return (
           <button
             key={i}
-            onClick={item.action ? () => { item.action!(); onClose(); } : undefined}
-            disabled={!item.action}
+            onClick={item.action && !item.disabled ? () => { item.action!(); onClose(); } : undefined}
+            disabled={item.disabled}
             className={[
               "flex items-center gap-2 w-full px-3 py-1 text-left text-xs transition-colors",
               isHeader
-                ? "text-[var(--color-text-muted)] cursor-default font-semibold opacity-60 pl-3"
+                ? "text-[var(--color-text-muted)] cursor-default font-semibold opacity-50"
                 : item.action
                 ? "hover:bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] cursor-pointer"
                 : "text-[var(--color-text-muted)] cursor-default",
             ].join(" ")}
           >
-            {/* Check / icon column */}
+            {/* Check / icon column (fixed 16px width) */}
             <span className="w-4 shrink-0 flex items-center justify-center">
               {item.checked
                 ? <Check size={11} className="text-[var(--color-accent)]" />
-                : item.icon ?? null}
+                : (item.icon ?? null)}
             </span>
 
-            {/* Label */}
             <span className="flex-1">{item.label}</span>
 
-            {/* Shortcut */}
             {item.shortcut && (
               <span className="text-[10px] text-[var(--color-text-muted)] ml-4 shrink-0">
                 {item.shortcut}
@@ -241,7 +327,6 @@ function AboutModal({ onClose }: { onClose: () => void }) {
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div className="bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded-xl shadow-2xl w-80 overflow-hidden">
-        {/* Header */}
         <div className="flex flex-col items-center gap-3 px-6 py-6 bg-[var(--color-bg-elevated)]">
           <img
             src="/logo.png"
@@ -255,13 +340,11 @@ function AboutModal({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        {/* Body */}
         <div className="px-6 py-4 space-y-2 text-center">
           <p className="text-xs text-[var(--color-text-muted)]">{t("aboutDesc")}</p>
           <p className="text-[10px] text-[var(--color-text-muted)] opacity-60">{t("developer")}</p>
         </div>
 
-        {/* Footer */}
         <div className="px-6 pb-4 flex justify-center">
           <button
             onClick={onClose}

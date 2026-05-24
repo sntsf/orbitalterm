@@ -11,6 +11,7 @@ const T = {
   es: {
     // Menu bar
     menuFile: "Archivo",
+    menuView: "Ver",
     menuTools: "Herramientas",
     menuHelp: "Ayuda",
     // File menu
@@ -19,10 +20,16 @@ const T = {
     importConnections: "Importar conexiones…",
     exportConnections: "Exportar conexiones…",
     exit: "Salir",
+    // View menu
+    fullscreen: "Pantalla Completa",
+    showHideSidebar: "Mostrar/Ocultar Sidebar",
     // Tools menu
     language: "Idioma",
     // Help menu
     about: "Acerca de OrbitalTerm",
+    website: "Sitio Web",
+    donate: "Donar",
+    checkUpdates: "Comprobar Actualizaciones",
     reportBug: "Reportar un error",
     // About dialog
     aboutDesc: "Gestor ligero de conexiones remotas para administradores de sistemas.",
@@ -32,6 +39,7 @@ const T = {
     // Messages
     importedOk: "conexión(es) importada(s).",
     exportedOk: "Archivo exportado correctamente.",
+    checkUpdatesMsg: "Revisando la última versión en GitHub…",
     // Sidebar / UI
     connections: "Conexiones",
     searchPlaceholder: "Buscar por nombre o IP…",
@@ -40,6 +48,12 @@ const T = {
     navHint: "↑↓ navegar · Enter abrir",
     noConnectionsYet: "Sin conexiones aún.",
     addFirst: "Agrega la primera",
+    newConnectionMenu: "Nueva Conexión",
+    newSubfolder: "Nueva Subcarpeta",
+    rename: "Renombrar",
+    delete: "Eliminar",
+    connect: "Conectar",
+    duplicate: "Duplicar",
     // Properties panel
     propNewConnection: "Nueva Conexión",
     propProperties: "Propiedades",
@@ -73,6 +87,7 @@ const T = {
   },
   en: {
     menuFile: "File",
+    menuView: "View",
     menuTools: "Tools",
     menuHelp: "Help",
     newConnection: "New Connection",
@@ -80,8 +95,13 @@ const T = {
     importConnections: "Import connections…",
     exportConnections: "Export connections…",
     exit: "Exit",
+    fullscreen: "Fullscreen",
+    showHideSidebar: "Show/Hide Sidebar",
     language: "Language",
     about: "About OrbitalTerm",
+    website: "Website",
+    donate: "Donate",
+    checkUpdates: "Check for Updates",
     reportBug: "Report a bug",
     aboutDesc: "Lightweight remote connection manager for sysadmins.",
     version: "Version",
@@ -89,6 +109,7 @@ const T = {
     developer: "Developed by OrbitalTerm",
     importedOk: "connection(s) imported.",
     exportedOk: "File exported successfully.",
+    checkUpdatesMsg: "Checking for the latest version on GitHub…",
     connections: "Connections",
     searchPlaceholder: "Search by name or IP…",
     noResults: "No results",
@@ -96,6 +117,12 @@ const T = {
     navHint: "↑↓ navigate · Enter open",
     noConnectionsYet: "No connections yet.",
     addFirst: "Add the first one",
+    newConnectionMenu: "New Connection",
+    newSubfolder: "New Subfolder",
+    rename: "Rename",
+    delete: "Delete",
+    connect: "Connect",
+    duplicate: "Duplicate",
     propNewConnection: "New Connection",
     propProperties: "Properties",
     propConnect: "Connect",

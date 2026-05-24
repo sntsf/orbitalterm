@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Save, Plug, Eye, EyeOff } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
+import { useT } from "../../store/useI18nStore";
 import {
   saveConnection,
   updateConnection,
@@ -29,6 +30,7 @@ const AUTH_FOR_TYPE: Record<ConnectionType, AuthType[]> = {
 };
 
 export function PropertiesPanel() {
+  const t = useT();
   const {
     connections,
     selectedConnectionId,
@@ -102,11 +104,10 @@ export function PropertiesPanel() {
     }
   }, [existing?.id, isCreatingNew, newConnectionFolderId]);
 
-  const handleTypeChange = (t: ConnectionType) => {
-    setType(t);
-    setPort(DEFAULT_PORTS[t]);
-    const supportedAuth = AUTH_FOR_TYPE[t];
-    // If current authType not supported by new type, switch to first supported
+  const handleTypeChange = (newType: ConnectionType) => {
+    setType(newType);
+    setPort(DEFAULT_PORTS[newType]);
+    const supportedAuth = AUTH_FOR_TYPE[newType];
     if (!supportedAuth.includes(authType)) {
       setAuthType(supportedAuth[0]);
     }
@@ -116,7 +117,7 @@ export function PropertiesPanel() {
     e?.preventDefault();
     setError("");
     if (!name.trim() || !host.trim() || !username.trim()) {
-      setError("Name, host and username are required.");
+      setError(t("propRequired"));
       return;
     }
     setSaving(true);
@@ -169,12 +170,12 @@ export function PropertiesPanel() {
   if (!existing && !isCreatingNew) {
     return (
       <div className="flex items-center justify-center h-full text-[var(--color-text-muted)] text-xs">
-        Select a connection or click + to create one
+        {t("propSelectOrCreate")}
       </div>
     );
   }
 
-    const authLabels: Record<AuthType, string> = {
+  const authLabels: Record<AuthType, string> = {
     password: "Password",
     key: "Key File",
     agent: "Agent",
@@ -183,7 +184,6 @@ export function PropertiesPanel() {
   const supportedAuthTypes = AUTH_FOR_TYPE[type];
   const showAuthSection = supportedAuthTypes.length > 1 || supportedAuthTypes[0] !== "password";
   const showDomain = type === "rdp";
-
   const showPasswordField = authType === "password";
   const showKeyField = authType === "key";
 
@@ -192,18 +192,18 @@ export function PropertiesPanel() {
       {/* Panel header */}
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--color-border)] shrink-0">
         <span className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)] font-medium">
-          {isCreatingNew ? "New Connection" : "Properties"}
+          {isCreatingNew ? t("propNewConnection") : t("propProperties")}
         </span>
         <div className="flex gap-1">
           {existing && (
             <button
               type="button"
               onClick={handleConnect}
-              title="Connect"
+              title={t("propConnect")}
               className="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-[var(--color-success)] hover:bg-[var(--color-success)]/10 transition-colors"
             >
               <Plug size={11} />
-              Connect
+              {t("propConnect")}
             </button>
           )}
           <button
@@ -212,14 +212,14 @@ export function PropertiesPanel() {
             className="flex items-center gap-1 px-2 py-1 rounded text-[10px] bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white transition-colors disabled:opacity-50"
           >
             <Save size={11} />
-            {saving ? "Saving…" : "Save"}
+            {saving ? t("propSaving") : t("propSave")}
           </button>
         </div>
       </div>
 
       {/* Fields */}
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
-        <Row label="Tipo">
+        <Row label={t("propType")}>
           <select
             value={type}
             onChange={(e) => handleTypeChange(e.target.value as ConnectionType)}
@@ -233,29 +233,28 @@ export function PropertiesPanel() {
           </select>
         </Row>
 
-        <Row label="Nombre">
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Mi Servidor" className={inp} />
+        <Row label={t("propName")}>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="My Server" className={inp} />
         </Row>
 
-        <Row label="Descripción">
-          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Descripción opcional" className={inp} />
+        <Row label={t("propDesc")}>
+          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional description" className={inp} />
         </Row>
 
-        <Row label="Host / IP">
+        <Row label={t("propHost")}>
           <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.10" className={inp} />
         </Row>
 
-        <Row label="Puerto">
+        <Row label={t("propPort")}>
           <input type="number" value={port} onChange={(e) => setPort(Number(e.target.value))} className={inp} />
         </Row>
 
-        <Row label="Usuario">
+        <Row label={t("propUser")}>
           <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="root" className={inp} />
         </Row>
 
-        {/* Auth — SSH and SFTP support all 3; others only password */}
         {showAuthSection && (
-          <Row label="Autent.">
+          <Row label={t("propAuth")}>
             <select
               value={authType}
               onChange={(e) => setAuthType(e.target.value as AuthType)}
@@ -269,19 +268,19 @@ export function PropertiesPanel() {
         )}
 
         {showKeyField && (
-          <Row label="Llave SSH">
+          <Row label={t("propSshKey")}>
             <input value={keyPath} onChange={(e) => setKeyPath(e.target.value)} placeholder="~/.ssh/id_rsa" className={inp} />
           </Row>
         )}
 
         {showPasswordField && (
-          <Row label="Contraseña">
+          <Row label={t("propPassword")}>
             <div className="relative">
               <input
                 type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={hasSaved ? "●●●●●● (guardada)" : "Ingresar contraseña"}
+                placeholder={hasSaved ? t("propPasswordSaved") : t("propPasswordPlaceholder")}
                 className={inp + " pr-7"}
               />
               <button
@@ -296,22 +295,22 @@ export function PropertiesPanel() {
         )}
 
         {showDomain && (
-          <Row label="Dominio">
+          <Row label={t("propDomain")}>
             <input
               value={domain}
               onChange={(e) => setDomain(e.target.value)}
-              placeholder="WORKGROUP o dominio AD"
+              placeholder="WORKGROUP"
               className={inp}
             />
           </Row>
         )}
 
-        <Row label="Notas">
+        <Row label={t("propNotes")}>
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             rows={2}
-            placeholder="Notas opcionales…"
+            placeholder="…"
             className={inp + " resize-none"}
           />
         </Row>

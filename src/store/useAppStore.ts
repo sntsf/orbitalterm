@@ -8,6 +8,7 @@ interface AppStore {
   selectedConnectionId: string | null;
   isCreatingNew: boolean;
   newConnectionFolderId: string | null;
+  sidebarVisible: boolean;
 
   tabs: Tab[];
   activeTabId: string | null;
@@ -18,6 +19,7 @@ interface AppStore {
   selectConnection: (id: string | null) => void;
   setIsCreatingNew: (v: boolean) => void;
   startNewConnection: (folderId?: string | null) => void;
+  toggleSidebar: () => void;
 
   openTab: (connection: Connection) => void;
   closeTab: (tabId: string) => void;
@@ -37,6 +39,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   selectedConnectionId: null,
   isCreatingNew: false,
   newConnectionFolderId: null,
+  sidebarVisible: true,
   tabs: [],
   activeTabId: null,
 
@@ -51,6 +54,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   startNewConnection: (folderId = null) =>
     set({ isCreatingNew: true, selectedConnectionId: null, newConnectionFolderId: folderId }),
+
+  toggleSidebar: () => set((s) => ({ sidebarVisible: !s.sidebarVisible })),
 
   openTab: (connection) => {
     const { tabs } = get();
