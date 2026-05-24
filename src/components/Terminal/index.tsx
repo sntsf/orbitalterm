@@ -8,6 +8,7 @@ import { HardDrive } from "lucide-react";
 import { connectSsh, disconnectSsh, resizePty, sendInput, sftpConnect, sftpDisconnect } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import { usePrefsStore, TERM_THEMES } from "../../store/usePrefsStore";
+import { useNotifStore } from "../../store/useNotifStore";
 import { SftpBrowser } from "../SftpBrowser";
 import type { Tab } from "../../types";
 
@@ -158,8 +159,15 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         // Initial size sync
         await resizePty(sessionId, term.cols, term.rows);
       } catch (err) {
-        term.writeln(`\r\n\x1b[31m[Connection failed: ${err}]\x1b[0m`);
+        const raw = String(err);
+        term.writeln(`\r\n\x1b[31m[Connection failed: ${raw}]\x1b[0m`);
         setTabStatus(tab.id, "error");
+        useNotifStore.getState().add({
+          connName: connection.name,
+          connType: connection.type,
+          host: connection.host,
+          raw,
+        });
       }
     };
 

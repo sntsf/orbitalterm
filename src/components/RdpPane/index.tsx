@@ -11,6 +11,7 @@ import {
   rdpRefreshSession,
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
+import { useNotifStore } from "../../store/useNotifStore";
 import type { Tab } from "../../types";
 
 function parseMissingClient(msg: string): { pkg: string; rest: string } | null {
@@ -260,9 +261,20 @@ export function RdpPane({ tab }: RdpPaneProps) {
       setTabStatus(tab.id, "connected");
     } catch (err) {
       if (gen === connectGenRef.current) {
-        setErrorMsg(String(err));
+        const raw = String(err);
+        setErrorMsg(raw);
         setStatus("error");
         setTabStatus(tab.id, "error");
+        // Don't notify for cases that have their own inline UI (missing client / no password)
+        if (!raw.startsWith("NO_RDP_CLIENT") && !raw.startsWith("NO_PASSWORD")) {
+          const conn = getConnectionById(tab.connection_id);
+          useNotifStore.getState().add({
+            connName: tab.connection_name,
+            connType: "rdp",
+            host: conn?.host ?? "",
+            raw,
+          });
+        }
       }
     }
   };
@@ -307,6 +319,15 @@ export function RdpPane({ tab }: RdpPaneProps) {
           setEmbedded(false);
           setStatus("error");
           setErrorMsg(msg);
+          if (msg !== "SESSION_ENDED") {
+            const conn = getConnectionById(tab.connection_id);
+            useNotifStore.getState().add({
+              connName: tab.connection_name,
+              connType: "rdp",
+              host: conn?.host ?? "",
+              raw: msg,
+            });
+          }
         }}
         onResize={(w, h) => setFrameSize({ width: w, height: h })}
       />

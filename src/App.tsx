@@ -8,7 +8,9 @@ import { FtpBrowser } from "./components/FtpBrowser";
 import { SftpDualPane } from "./components/SftpDualPane";
 import { Welcome } from "./components/Welcome";
 import { MenuBar } from "./components/MenuBar";
+import { NotificationBar } from "./components/NotificationBar";
 import { useAppStore } from "./store/useAppStore";
+import { useNotifStore } from "./store/useNotifStore";
 import { ftpConnect, ftpDisconnect } from "./lib/commands";
 import type { Tab } from "./types";
 
@@ -29,7 +31,17 @@ function FtpStandalonePane({ tab }: { tab: Tab }) {
     let cancelled = false;
     ftpConnect(connection.id)
       .then((sid) => { if (!cancelled) handleConnect(sid); })
-      .catch(() => { if (!cancelled) setTabStatus(tab.id, "error"); });
+      .catch((err) => {
+        if (!cancelled) {
+          setTabStatus(tab.id, "error");
+          useNotifStore.getState().add({
+            connName: connection?.name ?? tab.connection_name,
+            connType: "ftp",
+            host: connection?.host ?? "",
+            raw: String(err),
+          });
+        }
+      });
     return () => { cancelled = true; };
   }, [tab.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -57,7 +69,7 @@ export default function App() {
   return (
     <div className="flex flex-col h-full w-full overflow-hidden">
       <MenuBar />
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden min-h-0">
         {sidebarVisible && <Sidebar />}
 
         <div className="flex flex-col flex-1 overflow-hidden">
@@ -92,6 +104,7 @@ export default function App() {
           </div>
         </div>
       </div>
+      <NotificationBar />
     </div>
   );
 }

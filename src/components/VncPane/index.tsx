@@ -3,6 +3,7 @@ import { Monitor, WifiOff, Loader } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { vncConnect, vncDisconnect, vncKeyEvent, vncPointerEvent } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
+import { useNotifStore } from "../../store/useNotifStore";
 import type { Tab } from "../../types";
 
 interface VncPaneProps {
@@ -115,9 +116,18 @@ export function VncPane({ tab }: VncPaneProps) {
       setStatus("connected");
       setTabStatus(tab.id, "connected");
     } catch (err) {
+      const raw = String(err);
       setStatus("error");
-      setErrorMsg(String(err));
+      setErrorMsg(raw);
       setTabStatus(tab.id, "error");
+      if (connection) {
+        useNotifStore.getState().add({
+          connName: connection.name,
+          connType: "vnc",
+          host: connection.host,
+          raw,
+        });
+      }
     }
   }, [connection, tab.id, setTabStatus]);
 
