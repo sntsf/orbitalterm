@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Save, Plug, Eye, EyeOff } from "lucide-react";
+import { Save, Plug, Eye, EyeOff, Info } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
-import { useT } from "../../store/useI18nStore";
+import { useT, useI18nStore } from "../../store/useI18nStore";
 import {
   saveConnection,
   updateConnection,
@@ -20,7 +20,6 @@ const DEFAULT_PORTS: Record<ConnectionType, number> = {
   sftp: 22,
 };
 
-// Which auth modes each type supports — order determines dropdown order
 const AUTH_FOR_TYPE: Record<ConnectionType, AuthType[]> = {
   ssh: ["password", "key", "agent"],
   sftp: ["password", "key", "agent"],
@@ -29,8 +28,40 @@ const AUTH_FOR_TYPE: Record<ConnectionType, AuthType[]> = {
   ftp: ["password"],
 };
 
+type FieldKey = "type" | "name" | "desc" | "host" | "port" | "user" | "auth" | "key" | "password" | "domain" | "notes";
+
+const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string }>> = {
+  es: {
+    type:     { title: "Tipo de conexión", body: "Protocolo usado para conectarse al servidor remoto: SSH (Linux/Unix), RDP (Windows), VNC (escritorio remoto), FTP o SFTP (transferencia de archivos)." },
+    name:     { title: "Nombre", body: "Nombre descriptivo para identificar esta conexión en la lista. Puede ser el nombre del servidor o un alias personalizado." },
+    desc:     { title: "Descripción", body: "Descripción opcional con información adicional sobre este servidor o su función dentro de la infraestructura." },
+    host:     { title: "Host / IP", body: "Dirección IP o nombre de dominio del servidor remoto al que desea conectarse. Ejemplo: 192.168.1.10 o servidor.empresa.com." },
+    port:     { title: "Puerto", body: "Puerto TCP en el que escucha el servicio remoto. El valor predeterminado depende del tipo: SSH=22, RDP=3389, VNC=5900, FTP=21, SFTP=22." },
+    user:     { title: "Usuario", body: "Nombre de usuario con el que se autenticará en el servidor remoto. En Linux suele ser 'root' o un usuario con privilegios sudo." },
+    auth:     { title: "Autenticación", body: "Método de autenticación: Password (contraseña), Key File (llave privada SSH), Agent (agente SSH del sistema operativo)." },
+    key:      { title: "Llave SSH", body: "Ruta a su archivo de llave privada SSH. Ejemplo: ~/.ssh/id_rsa o C:\\Users\\user\\.ssh\\id_ed25519. La llave pública correspondiente debe estar en el servidor." },
+    password: { title: "Contraseña", body: "Contraseña del usuario remoto. Se almacena cifrada en el almacén seguro del sistema operativo. Déjelo vacío si no desea modificar la contraseña guardada." },
+    domain:   { title: "Dominio", body: "Dominio de Windows o Active Directory al que pertenece el usuario. En equipos locales suele ser el nombre del equipo o 'WORKGROUP'." },
+    notes:    { title: "Notas", body: "Campo libre para anotaciones: comandos útiles, credenciales secundarias, historial de cambios o cualquier información relevante de este servidor." },
+  },
+  en: {
+    type:     { title: "Connection type", body: "Protocol used to connect to the remote server: SSH (Linux/Unix), RDP (Windows), VNC (remote desktop), FTP or SFTP (file transfer)." },
+    name:     { title: "Name", body: "Descriptive name to identify this connection in the list. Can be the server name or a custom alias." },
+    desc:     { title: "Description", body: "Optional description with additional information about this server or its role in the infrastructure." },
+    host:     { title: "Host / IP", body: "IP address or domain name of the remote server to connect to. Example: 192.168.1.10 or server.company.com." },
+    port:     { title: "Port", body: "TCP port on which the remote service listens. Default depends on type: SSH=22, RDP=3389, VNC=5900, FTP=21, SFTP=22." },
+    user:     { title: "Username", body: "Username to authenticate with on the remote server. On Linux this is often 'root' or a user with sudo privileges." },
+    auth:     { title: "Authentication", body: "Authentication method: Password, Key File (SSH private key), or Agent (OS SSH agent)." },
+    key:      { title: "SSH Key", body: "Path to your SSH private key file. Example: ~/.ssh/id_rsa or C:\\Users\\user\\.ssh\\id_ed25519. The matching public key must be on the server." },
+    password: { title: "Password", body: "Remote user password. Stored encrypted in the OS secure keystore. Leave empty to keep the currently saved password." },
+    domain:   { title: "Domain", body: "Windows or Active Directory domain the user belongs to. On standalone machines this is usually the machine name or 'WORKGROUP'." },
+    notes:    { title: "Notes", body: "Free-form field for notes: useful commands, secondary credentials, change history, or any relevant info about this server." },
+  },
+};
+
 export function PropertiesPanel() {
   const t = useT();
+  const { lang } = useI18nStore();
   const {
     connections,
     folders,
@@ -66,6 +97,9 @@ export function PropertiesPanel() {
   const [groupId, setGroupId] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+
+  // Contextual hint
+  const [focusedField, setFocusedField] = useState<FieldKey | null>(null);
 
   // Load existing connection into form
   useEffect(() => {
@@ -103,7 +137,6 @@ export function PropertiesPanel() {
       setKeyPath("");
       setPassword("");
       setFolderId(newConnectionFolderId ?? "");
-      // Determine group_id: from folder's group, or newConnectionGroupId, or first group
       const folderGroup = newConnectionFolderId
         ? folders.find((f) => f.id === newConnectionFolderId)?.group_id
         : null;
@@ -198,6 +231,11 @@ export function PropertiesPanel() {
   const showPasswordField = authType === "password";
   const showKeyField = authType === "key";
 
+  const hint = focusedField ? HINTS[lang][focusedField] : null;
+
+  const focus = (f: FieldKey) => () => setFocusedField(f);
+  const blur = () => setFocusedField(null);
+
   return (
     <form onSubmit={handleSave} className="flex flex-col h-full overflow-hidden">
       {/* Panel header */}
@@ -229,11 +267,12 @@ export function PropertiesPanel() {
       </div>
 
       {/* Fields */}
-      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
+      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2 min-h-0">
         <Row label={t("propType")}>
           <select
             value={type}
             onChange={(e) => handleTypeChange(e.target.value as ConnectionType)}
+            onFocus={focus("type")} onBlur={blur}
             className={inp}
           >
             <option value="ssh">SSH</option>
@@ -245,23 +284,47 @@ export function PropertiesPanel() {
         </Row>
 
         <Row label={t("propName")}>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="My Server" className={inp} />
+          <input
+            value={name} onChange={(e) => setName(e.target.value)}
+            placeholder="My Server"
+            onFocus={focus("name")} onBlur={blur}
+            className={inp}
+          />
         </Row>
 
         <Row label={t("propDesc")}>
-          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional description" className={inp} />
+          <input
+            value={description} onChange={(e) => setDescription(e.target.value)}
+            placeholder="Optional description"
+            onFocus={focus("desc")} onBlur={blur}
+            className={inp}
+          />
         </Row>
 
         <Row label={t("propHost")}>
-          <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.10" className={inp} />
+          <input
+            value={host} onChange={(e) => setHost(e.target.value)}
+            placeholder="192.168.1.10"
+            onFocus={focus("host")} onBlur={blur}
+            className={inp}
+          />
         </Row>
 
         <Row label={t("propPort")}>
-          <input type="number" value={port} onChange={(e) => setPort(Number(e.target.value))} className={inp} />
+          <input
+            type="number" value={port} onChange={(e) => setPort(Number(e.target.value))}
+            onFocus={focus("port")} onBlur={blur}
+            className={inp}
+          />
         </Row>
 
         <Row label={t("propUser")}>
-          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="root" className={inp} />
+          <input
+            value={username} onChange={(e) => setUsername(e.target.value)}
+            placeholder="root"
+            onFocus={focus("user")} onBlur={blur}
+            className={inp}
+          />
         </Row>
 
         {showAuthSection && (
@@ -269,6 +332,7 @@ export function PropertiesPanel() {
             <select
               value={authType}
               onChange={(e) => setAuthType(e.target.value as AuthType)}
+              onFocus={focus("auth")} onBlur={blur}
               className={inp}
             >
               {supportedAuthTypes.map((a) => (
@@ -280,7 +344,12 @@ export function PropertiesPanel() {
 
         {showKeyField && (
           <Row label={t("propSshKey")}>
-            <input value={keyPath} onChange={(e) => setKeyPath(e.target.value)} placeholder="~/.ssh/id_rsa" className={inp} />
+            <input
+              value={keyPath} onChange={(e) => setKeyPath(e.target.value)}
+              placeholder="~/.ssh/id_rsa"
+              onFocus={focus("key")} onBlur={blur}
+              className={inp}
+            />
           </Row>
         )}
 
@@ -292,6 +361,7 @@ export function PropertiesPanel() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder={hasSaved ? t("propPasswordSaved") : t("propPasswordPlaceholder")}
+                onFocus={focus("password")} onBlur={blur}
                 className={inp + " pr-7"}
               />
               <button
@@ -311,6 +381,7 @@ export function PropertiesPanel() {
               value={domain}
               onChange={(e) => setDomain(e.target.value)}
               placeholder="WORKGROUP"
+              onFocus={focus("domain")} onBlur={blur}
               className={inp}
             />
           </Row>
@@ -322,11 +393,38 @@ export function PropertiesPanel() {
             onChange={(e) => setNotes(e.target.value)}
             rows={2}
             placeholder="…"
+            onFocus={focus("notes")} onBlur={blur}
             className={inp + " resize-none"}
           />
         </Row>
 
         {error && <p className="text-[var(--color-danger)] text-[12px]">{error}</p>}
+      </div>
+
+      {/* Contextual hint box */}
+      <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 min-h-[72px]">
+        {hint ? (
+          <div className="flex gap-2">
+            <Info size={13} className="text-[var(--color-accent)] shrink-0 mt-0.5" />
+            <div>
+              <p className="text-[12px] font-semibold text-[var(--color-text-primary)] leading-tight mb-0.5">
+                {hint.title}
+              </p>
+              <p className="text-[11px] text-[var(--color-text-muted)] leading-snug">
+                {hint.body}
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="flex gap-2 items-start opacity-40">
+            <Info size={13} className="text-[var(--color-text-muted)] shrink-0 mt-0.5" />
+            <p className="text-[11px] text-[var(--color-text-muted)] leading-snug italic">
+              {lang === "es"
+                ? "Haz clic en un campo para ver su descripción."
+                : "Click any field to see its description."}
+            </p>
+          </div>
+        )}
       </div>
     </form>
   );
