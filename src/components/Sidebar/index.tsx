@@ -21,7 +21,7 @@ export function Sidebar() {
     connections, folders, searchQuery,
     setConnections, setFolders, setSearchQuery,
     selectConnection, selectedConnectionId,
-    openTab, toggleFolder, startNewConnection,
+    openTab, toggleFolder, expandFolder, startNewConnection,
   } = useAppStore();
 
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
@@ -90,16 +90,41 @@ export function Sidebar() {
     }
   }, [renamingFolderId]);
 
-  // Reset focus index when query changes
-  useEffect(() => { setSearchFocusIdx(0); }, [searchQuery]);
-
-  const filtered = searchQuery
+  // Search matches (empty when no query)
+  const searchMatches = searchQuery
     ? connections.filter(
         (c) =>
           c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
           c.host.toLowerCase().includes(searchQuery.toLowerCase()),
       )
-    : connections;
+    : [];
+
+  // When query changes: expand ancestor folders of all matches + jump to first
+  useEffect(() => {
+    if (!searchQuery) return;
+    setRootExpanded(true);
+    setSearchFocusIdx(0);
+    const toExpand = new Set<string>();
+    for (const conn of searchMatches) {
+      let fid = conn.folder_id;
+      while (fid) {
+        toExpand.add(fid);
+        const f = folders.find((fo) => fo.id === fid);
+        fid = f?.parent_id ?? null;
+      }
+    }
+    toExpand.forEach((id) => expandFolder(id));
+    if (searchMatches[0]) selectConnection(searchMatches[0].id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery]);
+
+  // Scroll focused match into view whenever focus index changes
+  useEffect(() => {
+    if (!searchQuery || !searchMatches[searchFocusIdx]) return;
+    const id = searchMatches[searchFocusIdx].id;
+    document.querySelector(`[data-conn-id="${id}"]`)
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [searchFocusIdx, searchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const displayFolders = folders.filter((f) => f.parent_id === null);
   const rootConns = connections.filter((c) => !c.folder_id);
@@ -255,24 +280,28 @@ export function Sidebar() {
   // ── Search keyboard navigation ────────────────────────────────────────────────
 
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (!searchQuery || filtered.length === 0) return;
+    if (e.key === "Escape") { setSearchQuery(""); return; }
+    if (!searchQuery || searchMatches.length === 0) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      const next = (searchFocusIdx + 1) % filtered.length;
+      const next = (searchFocusIdx + 1) % searchMatches.length;
       setSearchFocusIdx(next);
-      selectConnection(filtered[next].id);
+      selectConnection(searchMatches[next].id);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      const prev = (searchFocusIdx - 1 + filtered.length) % filtered.length;
+      const prev = (searchFocusIdx - 1 + searchMatches.length) % searchMatches.length;
       setSearchFocusIdx(prev);
-      selectConnection(filtered[prev].id);
+      selectConnection(searchMatches[prev].id);
     } else if (e.key === "Enter") {
-      const conn = filtered[searchFocusIdx];
+      const conn = searchMatches[searchFocusIdx];
       if (conn) openTab(conn);
-    } else if (e.key === "Escape") {
-      setSearchQuery("");
     }
   };
+
+  const searchMatchIds = new Set(searchMatches.map((c) => c.id));
+  const searchFocusId = searchQuery && searchMatches[searchFocusIdx]
+    ? searchMatches[searchFocusIdx].id
+    : null;
 
   // Shared props passed down to every FolderItem / ConnItem
   const sharedProps = {
@@ -304,6 +333,8 @@ export function Sidebar() {
     onDropTarget: setDropTarget,
     onDropOnConn: handleDropOnConn,
     onDropOnFolder: handleDropOnFolder,
+    searchMatchIds,
+    searchFocusId,
   };
 
   const isRootDropTarget = dropTarget === "root";
@@ -360,60 +391,24 @@ export function Sidebar() {
             </button>
           )}
         </div>
-      </div>
-
-      {/* Connection list */}
-      <div className="flex-1 overflow-y-auto min-h-0 py-0.5">
-
-        {searchQuery ? (
-          /* ── Flat search results with keyboard navigation ── */
-          <div>
-            {filtered.length === 0 ? (
-              <div className="px-4 py-4 text-center text-[var(--color-text-muted)] text-xs">
-                Sin resultados
-              </div>
+        {searchQuery && (
+          <div className="mt-1 text-[9px] text-[var(--color-text-muted)] flex items-center gap-1 px-0.5">
+            {searchMatches.length === 0 ? (
+              <span className="text-[var(--color-danger)]">Sin resultados</span>
             ) : (
               <>
-                <div className="px-2 py-0.5 text-[9px] text-[var(--color-text-muted)] flex items-center gap-1">
-                  <span>{filtered.length} resultado{filtered.length !== 1 ? "s" : ""}</span>
-                  <span className="opacity-50">· ↑↓ navegar · Enter abrir</span>
-                </div>
-                {filtered.map((conn, idx) => {
-                  const folder = folders.find((f) => f.id === conn.folder_id);
-                  const isFocused = idx === searchFocusIdx;
-                  const TypeIcon = connTypeIcon(conn.type);
-                  return (
-                    <button
-                      key={conn.id}
-                      onClick={() => { setSearchFocusIdx(idx); selectConnection(conn.id); }}
-                      onDoubleClick={() => openTab(conn)}
-                      onContextMenu={(e) => connMenu(e, conn)}
-                      className={[
-                        "flex items-center gap-2 w-full px-2 py-1 transition-colors text-left",
-                        isFocused || selectedConnectionId === conn.id
-                          ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
-                          : "text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]",
-                      ].join(" ")}
-                    >
-                      <TypeIcon size={11} className="shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[11px] truncate font-medium">{conn.name}</div>
-                        <div className="text-[9px] text-[var(--color-text-muted)] truncate">
-                          {folder ? `${folder.name} · ` : ""}{conn.host}
-                        </div>
-                      </div>
-                      <span className={`text-[8px] uppercase font-semibold px-1 rounded shrink-0 ${connTypeColors[conn.type] ?? ""}`}>
-                        {conn.type}
-                      </span>
-                    </button>
-                  );
-                })}
+                <span className="text-[var(--color-accent)]">{searchFocusIdx + 1}</span>
+                <span className="opacity-50">de {searchMatches.length} · ↑↓ navegar · Enter abrir</span>
               </>
             )}
           </div>
-        ) : (
-          /* ── Normal tree view ── */
-          <>
+        )}
+      </div>
+
+      {/* Connection list — always tree view; search highlights matches in-place */}
+      <div className="flex-1 overflow-y-auto min-h-0 py-0.5">
+        <>
+
             {/* Root "Conexiones" node — also a valid drop target (move to root) */}
             <button
               onClick={() => setRootExpanded((v) => !v)}
@@ -496,6 +491,8 @@ export function Sidebar() {
                           onDragEnd={handleDragEnd}
                           onDragOver={() => setDropTarget(conn.id)}
                           onDrop={() => handleDropOnConn(conn)}
+                          isSearchMatch={searchMatchIds.has(conn.id)}
+                          isSearchFocus={searchFocusId === conn.id}
                         />
                       );
                     }
@@ -515,7 +512,6 @@ export function Sidebar() {
               </div>
             )}
           </>
-        )}
       </div>
 
       {/* Draggable divider */}
@@ -579,6 +575,8 @@ interface SharedProps {
   onDropTarget: (id: string | null) => void;
   onDropOnConn: (c: Connection) => void;
   onDropOnFolder: (folderId: string | null) => void;
+  searchMatchIds: Set<string>;
+  searchFocusId: string | null;
 }
 
 // ── FolderItem (recursive) ────────────────────────────────────────────────────
@@ -593,6 +591,7 @@ function FolderItem({
     creatingFolder, newFolderParentId, newFolderName,
     onSubfolderNameChange, onSubfolderConfirm, onSubfolderCancel, folderInputRef,
     dragId, dropTarget, onDragStart, onDragEnd, onDropTarget, onDropOnConn, onDropOnFolder,
+    searchMatchIds, searchFocusId,
   } = shared;
 
   const subfolders = allFolders
@@ -708,6 +707,8 @@ function FolderItem({
                   onDragEnd={onDragEnd}
                   onDragOver={() => onDropTarget(conn.id)}
                   onDrop={() => onDropOnConn(conn)}
+                  isSearchMatch={searchMatchIds.has(conn.id)}
+                  isSearchFocus={searchFocusId === conn.id}
                 />
               );
             }
@@ -743,6 +744,7 @@ function ConnItem({
   conn, continuations, isLast, selected, onSelect, onOpen, onContextMenu,
   dragging = false, isDropTarget = false,
   onDragStart, onDragEnd, onDragOver, onDrop,
+  isSearchMatch = false, isSearchFocus = false,
 }: {
   conn: Connection;
   continuations: boolean[];
@@ -757,18 +759,20 @@ function ConnItem({
   onDragEnd?: () => void;
   onDragOver?: () => void;
   onDrop?: () => void;
+  isSearchMatch?: boolean;
+  isSearchFocus?: boolean;
 }) {
   const TypeIcon = connTypeIcon(conn.type);
 
   return (
     <button
       draggable
+      data-conn-id={conn.id}
       onClick={onSelect}
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
       onDragStart={(e) => {
         e.stopPropagation();
-        // setData is required for the HTML5 drop event to fire on target elements
         e.dataTransfer.setData("text/plain", conn.id);
         e.dataTransfer.effectAllowed = "move";
         onDragStart?.();
@@ -780,8 +784,11 @@ function ConnItem({
         "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
         dragging ? "opacity-40" : "",
         isDropTarget ? "border-t-2 border-[var(--color-accent)]" : "",
-        selected
+        // Search focus takes accent highlight, match gets amber tint, normal gets hover
+        isSearchFocus || selected
           ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
+          : isSearchMatch
+          ? "border-l-2 border-amber-400/70 bg-amber-400/5 text-[var(--color-text-primary)]"
           : "hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]",
       ].join(" ")}
     >

@@ -29,6 +29,7 @@ interface AppStore {
   setTabSessionId: (tabId: string, sessionId: string) => void;
 
   toggleFolder: (folderId: string) => void;
+  expandFolder: (folderId: string) => void;
   getConnectionById: (id: string) => Connection | undefined;
 }
 
@@ -111,6 +112,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set((state) => ({
       folders: state.folders.map((f) =>
         f.id === folderId ? { ...f, expanded: !f.expanded } : f
+      ),
+    })),
+
+  expandFolder: (folderId) =>
+    set((state) => ({
+      folders: state.folders.map((f) =>
+        f.id === folderId ? { ...f, expanded: true } : f
       ),
     })),
 
