@@ -1,6 +1,7 @@
 use rusqlite::{Connection, Result};
 use std::path::PathBuf;
 use dirs::data_dir;
+use uuid::Uuid;
 
 pub fn db_path() -> PathBuf {
     let mut path = data_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -112,6 +113,53 @@ fn migrate(conn: &Connection) -> Result<()> {
             PRAGMA foreign_keys=ON;
             UPDATE schema_version SET version=1;
         ")?;
+    }
+
+    if ver < 2 {
+        // Create groups table
+        conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS groups (
+                id   TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL
+            );
+        ")?;
+
+        // Add group_id columns (errors mean already exists)
+        conn.execute(
+            "ALTER TABLE folders ADD COLUMN group_id TEXT NOT NULL DEFAULT ''",
+            [],
+        ).ok();
+        conn.execute(
+            "ALTER TABLE connections ADD COLUMN group_id TEXT NOT NULL DEFAULT ''",
+            [],
+        ).ok();
+
+        // Create default group only if table is empty
+        let group_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM groups", [], |r| r.get(0)
+        ).unwrap_or(0);
+        let default_group_id = if group_count == 0 {
+            let gid = Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO groups (id, name) VALUES (?1, 'Conexiones')",
+                rusqlite::params![gid],
+            )?;
+            gid
+        } else {
+            conn.query_row("SELECT id FROM groups LIMIT 1", [], |r| r.get(0))?
+        };
+
+        // Update all existing folders and connections with the default group id
+        conn.execute(
+            "UPDATE folders SET group_id = ?1 WHERE group_id = ''",
+            rusqlite::params![default_group_id],
+        )?;
+        conn.execute(
+            "UPDATE connections SET group_id = ?1 WHERE group_id = ''",
+            rusqlite::params![default_group_id],
+        )?;
+
+        conn.execute("UPDATE schema_version SET version=2", [])?;
     }
 
     Ok(())

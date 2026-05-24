@@ -2,24 +2,25 @@ import { useEffect, useRef, useState } from "react";
 import {
   Plus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
-  ChevronRight, ChevronDown, Network, X,
+  ChevronRight, ChevronDown, Database, X,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import {
   getConnections, getFolders, deleteConnection, saveConnection,
   saveFolder, deleteFolder, getFolders as refetchFolders, reorderConnections,
+  getGroups, saveGroup, renameGroup, deleteGroup,
 } from "../../lib/commands";
 import { ContextMenu, useContextMenu } from "../ContextMenu";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { TuxIcon, WindowsIcon, VncIcon, FtpIcon, SftpIcon } from "../ConnectionIcons";
-import type { Connection, Folder as FolderType } from "../../types";
+import type { Connection, Folder as FolderType, Group } from "../../types";
 
 // ── Sidebar ────────────────────────────────────────────────────────────────────
 
 export function Sidebar() {
   const {
-    connections, folders, searchQuery,
-    setConnections, setFolders, setSearchQuery,
+    connections, folders, groups,
+    setConnections, setFolders, setGroups, setSearchQuery, searchQuery,
     selectConnection, selectedConnectionId,
     openTab, toggleFolder, expandFolder, startNewConnection,
   } = useAppStore();
@@ -50,6 +51,7 @@ export function Sidebar() {
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
+  const [newFolderGroupId, setNewFolderGroupId] = useState<string | null>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   const [dragId, setDragId] = useState<string | null>(null);
@@ -59,7 +61,18 @@ export function Sidebar() {
   const [renameFolderName, setRenameFolderName] = useState("");
   const renameInputRef = useRef<HTMLInputElement>(null);
 
-  const [rootExpanded, setRootExpanded] = useState(true);
+  // Group expand state: default all expanded
+  const [groupExpanded, setGroupExpanded] = useState<Record<string, boolean>>({});
+
+  // Group renaming
+  const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
+  const [renameGroupName, setRenameGroupName] = useState("");
+  const renameGroupInputRef = useRef<HTMLInputElement>(null);
+
+  // New group creation
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
+  const newGroupInputRef = useRef<HTMLInputElement>(null);
 
   // Search keyboard navigation
   const [searchFocusIdx, setSearchFocusIdx] = useState(0);
@@ -67,6 +80,7 @@ export function Sidebar() {
   useEffect(() => {
     getConnections().then(setConnections).catch(console.error);
     getFolders().then(setFolders).catch(console.error);
+    getGroups().then(setGroups).catch(console.error);
   }, []);
 
   // Listen for layout reset event from Herramientas menu
@@ -90,6 +104,19 @@ export function Sidebar() {
     }
   }, [renamingFolderId]);
 
+  useEffect(() => {
+    if (renamingGroupId && renameGroupInputRef.current) {
+      renameGroupInputRef.current.focus();
+      renameGroupInputRef.current.select();
+    }
+  }, [renamingGroupId]);
+
+  useEffect(() => {
+    if (creatingGroup && newGroupInputRef.current) {
+      newGroupInputRef.current.focus();
+    }
+  }, [creatingGroup]);
+
   // Search matches (empty when no query)
   const searchMatches = searchQuery
     ? connections.filter(
@@ -102,7 +129,6 @@ export function Sidebar() {
   // When query changes: expand ancestor folders of all matches + jump to first
   useEffect(() => {
     if (!searchQuery) return;
-    setRootExpanded(true);
     setSearchFocusIdx(0);
     const toExpand = new Set<string>();
     for (const conn of searchMatches) {
@@ -126,12 +152,16 @@ export function Sidebar() {
       ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [searchFocusIdx, searchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const displayFolders = folders.filter((f) => f.parent_id === null);
-  const rootConns = connections.filter((c) => !c.folder_id);
+  const toggleGroupExpanded = (groupId: string) => {
+    setGroupExpanded((prev) => ({ ...prev, [groupId]: !(prev[groupId] ?? true) }));
+  };
 
-  const startCreateFolder = (parentId: string | null = null) => {
+  const isGroupExpanded = (groupId: string) => groupExpanded[groupId] ?? true;
+
+  const startCreateFolder = (parentId: string | null = null, groupId: string | null = null) => {
     setNewFolderName("");
     setNewFolderParentId(parentId);
+    setNewFolderGroupId(groupId);
     setCreatingFolder(true);
   };
 
@@ -139,19 +169,21 @@ export function Sidebar() {
     const name = newFolderName.trim();
     if (name) {
       try {
-        await saveFolder(name, newFolderParentId);
+        await saveFolder(name, newFolderParentId, newFolderGroupId);
         setFolders(await refetchFolders());
       } catch (err) { console.error(err); }
     }
     setCreatingFolder(false);
     setNewFolderName("");
     setNewFolderParentId(null);
+    setNewFolderGroupId(null);
   };
 
   const cancelCreateFolder = () => {
     setCreatingFolder(false);
     setNewFolderName("");
     setNewFolderParentId(null);
+    setNewFolderGroupId(null);
   };
 
   const startRenameFolder = (folder: FolderType) => {
@@ -170,50 +202,123 @@ export function Sidebar() {
     } catch (err) { console.error(err); }
   };
 
+  // Group CRUD
+  const startRenameGroup = (group: Group) => {
+    setRenamingGroupId(group.id);
+    setRenameGroupName(group.name);
+  };
+
+  const confirmRenameGroup = async () => {
+    const name = renameGroupName.trim();
+    if (name && renamingGroupId) {
+      try {
+        await renameGroup(renamingGroupId, name);
+        setGroups(await getGroups());
+      } catch (err) { console.error(err); }
+    }
+    setRenamingGroupId(null);
+    setRenameGroupName("");
+  };
+
+  const cancelRenameGroup = () => {
+    setRenamingGroupId(null);
+    setRenameGroupName("");
+  };
+
+  const removeGroup = async (group: Group) => {
+    if (groups.length <= 1) return; // cannot delete last group
+    if (!confirm("¿Eliminar este grupo y todo su contenido?")) return;
+    try {
+      await deleteGroup(group.id);
+      setGroups(await getGroups());
+      setFolders(await refetchFolders());
+      setConnections(await getConnections());
+    } catch (err) { console.error(err); }
+  };
+
+  const confirmCreateGroup = async () => {
+    const name = newGroupName.trim();
+    if (name) {
+      try {
+        const newGroup = await saveGroup(name);
+        setGroups(await getGroups());
+        // Auto-expand new group
+        setGroupExpanded((prev) => ({ ...prev, [newGroup.id]: true }));
+      } catch (err) { console.error(err); }
+    }
+    setCreatingGroup(false);
+    setNewGroupName("");
+  };
+
+  const cancelCreateGroup = () => {
+    setCreatingGroup(false);
+    setNewGroupName("");
+  };
+
   const handleDragEnd = () => { setDragId(null); setDropTarget(null); };
 
   const handleDropOnConn = async (target: Connection) => {
     if (!dragId || dragId === target.id) { handleDragEnd(); return; }
     const dragged = connections.find((c) => c.id === dragId);
     if (!dragged) { handleDragEnd(); return; }
+    // Use target's group_id when moving between groups
+    const targetGroupId = target.group_id;
     const level = connections
-      .filter((c) => c.folder_id === target.folder_id)
+      .filter((c) => c.folder_id === target.folder_id && c.group_id === targetGroupId)
       .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
     const without = level.filter((c) => c.id !== dragId);
     const idx = without.findIndex((c) => c.id === target.id);
-    without.splice(idx, 0, { ...dragged, folder_id: target.folder_id });
-    const updates = without.map((c, i) => ({ id: c.id, sort_order: i * 10, folder_id: target.folder_id }));
+    without.splice(idx, 0, { ...dragged, folder_id: target.folder_id, group_id: targetGroupId });
+    const updates = without.map((c, i) => ({ id: c.id, sort_order: i * 10, folder_id: target.folder_id, group_id: targetGroupId }));
     await reorderConnections(updates).catch(console.error);
     setConnections(await getConnections());
     handleDragEnd();
   };
 
-  // null = move to root (no folder)
-  const handleDropOnFolder = async (folderId: string | null) => {
+  // folderId=null + groupId = move to group root
+  const handleDropOnFolder = async (folderId: string | null, groupId?: string) => {
     if (!dragId) { handleDragEnd(); return; }
     const dragged = connections.find((c) => c.id === dragId);
-    if (!dragged || dragged.folder_id === folderId) { handleDragEnd(); return; }
+    if (!dragged) { handleDragEnd(); return; }
+
+    // Determine target group_id
+    let targetGroupId: string;
+    if (folderId) {
+      const folder = folders.find((f) => f.id === folderId);
+      targetGroupId = folder?.group_id ?? dragged.group_id;
+    } else {
+      targetGroupId = groupId ?? dragged.group_id;
+    }
+
+    if (dragged.folder_id === folderId && dragged.group_id === targetGroupId) {
+      handleDragEnd();
+      return;
+    }
+
     const maxSort = connections
-      .filter((c) => c.folder_id === folderId)
+      .filter((c) => c.folder_id === folderId && c.group_id === targetGroupId)
       .reduce((m, c) => Math.max(m, c.sort_order), -10) + 10;
-    await reorderConnections([{ id: dragId, sort_order: maxSort, folder_id: folderId }]).catch(console.error);
+    await reorderConnections([{ id: dragId, sort_order: maxSort, folder_id: folderId, group_id: targetGroupId }]).catch(console.error);
     setConnections(await getConnections());
     handleDragEnd();
   };
 
   const folderMenu = (e: React.MouseEvent, folder: FolderType) =>
     openMenu(e, [
-      { label: "New Connection", icon: <Plus size={12} />, action: () => startNewConnection(folder.id) },
-      { label: "New Subfolder", icon: <FolderPlus size={12} />, action: () => startCreateFolder(folder.id) },
+      { label: "New Connection", icon: <Plus size={12} />, action: () => startNewConnection(folder.id, folder.group_id) },
+      { label: "New Subfolder", icon: <FolderPlus size={12} />, action: () => startCreateFolder(folder.id, folder.group_id) },
       { label: "Rename", icon: <Edit2 size={12} />, action: () => startRenameFolder(folder) },
       { separator: true },
       { label: "Delete", icon: <Trash2 size={12} />, action: () => removeFolder(folder), danger: true },
     ]);
 
-  const rootMenu = (e: React.MouseEvent) =>
+  const groupMenu = (e: React.MouseEvent, group: Group) =>
     openMenu(e, [
-      { label: "New Connection", icon: <Plus size={12} />, action: () => startNewConnection(null) },
-      { label: "New Folder", icon: <FolderPlus size={12} />, action: () => startCreateFolder(null) },
+      { label: "New Connection", icon: <Plus size={12} />, action: () => startNewConnection(null, group.id) },
+      { label: "New Folder", icon: <FolderPlus size={12} />, action: () => startCreateFolder(null, group.id) },
+      { label: "Rename", icon: <Edit2 size={12} />, action: () => startRenameGroup(group) },
+      { separator: true },
+      { label: "Delete", icon: <Trash2 size={12} />, action: () => removeGroup(group), danger: true, disabled: groups.length <= 1 },
     ]);
 
   const duplicate = async (conn: Connection) => {
@@ -221,7 +326,7 @@ export function Sidebar() {
       name: `${conn.name} (copy)`, type: conn.type, host: conn.host, port: conn.port,
       username: conn.username, auth_type: conn.auth_type, key_path: conn.key_path,
       folder_id: conn.folder_id, notes: conn.notes, description: conn.description,
-      domain: conn.domain, rdp_admin: conn.rdp_admin,
+      domain: conn.domain, rdp_admin: conn.rdp_admin, group_id: conn.group_id,
     });
     setConnections(await getConnections());
   };
@@ -337,8 +442,6 @@ export function Sidebar() {
     searchFocusId,
   };
 
-  const isRootDropTarget = dropTarget === "root";
-
   return (
     <aside
       className="flex flex-col h-full bg-[var(--color-bg-surface)] border-r border-[var(--color-border)] shrink-0 relative"
@@ -365,10 +468,15 @@ export function Sidebar() {
             title="New connection">
             <Plus size={14} />
           </button>
-          <button onClick={() => startCreateFolder(null)}
+          <button onClick={() => startCreateFolder(null, groups[0]?.id ?? null)}
             className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
             title="New folder">
             <FolderPlus size={14} />
+          </button>
+          <button onClick={() => setCreatingGroup(true)}
+            className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+            title="New database group">
+            <Database size={14} />
           </button>
         </div>
       </div>
@@ -407,111 +515,171 @@ export function Sidebar() {
 
       {/* Connection list — always tree view; search highlights matches in-place */}
       <div className="flex-1 overflow-y-auto min-h-0 py-0.5">
-        <>
+        {/* New group input */}
+        {creatingGroup && (
+          <div className="flex items-center gap-1 px-2 py-1">
+            <Database size={12} className="text-[var(--color-accent)] shrink-0" />
+            <input
+              ref={newGroupInputRef}
+              type="text"
+              value={newGroupName}
+              onChange={(e) => setNewGroupName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") confirmCreateGroup();
+                if (e.key === "Escape") cancelCreateGroup();
+              }}
+              onBlur={cancelCreateGroup}
+              placeholder="Nombre del grupo…"
+              className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[11px] text-[var(--color-text-primary)] outline-none"
+            />
+          </div>
+        )}
 
-            {/* Root "Conexiones" node — also a valid drop target (move to root) */}
-            <button
-              onClick={() => setRootExpanded((v) => !v)}
-              onContextMenu={rootMenu}
-              onDragOver={(e) => { e.preventDefault(); setDropTarget("root"); }}
-              onDragLeave={() => setDropTarget(null)}
-              onDrop={(e) => { e.preventDefault(); handleDropOnFolder(null); }}
-              className={[
-                "flex items-center gap-1.5 w-full px-2 py-1 transition-colors",
-                isRootDropTarget
-                  ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
-                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
-              ].join(" ")}
-            >
-              {rootExpanded
-                ? <ChevronDown size={11} className="shrink-0" />
-                : <ChevronRight size={11} className="shrink-0" />}
-              <Network size={13} className="shrink-0 text-[var(--color-accent)]" />
-              <span className="text-xs font-medium flex-1 text-left text-[var(--color-text-primary)]">Conexiones</span>
-              <span className="text-[9px] text-[var(--color-text-muted)] opacity-60">{connections.length}</span>
+        {/* Render each group */}
+        {groups.map((group) => {
+          const expanded = isGroupExpanded(group.id);
+          const groupFolders = folders.filter((f) => f.parent_id === null && f.group_id === group.id);
+          const groupRootConns = connections.filter((c) => !c.folder_id && c.group_id === group.id);
+          const groupConnCount = connections.filter((c) => c.group_id === group.id).length;
+          const isGroupDropTarget = dropTarget === `group:${group.id}`;
+          const isRenaming = renamingGroupId === group.id;
+
+          return (
+            <div key={group.id}>
+              {/* Group header */}
+              {isRenaming ? (
+                <div className="flex items-center gap-1 px-2 py-1">
+                  <Database size={12} className="text-[var(--color-accent)] shrink-0" />
+                  <input
+                    ref={renameGroupInputRef}
+                    type="text"
+                    value={renameGroupName}
+                    onChange={(e) => setRenameGroupName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") confirmRenameGroup();
+                      if (e.key === "Escape") cancelRenameGroup();
+                    }}
+                    onBlur={cancelRenameGroup}
+                    className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[11px] text-[var(--color-text-primary)] outline-none"
+                  />
+                </div>
+              ) : (
+                <button
+                  onClick={() => toggleGroupExpanded(group.id)}
+                  onContextMenu={(e) => groupMenu(e, group)}
+                  onDragOver={(e) => { e.preventDefault(); setDropTarget(`group:${group.id}`); }}
+                  onDragLeave={() => setDropTarget(null)}
+                  onDrop={(e) => { e.preventDefault(); handleDropOnFolder(null, group.id); }}
+                  className={[
+                    "flex items-center gap-1.5 w-full px-2 py-1 transition-colors",
+                    isGroupDropTarget
+                      ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
+                      : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
+                  ].join(" ")}
+                >
+                  {expanded
+                    ? <ChevronDown size={11} className="shrink-0" />
+                    : <ChevronRight size={11} className="shrink-0" />}
+                  <Database size={13} className="shrink-0 text-[var(--color-accent)]" />
+                  <span className="text-xs font-medium flex-1 text-left text-[var(--color-text-primary)]">{group.name}</span>
+                  <span className="text-[9px] text-[var(--color-text-muted)] opacity-60">{groupConnCount}</span>
+                </button>
+              )}
+
+              {/* Group contents */}
+              {expanded && (
+                <div>
+                  {/* Inline root folder creation for this group */}
+                  {creatingFolder && newFolderParentId === null && newFolderGroupId === group.id && (
+                    <div className="flex items-center gap-1 py-0.5 pr-2">
+                      <TreePrefix continuations={[]} isLast={false} />
+                      <FolderInputIcon size={11} className="text-[var(--color-text-muted)] shrink-0" />
+                      <input
+                        ref={folderInputRef}
+                        type="text"
+                        value={newFolderName}
+                        onChange={(e) => setNewFolderName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") confirmCreateFolder();
+                          if (e.key === "Escape") cancelCreateFolder();
+                        }}
+                        onBlur={cancelCreateFolder}
+                        placeholder="Nombre de carpeta…"
+                        className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[11px] text-[var(--color-text-primary)] outline-none"
+                      />
+                    </div>
+                  )}
+
+                  {(() => {
+                    const groupChildren: Array<
+                      { kind: "folder"; item: FolderType } | { kind: "conn"; item: Connection }
+                    > = [
+                      ...groupFolders.map((f) => ({ kind: "folder" as const, item: f })),
+                      ...groupRootConns.map((c) => ({ kind: "conn" as const, item: c })),
+                    ];
+                    return groupChildren.map((child, idx) => {
+                      const childIsLast = idx === groupChildren.length - 1;
+                      if (child.kind === "folder") {
+                        return (
+                          <FolderItem
+                            key={child.item.id}
+                            folder={child.item}
+                            continuations={[]}
+                            isLast={childIsLast}
+                            {...sharedProps}
+                          />
+                        );
+                      } else {
+                        const conn = child.item;
+                        return (
+                          <ConnItem
+                            key={conn.id}
+                            conn={conn}
+                            continuations={[]}
+                            isLast={childIsLast}
+                            selected={selectedConnectionId === conn.id}
+                            onSelect={() => selectConnection(conn.id)}
+                            onOpen={() => openTab(conn)}
+                            onContextMenu={(e) => connMenu(e, conn)}
+                            dragging={dragId === conn.id}
+                            isDropTarget={dropTarget === conn.id}
+                            onDragStart={() => setDragId(conn.id)}
+                            onDragEnd={handleDragEnd}
+                            onDragOver={() => setDropTarget(conn.id)}
+                            onDrop={() => handleDropOnConn(conn)}
+                            isSearchMatch={searchMatchIds.has(conn.id)}
+                            isSearchFocus={searchFocusId === conn.id}
+                          />
+                        );
+                      }
+                    });
+                  })()}
+
+                  {groupConnCount === 0 && (
+                    <div className="px-4 py-3 text-center text-[var(--color-text-muted)] text-xs">
+                      <Terminal size={16} className="mx-auto mb-1 opacity-30" />
+                      <button onClick={() => startNewConnection(null, group.id)}
+                        className="text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] text-[10px]">
+                        Add the first one
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {groups.length === 0 && (
+          <div className="px-4 py-6 text-center text-[var(--color-text-muted)] text-xs">
+            <Terminal size={20} className="mx-auto mb-2 opacity-30" />
+            <p>No connections yet.</p>
+            <button onClick={() => setCreatingGroup(true)}
+              className="mt-1 text-[var(--color-accent)] hover:text-[var(--color-accent-hover)]">
+              Add the first one
             </button>
-
-            {rootExpanded && (
-              <div>
-                {/* Inline root folder creation */}
-                {creatingFolder && newFolderParentId === null && (
-                  <div className="flex items-center gap-1 py-0.5 pr-2">
-                    <TreePrefix continuations={[]} isLast={false} />
-                    <FolderInputIcon size={11} className="text-[var(--color-text-muted)] shrink-0" />
-                    <input
-                      ref={folderInputRef}
-                      type="text"
-                      value={newFolderName}
-                      onChange={(e) => setNewFolderName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") confirmCreateFolder();
-                        if (e.key === "Escape") cancelCreateFolder();
-                      }}
-                      onBlur={cancelCreateFolder}
-                      placeholder="Nombre de carpeta…"
-                      className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[11px] text-[var(--color-text-primary)] outline-none"
-                    />
-                  </div>
-                )}
-
-                {(() => {
-                  const rootChildren: Array<
-                    { kind: "folder"; item: FolderType } | { kind: "conn"; item: Connection }
-                  > = [
-                    ...displayFolders.map((f) => ({ kind: "folder" as const, item: f })),
-                    ...rootConns.map((c) => ({ kind: "conn" as const, item: c })),
-                  ];
-                  return rootChildren.map((child, idx) => {
-                    const childIsLast = idx === rootChildren.length - 1;
-                    if (child.kind === "folder") {
-                      return (
-                        <FolderItem
-                          key={child.item.id}
-                          folder={child.item}
-                          continuations={[]}
-                          isLast={childIsLast}
-                          {...sharedProps}
-                        />
-                      );
-                    } else {
-                      const conn = child.item;
-                      return (
-                        <ConnItem
-                          key={conn.id}
-                          conn={conn}
-                          continuations={[]}
-                          isLast={childIsLast}
-                          selected={selectedConnectionId === conn.id}
-                          onSelect={() => selectConnection(conn.id)}
-                          onOpen={() => openTab(conn)}
-                          onContextMenu={(e) => connMenu(e, conn)}
-                          dragging={dragId === conn.id}
-                          isDropTarget={dropTarget === conn.id}
-                          onDragStart={() => setDragId(conn.id)}
-                          onDragEnd={handleDragEnd}
-                          onDragOver={() => setDropTarget(conn.id)}
-                          onDrop={() => handleDropOnConn(conn)}
-                          isSearchMatch={searchMatchIds.has(conn.id)}
-                          isSearchFocus={searchFocusId === conn.id}
-                        />
-                      );
-                    }
-                  });
-                })()}
-
-                {connections.length === 0 && (
-                  <div className="px-4 py-6 text-center text-[var(--color-text-muted)] text-xs">
-                    <Terminal size={20} className="mx-auto mb-2 opacity-30" />
-                    <p>No connections yet.</p>
-                    <button onClick={() => startNewConnection()}
-                      className="mt-1 text-[var(--color-accent)] hover:text-[var(--color-accent-hover)]">
-                      Add the first one
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-          </>
+          </div>
+        )}
       </div>
 
       {/* Draggable divider */}
@@ -574,7 +742,7 @@ interface SharedProps {
   onDragEnd: () => void;
   onDropTarget: (id: string | null) => void;
   onDropOnConn: (c: Connection) => void;
-  onDropOnFolder: (folderId: string | null) => void;
+  onDropOnFolder: (folderId: string | null, groupId?: string) => void;
   searchMatchIds: Set<string>;
   searchFocusId: string | null;
 }

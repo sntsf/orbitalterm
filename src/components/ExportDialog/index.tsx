@@ -4,35 +4,25 @@ import { Check, Download, X } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT } from "../../store/useI18nStore";
 import { exportSelectedToFile } from "../../lib/commands";
-import type { Folder } from "../../types";
 
 interface Props {
   onClose: () => void;
   onDone: (msg: string, ok: boolean) => void;
 }
 
-function topLevelFolders(folders: Folder[]): Folder[] {
-  return folders.filter((f) => f.parent_id === null);
-}
-
 export function ExportDialog({ onClose, onDone }: Props) {
   const t = useT();
-  const { folders, connections } = useAppStore();
+  const { groups } = useAppStore();
 
-  const roots = topLevelFolders(folders);
-  const hasRootConns = connections.some((c) => c.folder_id === null);
-
-  // Selection state: folder IDs + whether to include root connections
-  const [selectedFolders, setSelectedFolders] = useState<Set<string>>(
-    () => new Set(roots.map((f) => f.id))
+  // Selection state: group IDs
+  const [selectedGroups, setSelectedGroups] = useState<Set<string>>(
+    () => new Set(groups.map((g) => g.id))
   );
-  const [includeRoot, setIncludeRoot] = useState(hasRootConns);
 
-  const allSelected =
-    selectedFolders.size === roots.length && (includeRoot || !hasRootConns);
+  const allSelected = selectedGroups.size === groups.length;
 
-  const toggleFolder = (id: string) => {
-    setSelectedFolders((prev) => {
+  const toggleGroup = (id: string) => {
+    setSelectedGroups((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -42,15 +32,13 @@ export function ExportDialog({ onClose, onDone }: Props) {
 
   const toggleAll = () => {
     if (allSelected) {
-      setSelectedFolders(new Set());
-      setIncludeRoot(false);
+      setSelectedGroups(new Set());
     } else {
-      setSelectedFolders(new Set(roots.map((f) => f.id)));
-      setIncludeRoot(hasRootConns);
+      setSelectedGroups(new Set(groups.map((g) => g.id)));
     }
   };
 
-  const nothingSelected = selectedFolders.size === 0 && !includeRoot;
+  const nothingSelected = selectedGroups.size === 0;
 
   const doExport = async (includePasswords: boolean) => {
     if (nothingSelected) return;
@@ -61,8 +49,7 @@ export function ExportDialog({ onClose, onDone }: Props) {
       });
       if (!path) return;
       const count = await exportSelectedToFile(
-        Array.from(selectedFolders),
-        includeRoot,
+        Array.from(selectedGroups),
         includePasswords,
         path,
       );
@@ -102,26 +89,17 @@ export function ExportDialog({ onClose, onDone }: Props) {
             {allSelected ? t("exportDeselectAll") : t("exportSelectAll")}
           </button>
 
-          {/* Root connections row (only shown if any exist) */}
-          {hasRootConns && (
+          {/* Groups */}
+          {groups.map((g) => (
             <CheckRow
-              label={t("exportRootConnections")}
-              checked={includeRoot}
-              onChange={() => setIncludeRoot((v) => !v)}
-            />
-          )}
-
-          {/* Top-level folders */}
-          {roots.map((f) => (
-            <CheckRow
-              key={f.id}
-              label={f.name}
-              checked={selectedFolders.has(f.id)}
-              onChange={() => toggleFolder(f.id)}
+              key={g.id}
+              label={g.name}
+              checked={selectedGroups.has(g.id)}
+              onChange={() => toggleGroup(g.id)}
             />
           ))}
 
-          {roots.length === 0 && !hasRootConns && (
+          {groups.length === 0 && (
             <p className="text-xs text-[var(--color-text-muted)] py-4 text-center">
               {t("noConnectionsYet")}
             </p>

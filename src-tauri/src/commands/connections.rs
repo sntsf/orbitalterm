@@ -5,6 +5,12 @@ use uuid::Uuid;
 use crate::db;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Group {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Connection {
     pub id: String,
     pub name: String,
@@ -23,6 +29,7 @@ pub struct Connection {
     pub created_at: String,
     pub updated_at: String,
     pub sort_order: i64,
+    pub group_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -41,6 +48,8 @@ pub struct NewConnection {
     pub domain: String,
     #[serde(default)]
     pub rdp_admin: bool,
+    #[serde(default)]
+    pub group_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -48,6 +57,7 @@ pub struct ReorderItem {
     pub id: String,
     pub sort_order: i64,
     pub folder_id: Option<String>,
+    pub group_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -56,6 +66,7 @@ pub struct Folder {
     pub name: String,
     pub parent_id: Option<String>,
     pub expanded: bool,
+    pub group_id: String,
 }
 
 fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
@@ -76,11 +87,12 @@ fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
         sort_order: row.get(15).unwrap_or(0),
+        group_id: row.get::<_, String>(16).unwrap_or_default(),
     })
 }
 
 const SELECT_COLS: &str = "id, name, type, host, port, username, auth_type, key_path,
-                           folder_id, notes, description, domain, rdp_admin, created_at, updated_at, sort_order";
+                           folder_id, notes, description, domain, rdp_admin, created_at, updated_at, sort_order, group_id";
 
 #[tauri::command]
 pub fn get_connections() -> Result<Vec<Connection>, String> {
@@ -102,17 +114,29 @@ pub fn get_connections() -> Result<Vec<Connection>, String> {
 pub fn save_connection(conn: NewConnection) -> Result<Connection, String> {
     let db = db::open().map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
+
+    // Determine group_id: inherit from folder if folder_id is set, else use provided group_id
+    let group_id = if let Some(ref fid) = conn.folder_id {
+        db.query_row(
+            "SELECT group_id FROM folders WHERE id = ?1",
+            params![fid],
+            |row| row.get::<_, String>(0),
+        ).unwrap_or_else(|_| conn.group_id.clone())
+    } else {
+        conn.group_id.clone()
+    };
+
     let sort_order: i64 = db.query_row(
         "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM connections",
         [],
         |row| row.get(0),
     ).unwrap_or(0);
     db.execute(
-        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![id, conn.name, conn.conn_type, conn.host, conn.port,
                 conn.username, conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
-                conn.description, conn.domain, conn.rdp_admin as i64, sort_order],
+                conn.description, conn.domain, conn.rdp_admin as i64, sort_order, group_id],
     )
     .map_err(|e| e.to_string())?;
 
@@ -152,8 +176,8 @@ pub fn reorder_connections(updates: Vec<ReorderItem>) -> Result<(), String> {
     let db = db::open().map_err(|e| e.to_string())?;
     for item in updates {
         db.execute(
-            "UPDATE connections SET sort_order=?1, folder_id=?2, updated_at=datetime('now') WHERE id=?3",
-            params![item.sort_order, item.folder_id, item.id],
+            "UPDATE connections SET sort_order=?1, folder_id=?2, group_id=?3, updated_at=datetime('now') WHERE id=?4",
+            params![item.sort_order, item.folder_id, item.group_id, item.id],
         ).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -163,11 +187,17 @@ pub fn reorder_connections(updates: Vec<ReorderItem>) -> Result<(), String> {
 pub fn get_folders() -> Result<Vec<Folder>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, name, parent_id FROM folders ORDER BY name COLLATE NOCASE")
+        .prepare("SELECT id, name, parent_id, group_id FROM folders ORDER BY name COLLATE NOCASE")
         .map_err(|e| e.to_string())?;
 
     let rows = stmt.query_map([], |row| {
-        Ok(Folder { id: row.get(0)?, name: row.get(1)?, parent_id: row.get(2)?, expanded: true })
+        Ok(Folder {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            parent_id: row.get(2)?,
+            expanded: true,
+            group_id: row.get::<_, String>(3).unwrap_or_default(),
+        })
     })
     .map_err(|e| e.to_string())?
     .collect::<Result<Vec<_>, _>>()
@@ -176,15 +206,27 @@ pub fn get_folders() -> Result<Vec<Folder>, String> {
 }
 
 #[tauri::command]
-pub fn save_folder(name: String, parent_id: Option<String>) -> Result<Folder, String> {
+pub fn save_folder(name: String, parent_id: Option<String>, group_id: Option<String>) -> Result<Folder, String> {
     let db = db::open().map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
+
+    // If parent_id is set, inherit group_id from parent folder
+    let resolved_group_id = if let Some(ref pid) = parent_id {
+        db.query_row(
+            "SELECT group_id FROM folders WHERE id = ?1",
+            params![pid],
+            |row| row.get::<_, String>(0),
+        ).unwrap_or_else(|_| group_id.clone().unwrap_or_default())
+    } else {
+        group_id.ok_or_else(|| "group_id is required for root folders".to_string())?
+    };
+
     db.execute(
-        "INSERT INTO folders (id, name, parent_id) VALUES (?1,?2,?3)",
-        params![id, name, parent_id],
+        "INSERT INTO folders (id, name, parent_id, group_id) VALUES (?1,?2,?3,?4)",
+        params![id, name, parent_id, resolved_group_id],
     )
     .map_err(|e| e.to_string())?;
-    Ok(Folder { id, name, parent_id, expanded: true })
+    Ok(Folder { id, name, parent_id, expanded: true, group_id: resolved_group_id })
 }
 
 #[tauri::command]
@@ -195,12 +237,77 @@ pub fn delete_folder(id: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Groups ────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_groups() -> Result<Vec<Group>, String> {
+    let conn = db::open().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT id, name FROM groups ORDER BY rowid")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok(Group { id: row.get(0)?, name: row.get(1)? })
+    })
+    .map_err(|e| e.to_string())?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| e.to_string());
+    rows
+}
+
+#[tauri::command]
+pub fn save_group(name: String) -> Result<Group, String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    let id = Uuid::new_v4().to_string();
+    db.execute(
+        "INSERT INTO groups (id, name) VALUES (?1, ?2)",
+        params![id, name],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(Group { id, name })
+}
+
+#[tauri::command]
+pub fn rename_group(id: String, name: String) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    db.execute(
+        "UPDATE groups SET name = ?1 WHERE id = ?2",
+        params![name, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_group(id: String) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    // Delete connections inside folders of this group
+    db.execute(
+        "DELETE FROM connections WHERE folder_id IN (SELECT id FROM folders WHERE group_id = ?1)",
+        params![id],
+    ).map_err(|e| e.to_string())?;
+    // Delete root connections of this group
+    db.execute(
+        "DELETE FROM connections WHERE group_id = ?1 AND folder_id IS NULL",
+        params![id],
+    ).map_err(|e| e.to_string())?;
+    // Delete folders of this group
+    db.execute(
+        "DELETE FROM folders WHERE group_id = ?1",
+        params![id],
+    ).map_err(|e| e.to_string())?;
+    // Delete the group itself
+    db.execute("DELETE FROM groups WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── Export ────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub fn export_connections() -> Result<String, String> {
     let conns = get_connections()?;
     let folders = get_folders()?;
+    let groups = get_groups()?;
     let db = db::open().map_err(|e| e.to_string())?;
 
     // Attach saved password for every connection that has one
@@ -218,7 +325,8 @@ pub fn export_connections() -> Result<String, String> {
     }).collect();
 
     serde_json::to_string_pretty(&serde_json::json!({
-        "version": 2,
+        "version": 3,
+        "groups": groups,
         "connections": conns_with_pw,
         "folders": folders,
     }))
@@ -233,15 +341,45 @@ pub fn import_connections(json: String) -> Result<usize, String> {
     let db = db::open().map_err(|e| e.to_string())?;
     let mut count = 0usize;
 
+    // Get default group id for backward compat
+    let default_group_id: String = db.query_row(
+        "SELECT id FROM groups LIMIT 1",
+        [],
+        |r| r.get(0),
+    ).unwrap_or_default();
+
+    // Build group id mapping: old id -> new id
+    let mut group_id_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    if let Some(groups) = value["groups"].as_array() {
+        for g in groups {
+            let old_id = g["id"].as_str().unwrap_or("").to_string();
+            let new_id = Uuid::new_v4().to_string();
+            let name = g["name"].as_str().unwrap_or("Imported Group");
+            let _ = db.execute(
+                "INSERT OR IGNORE INTO groups (id, name) VALUES (?1, ?2)",
+                params![new_id, name],
+            );
+            group_id_map.insert(old_id, new_id);
+        }
+    }
+
     // Import folders first (preserving IDs so connection→folder links stay valid)
     if let Some(folders) = value["folders"].as_array() {
         for f in folders {
+            let old_group_id = f["group_id"].as_str().unwrap_or("").to_string();
+            let resolved_group_id = if old_group_id.is_empty() {
+                default_group_id.clone()
+            } else {
+                group_id_map.get(&old_group_id).cloned().unwrap_or_else(|| default_group_id.clone())
+            };
             let _ = db.execute(
-                "INSERT OR IGNORE INTO folders (id, name, parent_id) VALUES (?1, ?2, ?3)",
+                "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id) VALUES (?1, ?2, ?3, ?4)",
                 params![
                     f["id"].as_str().unwrap_or(""),
                     f["name"].as_str().unwrap_or("Imported Folder"),
                     f["parent_id"].as_str(),
+                    resolved_group_id,
                 ],
             );
         }
@@ -250,10 +388,16 @@ pub fn import_connections(json: String) -> Result<usize, String> {
     let conns = value["connections"].as_array().ok_or("missing connections")?;
     for item in conns {
         let id = Uuid::new_v4().to_string();
+        let old_group_id = item["group_id"].as_str().unwrap_or("").to_string();
+        let resolved_group_id = if old_group_id.is_empty() {
+            default_group_id.clone()
+        } else {
+            group_id_map.get(&old_group_id).cloned().unwrap_or_else(|| default_group_id.clone())
+        };
         let ok = db.execute(
             "INSERT OR IGNORE INTO connections
-             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 id,
                 item["name"].as_str().unwrap_or("Imported"),
@@ -267,6 +411,7 @@ pub fn import_connections(json: String) -> Result<usize, String> {
                 item["notes"].as_str().unwrap_or(""),
                 item["description"].as_str().unwrap_or(""),
                 item["domain"].as_str().unwrap_or(""),
+                resolved_group_id,
             ],
         ).is_ok();
 
@@ -315,6 +460,7 @@ fn mrng_default_port(conn_type: &str) -> i64 {
 fn mrng_process_node(
     node: roxmltree::Node,
     parent_folder_id: Option<&str>,
+    group_id: &str,
     db: &rusqlite::Connection,
     count: &mut usize,
 ) {
@@ -324,13 +470,12 @@ fn mrng_process_node(
 
         match node_type {
             "Container" => {
-                // Create a folder and recurse
                 let folder_id = Uuid::new_v4().to_string();
                 let _ = db.execute(
-                    "INSERT OR IGNORE INTO folders (id, name, parent_id) VALUES (?1, ?2, ?3)",
-                    params![folder_id, name, parent_folder_id],
+                    "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id) VALUES (?1, ?2, ?3, ?4)",
+                    params![folder_id, name, parent_folder_id, group_id],
                 );
-                mrng_process_node(child, Some(&folder_id), db, count);
+                mrng_process_node(child, Some(&folder_id), group_id, db, count);
             }
             "Connection" => {
                 let proto = child.attribute("Protocol").unwrap_or("SSH2");
@@ -349,13 +494,13 @@ fn mrng_process_node(
                 let id = Uuid::new_v4().to_string();
                 let ok = db.execute(
                     "INSERT OR IGNORE INTO connections
-                     (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,rdp_admin)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                     (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,rdp_admin,group_id)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
                     params![
                         id, name, conn_type, host, port, username,
                         "password", "", parent_folder_id,
                         "", description, domain,
-                        rdp_admin as i64,
+                        rdp_admin as i64, group_id,
                     ],
                 ).is_ok();
                 if ok { *count += 1; }
@@ -370,8 +515,11 @@ pub fn import_from_mremoteng(path: String) -> Result<usize, String> {
     let xml = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
     let db = db::open().map_err(|e| e.to_string())?;
+    let default_group_id: String = db.query_row(
+        "SELECT id FROM groups LIMIT 1", [], |r| r.get(0)
+    ).unwrap_or_default();
     let mut count = 0usize;
-    mrng_process_node(doc.root_element(), None, &db, &mut count);
+    mrng_process_node(doc.root_element(), None, &default_group_id, &db, &mut count);
     Ok(count)
 }
 
@@ -385,54 +533,43 @@ pub fn export_to_file(path: String) -> Result<(), String> {
 
 // ── Selective export ──────────────────────────────────────────────────────────
 
-/// Collect the given folder IDs plus all their descendant folder IDs.
-fn collect_subfolder_ids(
-    folder_ids: &[String],
-    all_folders: &[Folder],
-) -> std::collections::HashSet<String> {
-    let mut result: std::collections::HashSet<String> = folder_ids.iter().cloned().collect();
-    let mut frontier: Vec<String> = folder_ids.to_vec();
-    while !frontier.is_empty() {
-        let mut next = Vec::new();
-        for f in all_folders {
-            if let Some(ref pid) = f.parent_id {
-                if frontier.contains(pid) && !result.contains(&f.id) {
-                    result.insert(f.id.clone());
-                    next.push(f.id.clone());
-                }
-            }
-        }
-        frontier = next;
-    }
-    result
-}
-
 #[tauri::command]
 pub fn export_selected_to_file(
-    folder_ids: Vec<String>,
-    include_root: bool,
+    group_ids: Vec<String>,
     include_passwords: bool,
     path: String,
 ) -> Result<usize, String> {
     let all_folders = get_folders()?;
     let all_conns = get_connections()?;
+    let all_groups = get_groups()?;
     let db = db::open().map_err(|e| e.to_string())?;
 
-    // Expand selected folder IDs to include all descendants
-    let folder_set = collect_subfolder_ids(&folder_ids, &all_folders);
+    let group_set: std::collections::HashSet<&str> =
+        group_ids.iter().map(|s| s.as_str()).collect();
 
-    // Collect folders that are within the selected set (only those selected + descendants)
-    let exported_folders: Vec<&Folder> = all_folders
+    // All folders that belong to the selected groups
+    let exported_folder_ids: std::collections::HashSet<String> = all_folders
         .iter()
-        .filter(|f| folder_set.contains(&f.id))
+        .filter(|f| group_set.contains(f.group_id.as_str()))
+        .map(|f| f.id.clone())
         .collect();
 
-    // Filter connections
+    let exported_folders: Vec<&Folder> = all_folders
+        .iter()
+        .filter(|f| group_set.contains(f.group_id.as_str()))
+        .collect();
+
+    let exported_groups: Vec<&Group> = all_groups
+        .iter()
+        .filter(|g| group_set.contains(g.id.as_str()))
+        .collect();
+
+    // Connections: in a selected group's folder OR root connection of a selected group
     let exported_conns: Vec<serde_json::Value> = all_conns
         .iter()
         .filter(|c| match &c.folder_id {
-            None => include_root,
-            Some(fid) => folder_set.contains(fid),
+            Some(fid) => exported_folder_ids.contains(fid),
+            None => group_set.contains(c.group_id.as_str()),
         })
         .map(|c| {
             let mut v = serde_json::to_value(c).unwrap_or_default();
@@ -451,9 +588,9 @@ pub fn export_selected_to_file(
         .collect();
 
     let count = exported_conns.len();
-
     let json = serde_json::to_string_pretty(&serde_json::json!({
-        "version": 2,
+        "version": 3,
+        "groups": exported_groups,
         "connections": exported_conns,
         "folders": exported_folders,
     }))

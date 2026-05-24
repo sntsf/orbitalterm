@@ -33,9 +33,12 @@ export function PropertiesPanel() {
   const t = useT();
   const {
     connections,
+    folders,
+    groups,
     selectedConnectionId,
     isCreatingNew,
     newConnectionFolderId,
+    newConnectionGroupId,
     setConnections,
     setIsCreatingNew,
     selectConnection,
@@ -60,6 +63,7 @@ export function PropertiesPanel() {
   const [folderId, setFolderId] = useState("");
   const [rdpAdmin, setRdpAdmin] = useState(false);
   const [notes, setNotes] = useState("");
+  const [groupId, setGroupId] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -77,6 +81,7 @@ export function PropertiesPanel() {
       setAuthType(existing.auth_type);
       setKeyPath(existing.key_path);
       setFolderId(existing.folder_id ?? "");
+      setGroupId(existing.group_id ?? "");
       setNotes(existing.notes);
       setPassword("");
       setError("");
@@ -98,11 +103,16 @@ export function PropertiesPanel() {
       setKeyPath("");
       setPassword("");
       setFolderId(newConnectionFolderId ?? "");
+      // Determine group_id: from folder's group, or newConnectionGroupId, or first group
+      const folderGroup = newConnectionFolderId
+        ? folders.find((f) => f.id === newConnectionFolderId)?.group_id
+        : null;
+      setGroupId(folderGroup ?? newConnectionGroupId ?? groups[0]?.id ?? "");
       setNotes("");
       setHasSaved(false);
       setError("");
     }
-  }, [existing?.id, isCreatingNew, newConnectionFolderId]);
+  }, [existing?.id, isCreatingNew, newConnectionFolderId, newConnectionGroupId]);
 
   const handleTypeChange = (newType: ConnectionType) => {
     setType(newType);
@@ -135,6 +145,7 @@ export function PropertiesPanel() {
         key_path: keyPath.trim(),
         folder_id: folderId || null,
         notes,
+        group_id: groupId,
       };
 
       let savedId: string;

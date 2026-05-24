@@ -96,6 +96,12 @@ const T = {
     exportWithoutPasswords: "Exportar sin contraseñas",
     exportNothingSelected: "Selecciona al menos un grupo.",
     exportedNConn: "conexión(es) exportada(s).",
+    // Group management
+    newGroup: "Nueva Base de Datos",
+    renameGroup: "Renombrar",
+    deleteGroup: "Eliminar",
+    deleteGroupConfirm: "¿Eliminar este grupo y todo su contenido?",
+    groupNamePlaceholder: "Nombre del grupo…",
   },
   en: {
     menuFile: "File",
@@ -175,6 +181,12 @@ const T = {
     exportWithoutPasswords: "Export without passwords",
     exportNothingSelected: "Select at least one group.",
     exportedNConn: "connection(s) exported.",
+    // Group management
+    newGroup: "New Database",
+    renameGroup: "Rename",
+    deleteGroup: "Delete",
+    deleteGroupConfirm: "Delete this group and all its contents?",
+    groupNamePlaceholder: "Group name…",
   },
 } as const;
 

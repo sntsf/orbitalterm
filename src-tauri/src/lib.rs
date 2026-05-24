@@ -7,9 +7,10 @@ mod ssh;
 mod vnc;
 
 use commands::connections::{
-    delete_connection, delete_folder, export_connections, export_selected_to_file, export_to_file,
-    get_connections, get_folders, import_connections, import_from_file, import_from_mremoteng,
-    reorder_connections, save_connection, save_folder, update_connection,
+    delete_connection, delete_folder, delete_group, export_connections, export_selected_to_file,
+    export_to_file, get_connections, get_folders, get_groups, import_connections, import_from_file,
+    import_from_mremoteng, reorder_connections, rename_group, save_connection, save_folder,
+    save_group, update_connection,
 };
 use commands::local_fs::{local_delete, local_get_home, local_get_parent, local_list_dir, local_mkdir};
 use commands::ftp::{
@@ -68,6 +69,11 @@ pub fn run() {
             import_connections,
             import_from_file,
             import_from_mremoteng,
+            // groups
+            get_groups,
+            save_group,
+            rename_group,
+            delete_group,
             // Local filesystem
             local_list_dir,
             local_get_home,

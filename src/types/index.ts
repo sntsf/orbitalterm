@@ -2,6 +2,11 @@ export type ConnectionType = "ssh" | "rdp" | "vnc" | "ftp" | "sftp";
 export type AuthType = "agent" | "password" | "key";
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "error";
 
+export interface Group {
+  id: string;
+  name: string;
+}
+
 export interface Connection {
   id: string;
   name: string;
@@ -19,6 +24,7 @@ export interface Connection {
   created_at: string;
   updated_at: string;
   sort_order: number;
+  group_id: string;
 }
 
 export interface Folder {
@@ -26,6 +32,7 @@ export interface Folder {
   name: string;
   parent_id: string | null;
   expanded: boolean;
+  group_id: string;
 }
 
 export interface Tab {

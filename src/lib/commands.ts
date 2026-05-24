@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Connection, Folder, SftpEntry } from "../types";
+import type { Connection, Folder, Group, SftpEntry } from "../types";
 
 // ── Connections ──────────────────────────────────────────────────────────────
 
@@ -25,8 +25,8 @@ export async function deleteConnection(id: string): Promise<void> {
   return invoke("delete_connection", { id });
 }
 
-export async function saveFolder(name: string, parentId: string | null): Promise<Folder> {
-  return invoke("save_folder", { name, parentId });
+export async function saveFolder(name: string, parentId: string | null, groupId?: string | null): Promise<Folder> {
+  return invoke("save_folder", { name, parentId, groupId: groupId ?? null });
 }
 
 export async function deleteFolder(id: string): Promise<void> {
@@ -50,12 +50,11 @@ export async function importFromFile(path: string): Promise<number> {
 }
 
 export async function exportSelectedToFile(
-  folderIds: string[],
-  includeRoot: boolean,
+  groupIds: string[],
   includePasswords: boolean,
   path: string,
 ): Promise<number> {
-  return invoke("export_selected_to_file", { folderIds, includeRoot, includePasswords, path });
+  return invoke("export_selected_to_file", { groupIds, includePasswords, path });
 }
 
 export async function importFromMremoteng(path: string): Promise<number> {
@@ -63,9 +62,27 @@ export async function importFromMremoteng(path: string): Promise<number> {
 }
 
 export async function reorderConnections(
-  updates: { id: string; sort_order: number; folder_id: string | null }[],
+  updates: { id: string; sort_order: number; folder_id: string | null; group_id: string }[],
 ): Promise<void> {
   return invoke("reorder_connections", { updates });
+}
+
+// ── Groups ────────────────────────────────────────────────────────────────────
+
+export async function getGroups(): Promise<Group[]> {
+  return invoke("get_groups");
+}
+
+export async function saveGroup(name: string): Promise<Group> {
+  return invoke("save_group", { name });
+}
+
+export async function renameGroup(id: string, name: string): Promise<void> {
+  return invoke("rename_group", { id, name });
+}
+
+export async function deleteGroup(id: string): Promise<void> {
+  return invoke("delete_group", { id });
 }
 
 // ── Passwords ────────────────────────────────────────────────────────────────

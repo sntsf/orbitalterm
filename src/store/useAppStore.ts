@@ -1,13 +1,15 @@
 import { create } from "zustand";
-import type { Connection, ConnectionStatus, Folder, Tab } from "../types";
+import type { Connection, ConnectionStatus, Folder, Group, Tab } from "../types";
 
 interface AppStore {
   connections: Connection[];
   folders: Folder[];
+  groups: Group[];
   searchQuery: string;
   selectedConnectionId: string | null;
   isCreatingNew: boolean;
   newConnectionFolderId: string | null;
+  newConnectionGroupId: string | null;
   sidebarVisible: boolean;
 
   tabs: Tab[];
@@ -15,10 +17,11 @@ interface AppStore {
 
   setConnections: (connections: Connection[]) => void;
   setFolders: (folders: Folder[]) => void;
+  setGroups: (groups: Group[]) => void;
   setSearchQuery: (q: string) => void;
   selectConnection: (id: string | null) => void;
   setIsCreatingNew: (v: boolean) => void;
-  startNewConnection: (folderId?: string | null) => void;
+  startNewConnection: (folderId?: string | null, groupId?: string | null) => void;
   toggleSidebar: () => void;
 
   openTab: (connection: Connection) => void;
@@ -36,16 +39,19 @@ interface AppStore {
 export const useAppStore = create<AppStore>((set, get) => ({
   connections: [],
   folders: [],
+  groups: [],
   searchQuery: "",
   selectedConnectionId: null,
   isCreatingNew: false,
   newConnectionFolderId: null,
+  newConnectionGroupId: null,
   sidebarVisible: true,
   tabs: [],
   activeTabId: null,
 
   setConnections: (connections) => set({ connections }),
   setFolders: (folders) => set({ folders }),
+  setGroups: (groups) => set({ groups }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
 
   selectConnection: (selectedConnectionId) =>
@@ -53,8 +59,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   setIsCreatingNew: (isCreatingNew) => set({ isCreatingNew }),
 
-  startNewConnection: (folderId = null) =>
-    set({ isCreatingNew: true, selectedConnectionId: null, newConnectionFolderId: folderId }),
+  startNewConnection: (folderId = null, groupId = null) =>
+    set({ isCreatingNew: true, selectedConnectionId: null, newConnectionFolderId: folderId, newConnectionGroupId: groupId }),
 
   toggleSidebar: () => set((s) => ({ sidebarVisible: !s.sidebarVisible })),
 
