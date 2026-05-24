@@ -17,6 +17,7 @@ const T = {
     // File menu
     newConnection: "Nueva Conexión",
     newFolder: "Nueva Carpeta",
+    newDataSource: "Nueva fuente de datos…",
     importConnections: "Importar conexiones…",
     exportConnections: "Exportar conexiones…",
     exit: "Salir",
@@ -110,6 +111,7 @@ const T = {
     menuHelp: "Help",
     newConnection: "New Connection",
     newFolder: "New Folder",
+    newDataSource: "New data source…",
     importConnections: "Import connections…",
     exportConnections: "Export connections…",
     exit: "Exit",

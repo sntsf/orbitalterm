@@ -5,13 +5,13 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Plus, FolderPlus, Upload, Download, LogOut,
   Globe, Info, Bug, Check, X, Maximize2, PanelLeftClose,
-  Heart, RefreshCw, ExternalLink, Palette, Type, RotateCcw,
+  Heart, RefreshCw, ExternalLink, Palette, Type, RotateCcw, Database,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
 import { usePrefsStore, THEMES, FONT_SIZES } from "../../store/usePrefsStore";
 import {
-  importFromFile, getConnections, getFolders,
+  importFromFile, getConnections, getFolders, getGroups, saveGroup,
 } from "../../lib/commands";
 import { ExportDialog } from "../ExportDialog";
 
@@ -35,10 +35,12 @@ export function MenuBar() {
   const t = useT();
   const { lang, setLang } = useI18nStore();
   const { theme, fontSize, setTheme, setFontSize, resetLayout } = usePrefsStore();
-  const { startNewConnection, setConnections, setFolders, toggleSidebar, sidebarVisible } = useAppStore();
+  const { startNewConnection, setConnections, setFolders, setGroups, toggleSidebar, sidebarVisible } = useAppStore();
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showAbout, setShowAbout] = useState(false);
   const [showExport, setShowExport] = useState(false);
+  const [showNewGroup, setShowNewGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
@@ -129,6 +131,27 @@ export function MenuBar() {
     shellOpen("https://github.com/sntsf/orbitalterm/releases").catch(console.error);
   };
 
+  const handleNewDataSource = () => {
+    setOpenMenuId(null);
+    setNewGroupName("");
+    setShowNewGroup(true);
+  };
+
+  const confirmNewDataSource = async () => {
+    const name = newGroupName.trim();
+    if (!name) return;
+    try {
+      await saveGroup(name);
+      setGroups(await getGroups());
+      showToast(`"${name}" creado.`);
+    } catch (err) {
+      showToast(String(err), false);
+    } finally {
+      setShowNewGroup(false);
+      setNewGroupName("");
+    }
+  };
+
   // Menu definitions — rebuilt on every render so t() picks up lang changes
   const menus: { id: string; label: string; items: MenuItemDef[] }[] = [
     {
@@ -146,6 +169,11 @@ export function MenuBar() {
           icon: <FolderPlus size={12} />,
           shortcut: "Ctrl+Shift+N",
           action: () => setOpenMenuId(null),
+        },
+        {
+          label: t("newDataSource"),
+          icon: <Database size={12} />,
+          action: handleNewDataSource,
         },
         { separator: true },
         { label: t("importConnections"), icon: <Upload size={12} />, action: handleImport },
@@ -296,6 +324,50 @@ export function MenuBar() {
           onClose={() => setShowExport(false)}
           onDone={(msg, ok) => showToast(msg, ok)}
         />
+      )}
+
+      {/* New data source dialog */}
+      {showNewGroup && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setShowNewGroup(false); }}
+        >
+          <div className="bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded-xl shadow-2xl w-80 overflow-hidden">
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-bg-elevated)]">
+              <Database size={14} className="text-[var(--color-accent)]" />
+              <span className="text-sm font-semibold text-[var(--color-text-primary)]">{t("newDataSource")}</span>
+            </div>
+            <div className="px-4 py-4">
+              <input
+                autoFocus
+                type="text"
+                value={newGroupName}
+                onChange={(e) => setNewGroupName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") confirmNewDataSource();
+                  if (e.key === "Escape") setShowNewGroup(false);
+                }}
+                placeholder={t("groupNamePlaceholder")}
+                className="w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-3 py-1.5 text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+              />
+            </div>
+            <div className="px-4 pb-4 flex justify-end gap-2">
+              <button
+                onClick={() => setShowNewGroup(false)}
+                className="px-4 py-1.5 rounded text-xs bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] hover:bg-[var(--color-border)] transition-colors"
+              >
+                {t("close")}
+              </button>
+              <button
+                onClick={confirmNewDataSource}
+                disabled={!newGroupName.trim()}
+                className="px-4 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white transition-colors disabled:opacity-40"
+              >
+                {t("propSave")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );
