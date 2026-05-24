@@ -69,6 +69,16 @@ export function Sidebar() {
     getFolders().then(setFolders).catch(console.error);
   }, []);
 
+  // Listen for layout reset event from Herramientas menu
+  useEffect(() => {
+    const handler = () => {
+      setSidebarWidth(256);
+      setPanelHeight(320);
+    };
+    window.addEventListener("orbitalterm:resetLayout", handler);
+    return () => window.removeEventListener("orbitalterm:resetLayout", handler);
+  }, []);
+
   useEffect(() => {
     if (creatingFolder && folderInputRef.current) folderInputRef.current.focus();
   }, [creatingFolder]);

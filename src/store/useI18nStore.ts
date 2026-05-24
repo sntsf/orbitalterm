@@ -25,6 +25,9 @@ const T = {
     showHideSidebar: "Mostrar/Ocultar Sidebar",
     // Tools menu
     language: "Idioma",
+    theme: "Tema",
+    termFontSize: "Tamaño de fuente (terminal)",
+    resetLayout: "Restablecer disposición",
     // Help menu
     about: "Acerca de OrbitalTerm",
     website: "Sitio Web",
@@ -98,6 +101,9 @@ const T = {
     fullscreen: "Fullscreen",
     showHideSidebar: "Show/Hide Sidebar",
     language: "Language",
+    theme: "Theme",
+    termFontSize: "Terminal font size",
+    resetLayout: "Reset layout",
     about: "About OrbitalTerm",
     website: "Website",
     donate: "Donate",

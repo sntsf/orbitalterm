@@ -5,10 +5,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Plus, FolderPlus, Upload, Download, LogOut,
   Globe, Info, Bug, Check, X, Maximize2, PanelLeftClose,
-  Heart, RefreshCw, ExternalLink,
+  Heart, RefreshCw, ExternalLink, Palette, Type, RotateCcw,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
+import { usePrefsStore, THEMES, FONT_SIZES } from "../../store/usePrefsStore";
 import {
   exportToFile, importFromFile, getConnections, getFolders,
 } from "../../lib/commands";
@@ -31,6 +32,7 @@ type MenuItemDef =
 export function MenuBar() {
   const t = useT();
   const { lang, setLang } = useI18nStore();
+  const { theme, fontSize, setTheme, setFontSize, resetLayout } = usePrefsStore();
   const { startNewConnection, setConnections, setFolders, toggleSidebar, sidebarVisible } = useAppStore();
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showAbout, setShowAbout] = useState(false);
@@ -180,12 +182,36 @@ export function MenuBar() {
       id: "tools",
       label: t("menuTools"),
       items: [
+        // Theme
+        { label: t("theme"), icon: <Palette size={12} />, disabled: true },
+        ...THEMES.map((th) => ({
+          label: lang === "es" ? th.labelEs : th.label,
+          checked: theme === th.value,
+          action: () => { setTheme(th.value); setOpenMenuId(null); },
+        })),
+        { separator: true },
+        // Terminal font size
+        { label: t("termFontSize"), icon: <Type size={12} />, disabled: true },
+        ...FONT_SIZES.map((fs) => ({
+          label: fs.label,
+          checked: fontSize === fs.value,
+          action: () => { setFontSize(fs.value); setOpenMenuId(null); },
+        })),
+        { separator: true },
+        // Language
         { label: t("language"), icon: <Globe size={12} />, disabled: true },
         ...LANGS.map((l) => ({
           label: l.label,
           checked: lang === l.value,
           action: () => { setLang(l.value); setOpenMenuId(null); },
         })),
+        { separator: true },
+        // Reset layout
+        {
+          label: t("resetLayout"),
+          icon: <RotateCcw size={12} />,
+          action: () => { resetLayout(); setOpenMenuId(null); },
+        },
       ],
     },
     {

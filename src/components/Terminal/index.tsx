@@ -7,6 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 import { HardDrive } from "lucide-react";
 import { connectSsh, disconnectSsh, resizePty, sendInput, sftpConnect, sftpDisconnect } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
+import { usePrefsStore, TERM_THEMES } from "../../store/usePrefsStore";
 import { SftpBrowser } from "../SftpBrowser";
 import type { Tab } from "../../types";
 
@@ -19,6 +20,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
   const sessionIdRef = useRef<string | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const { setTabStatus, setTabSessionId, getConnectionById, closeTab } = useAppStore();
+  const { fontSize, theme } = usePrefsStore();
 
   // SFTP panel state
   const [showSftp, setShowSftp] = useState(false);
@@ -70,22 +72,10 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
     if (!containerRef.current) return;
 
     const term = new XTerm({
-      theme: {
-        background: "#0f1117",
-        foreground: "#e6edf3",
-        cursor: "#58a6ff",
-        selectionBackground: "#388bfd44",
-        black: "#0d1117",        red: "#f85149",
-        green: "#3fb950",        yellow: "#d29922",
-        blue: "#388bfd",         magenta: "#bc8cff",
-        cyan: "#39c5cf",         white: "#b1bac4",
-        brightBlack: "#6e7681",  brightRed: "#ff7b72",
-        brightGreen: "#56d364",  brightYellow: "#e3b341",
-        brightBlue: "#79c0ff",   brightMagenta: "#d2a8ff",
-        brightCyan: "#56d4dd",   brightWhite: "#f0f6fc",
-      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      theme: TERM_THEMES[theme] as any,
       fontFamily: '"JetBrains Mono","Fira Code","Cascadia Code",monospace',
-      fontSize: 13,
+      fontSize,
       lineHeight: 1.4,
       cursorBlink: true,
       cursorStyle: "block",
