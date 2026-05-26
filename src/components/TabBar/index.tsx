@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { X, RefreshCw, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
+import { openDetachedWindow } from "../../lib/commands";
 import type { Tab } from "../../types";
 
 type MenuState = { tabId: string; x: number; y: number } | null;
@@ -19,39 +20,11 @@ export function TabBar() {
 
   async function tearOut(tab: Tab) {
     try {
-      const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-      // Encode connectionId in the label (no URL params needed — avoids URL resolution issues)
-      const label = `detached-${tab.connection_id}`;
-
-      // If already torn out, just focus that window
-      const existing = await WebviewWindow.getByLabel(label);
-      if (existing) {
-        await existing.setFocus();
-        closeTab(tab.id);
-        return;
-      }
-
-      // Use same origin so the correct app loads regardless of dev/prod URL
-      const baseUrl = `${window.location.origin}${window.location.pathname}`;
-      const win = new WebviewWindow(label, {
-        url: baseUrl,
-        title: tab.connection_name,
-        width: 1280,
-        height: 800,
-        decorations: true,
-      });
-
-      // Only close the tab once the window confirms it's created
-      win.once("tauri://created", () => {
-        closeTab(tab.id);
-      });
-
-      win.once("tauri://error", (e) => {
-        console.error("Failed to open detached window:", e);
-        // Tab stays open if window creation fails
-      });
+      await openDetachedWindow(tab.connection_id, tab.connection_name);
+      closeTab(tab.id);
     } catch (err) {
       console.error("tearOut error:", err);
+      // Tab stays open if window creation failed
     }
   }
 

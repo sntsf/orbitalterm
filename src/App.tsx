@@ -11,7 +11,9 @@ import { MenuBar } from "./components/MenuBar";
 import { NotificationOverlay } from "./components/NotificationBar";
 import { useAppStore } from "./store/useAppStore";
 import { useNotifStore } from "./store/useNotifStore";
-import { ftpConnect, ftpDisconnect, getConnections, getFolders, getGroups } from "./lib/commands";
+import {
+  ftpConnect, ftpDisconnect, getConnections, getFolders, getGroups, getWindowLabel,
+} from "./lib/commands";
 import type { Tab } from "./types";
 
 // ── Standalone FTP pane ────────────────────────────────────────────────────────
@@ -166,24 +168,25 @@ function MainApp() {
 
 // ── App root — decides which layout to render ─────────────────────────────────
 
-// Detect detached mode via window label (set in tearOut, avoids URL-resolution issues).
-// Tauri v2 stores the current webview label at __TAURI_INTERNALS__.metadata.currentWebview.label
-function getDetachedConnectionId(): string | null {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const label: string = (window as any).__TAURI_INTERNALS__?.metadata?.currentWebview?.label ?? "";
-    if (label.startsWith("detached-")) return label.slice("detached-".length);
-  } catch {
-    // Not in Tauri context
-  }
-  return null;
-}
-
 export default function App() {
-  const [connectionId] = useState<string | null>(getDetachedConnectionId);
+  // "checking" — waiting for Tauri to tell us our window label
+  // "main"     — normal app window
+  // string     — connectionId for a detached session window
+  const [mode, setMode] = useState<"checking" | "main" | string>("checking");
 
-  if (connectionId) {
-    return <DetachedApp connectionId={connectionId} />;
-  }
-  return <MainApp />;
+  useEffect(() => {
+    getWindowLabel()
+      .then((label) => {
+        if (label.startsWith("detached-")) {
+          setMode(label.slice("detached-".length)); // connectionId
+        } else {
+          setMode("main");
+        }
+      })
+      .catch(() => setMode("main"));
+  }, []);
+
+  if (mode === "checking") return null;
+  if (mode === "main") return <MainApp />;
+  return <DetachedApp connectionId={mode} />;
 }

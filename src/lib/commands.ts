@@ -358,3 +358,13 @@ export async function vncPointerEvent(
 export async function vncDisconnect(sessionId: string): Promise<void> {
   return invoke("vnc_disconnect", { sessionId });
 }
+
+// ── Window management ─────────────────────────────────────────────────────────
+
+export async function getWindowLabel(): Promise<string> {
+  return invoke("get_window_label");
+}
+
+export async function openDetachedWindow(connectionId: string, title: string): Promise<void> {
+  return invoke("open_detached_window", { connectionId, title });
+}

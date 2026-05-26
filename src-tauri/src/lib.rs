@@ -29,6 +29,36 @@ use commands::sftp::{
 use commands::vnc::{vnc_connect, vnc_disconnect, vnc_key_event, vnc_pointer_event};
 use tauri::Manager;
 
+// ── Window helpers ────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_window_label(window: tauri::WebviewWindow) -> String {
+    window.label().to_string()
+}
+
+#[tauri::command]
+fn open_detached_window(
+    app: tauri::AppHandle,
+    connection_id: String,
+    title: String,
+) -> Result<(), String> {
+    let label = format!("detached-{}", connection_id);
+    if let Some(w) = app.get_webview_window(&label) {
+        w.set_focus().ok();
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        &label,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title(title)
+    .inner_size(1280.0, 800.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -125,6 +155,9 @@ pub fn run() {
             vnc_key_event,
             vnc_pointer_event,
             vnc_disconnect,
+            // Window management
+            get_window_label,
+            open_detached_window,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
