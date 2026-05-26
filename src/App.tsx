@@ -166,11 +166,23 @@ function MainApp() {
 
 // ── App root — decides which layout to render ─────────────────────────────────
 
-export default function App() {
-  const params = new URLSearchParams(window.location.search);
-  const connectionId = params.get("connectionId");
+// Detect detached mode via window label (set in tearOut, avoids URL-resolution issues).
+// Tauri v2 stores the current webview label at __TAURI_INTERNALS__.metadata.currentWebview.label
+function getDetachedConnectionId(): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const label: string = (window as any).__TAURI_INTERNALS__?.metadata?.currentWebview?.label ?? "";
+    if (label.startsWith("detached-")) return label.slice("detached-".length);
+  } catch {
+    // Not in Tauri context
+  }
+  return null;
+}
 
-  if (params.get("detached") === "1" && connectionId) {
+export default function App() {
+  const [connectionId] = useState<string | null>(getDetachedConnectionId);
+
+  if (connectionId) {
     return <DetachedApp connectionId={connectionId} />;
   }
   return <MainApp />;

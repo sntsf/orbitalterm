@@ -18,19 +18,41 @@ export function TabBar() {
   const closeMenu = () => setMenu(null);
 
   async function tearOut(tab: Tab) {
-    closeTab(tab.id);
-    const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-    const params = new URLSearchParams({
-      detached: "1",
-      connectionId: tab.connection_id,
-    });
-    new WebviewWindow(`detached-${Date.now()}`, {
-      url: `/?${params.toString()}`,
-      title: tab.connection_name,
-      width: 1280,
-      height: 800,
-      decorations: true,
-    });
+    try {
+      const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+      // Encode connectionId in the label (no URL params needed — avoids URL resolution issues)
+      const label = `detached-${tab.connection_id}`;
+
+      // If already torn out, just focus that window
+      const existing = await WebviewWindow.getByLabel(label);
+      if (existing) {
+        await existing.setFocus();
+        closeTab(tab.id);
+        return;
+      }
+
+      // Use same origin so the correct app loads regardless of dev/prod URL
+      const baseUrl = `${window.location.origin}${window.location.pathname}`;
+      const win = new WebviewWindow(label, {
+        url: baseUrl,
+        title: tab.connection_name,
+        width: 1280,
+        height: 800,
+        decorations: true,
+      });
+
+      // Only close the tab once the window confirms it's created
+      win.once("tauri://created", () => {
+        closeTab(tab.id);
+      });
+
+      win.once("tauri://error", (e) => {
+        console.error("Failed to open detached window:", e);
+        // Tab stays open if window creation fails
+      });
+    } catch (err) {
+      console.error("tearOut error:", err);
+    }
   }
 
   return (
