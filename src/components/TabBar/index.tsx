@@ -53,8 +53,9 @@ export function TabBar() {
               }}
               onDragStart={(e) => {
                 setDragSrcId(tab.id);
+                // Don't set any dataTransfer data — the OS would create a file
+                // if the tab is dropped on the desktop. Track state in dragSrcId only.
                 e.dataTransfer.effectAllowed = "move";
-                e.dataTransfer.setData("text/plain", tab.id);
               }}
               onDragOver={(e) => {
                 e.preventDefault();
