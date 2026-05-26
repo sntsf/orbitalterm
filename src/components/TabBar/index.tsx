@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { X, Terminal, Monitor, RefreshCw } from "lucide-react";
+import { X, RefreshCw } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
+import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
 
 type MenuState = { tabId: string; x: number; y: number } | null;
 
@@ -20,7 +21,7 @@ export function TabBar() {
       >
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
-          const Icon = tab.connection_type === "ssh" ? Terminal : Monitor;
+          const iconKey = tab.icon || DEFAULT_CONN_ICON[tab.connection_type] || "server";
           return (
             <div
               key={tab.id}
@@ -36,7 +37,7 @@ export function TabBar() {
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)]",
               ].join(" ")}
             >
-              <Icon size={12} className="shrink-0" />
+              <ConnIconDisplay iconKey={iconKey} size={13} />
               <span className="text-xs truncate flex-1">{tab.connection_name}</span>
               <StatusDot status={tab.status} />
               <button

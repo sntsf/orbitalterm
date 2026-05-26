@@ -43,6 +43,7 @@ export interface Tab {
   connection_type: ConnectionType;
   status: ConnectionStatus;
   session_id?: string;
+  icon?: string;
 }
 
 export interface SftpEntry {

@@ -77,6 +77,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       connection_name: connection.name,
       connection_type: connection.type,
       status: "connecting",
+      icon: connection.icon || undefined,
     };
     set({ tabs: [...tabs, tab], activeTabId: tab.id });
   },

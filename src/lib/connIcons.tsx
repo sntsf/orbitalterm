@@ -71,23 +71,37 @@ export function getConnIcon(key: string): IconDef {
 
 export function ConnIconDisplay({ iconKey, size = 12 }: { iconKey: string; size?: number }) {
   const { Icon, color, badge, badgeIcon: BadgeIcon } = getConnIcon(iconKey);
-  // Badge font ≈ 50% of icon size so it's readable but doesn't overpower the icon
-  const badgeFont = Math.max(6, Math.round(size * 0.5));
-  const badgeIconSize = Math.max(5, Math.round(size * 0.45));
+  // Badge sits on the bottom half of the icon, overlaid (not below)
+  // Font ≈ 55% of icon so it's clearly legible without hiding the whole icon
+  const badgeFont = Math.max(7, Math.round(size * 0.55));
+  const badgeIconSize = Math.max(6, Math.round(size * 0.5));
   return (
-    <span className="relative inline-flex items-center shrink-0" style={{ width: size + 4, height: size + 3 }}>
+    <span className="relative inline-flex items-center shrink-0" style={{ width: size, height: size }}>
       <Icon size={size} className={color} />
       {badge && (
         <span
-          className="absolute font-bold leading-none text-[var(--color-text-muted)] bg-[var(--color-bg-sidebar)]"
-          style={{ fontSize: badgeFont, bottom: -3, right: -5, padding: "0 1px", borderRadius: 2 }}
+          className="absolute font-bold leading-none text-white"
+          style={{
+            fontSize: badgeFont,
+            // Center horizontally, sit on bottom half of the icon
+            bottom: 0,
+            left: "50%",
+            transform: "translateX(-50%)",
+            padding: "0 1px",
+            borderRadius: 2,
+            textShadow: "0 0 2px rgba(0,0,0,0.9), 0 0 4px rgba(0,0,0,0.9)",
+            lineHeight: 1,
+          }}
         >
           {badge}
         </span>
       )}
       {BadgeIcon && !badge && (
-        <span className="absolute" style={{ bottom: -3, right: -5 }}>
-          <BadgeIcon size={badgeIconSize} className="text-[var(--color-text-muted)]" />
+        <span
+          className="absolute"
+          style={{ bottom: 0, left: "50%", transform: "translateX(-50%)" }}
+        >
+          <BadgeIcon size={badgeIconSize} className="text-white drop-shadow-[0_0_2px_rgba(0,0,0,0.9)]" />
         </span>
       )}
     </span>
