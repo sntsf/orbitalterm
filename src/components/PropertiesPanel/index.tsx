@@ -11,7 +11,7 @@ import {
   hasPassword,
 } from "../../lib/commands";
 import type { AuthType, ConnectionType } from "../../types";
-import { CONN_ICONS, DEFAULT_CONN_ICON, type ConnIconKey } from "../../lib/connIcons";
+import { CONN_ICONS, DEFAULT_CONN_ICON, ConnIconDisplay, type ConnIconKey } from "../../lib/connIcons";
 
 const DEFAULT_PORTS: Record<ConnectionType, number> = {
   ssh: 22,
@@ -290,33 +290,19 @@ export function PropertiesPanel() {
 
         {/* Icon picker */}
         <Row label={lang === "es" ? "Icono" : "Icon"}>
-          <div
-            className="flex flex-wrap gap-1"
-            onFocus={focus("icon")} onBlur={blur}
-            tabIndex={-1}
-          >
-            {(Object.entries(CONN_ICONS) as [ConnIconKey, typeof CONN_ICONS[ConnIconKey]][]).map(([key, def]) => {
-              const { Icon, color } = def;
-              const label = lang === "es" ? def.label_es : def.label_en;
-              const selected = (icon || DEFAULT_CONN_ICON[type]) === key;
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  title={label}
-                  onClick={() => setIcon(key)}
-                  className={[
-                    "flex items-center gap-1 px-2 py-1 rounded border text-[11px] transition-colors",
-                    selected
-                      ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
-                      : "border-[var(--color-border)] bg-[var(--color-bg-base)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]",
-                  ].join(" ")}
-                >
-                  <Icon size={12} className={selected ? color : undefined} />
-                  <span className="truncate max-w-[60px]">{label}</span>
-                </button>
-              );
-            })}
+          <div className="flex items-center gap-2" onFocus={focus("icon")} onBlur={blur}>
+            <ConnIconDisplay iconKey={icon || DEFAULT_CONN_ICON[type]} size={16} />
+            <select
+              value={icon || DEFAULT_CONN_ICON[type]}
+              onChange={(e) => setIcon(e.target.value)}
+              className={inp}
+            >
+              {(Object.entries(CONN_ICONS) as [ConnIconKey, typeof CONN_ICONS[ConnIconKey]][]).map(([key, def]) => (
+                <option key={key} value={key}>
+                  {lang === "es" ? def.label_es : def.label_en}
+                </option>
+              ))}
+            </select>
           </div>
         </Row>
 

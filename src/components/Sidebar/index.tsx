@@ -12,7 +12,7 @@ import {
 } from "../../lib/commands";
 import { ContextMenu, useContextMenu } from "../ContextMenu";
 import { PropertiesPanel } from "../PropertiesPanel";
-import { getConnIcon, DEFAULT_CONN_ICON } from "../../lib/connIcons";
+import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
 import type { Connection, Folder as FolderType, Group } from "../../types";
 
 // ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -922,7 +922,6 @@ function ConnItem({
   isSearchFocus?: boolean;
 }) {
   const iconKey = conn.icon || DEFAULT_CONN_ICON[conn.type as keyof typeof DEFAULT_CONN_ICON] || "server";
-  const { Icon: TypeIcon, color: iconColor } = getConnIcon(iconKey);
 
   return (
     <button
@@ -953,7 +952,7 @@ function ConnItem({
       ].join(" ")}
     >
       <TreePrefix continuations={continuations} isLast={isLast} />
-      <TypeIcon size={12} className={`shrink-0 ${iconColor}`} />
+      <ConnIconDisplay iconKey={iconKey} size={12} />
       <span className="text-[13px] truncate flex-1 ml-1">{conn.name}</span>
       <span className={`text-[10px] uppercase font-semibold px-1 rounded shrink-0 ml-1 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
         {conn.type}
