@@ -8,7 +8,7 @@ import { FtpBrowser } from "./components/FtpBrowser";
 import { SftpDualPane } from "./components/SftpDualPane";
 import { Welcome } from "./components/Welcome";
 import { MenuBar } from "./components/MenuBar";
-import { NotificationBar } from "./components/NotificationBar";
+import { NotificationOverlay } from "./components/NotificationBar";
 import { useAppStore } from "./store/useAppStore";
 import { useNotifStore } from "./store/useNotifStore";
 import { ftpConnect, ftpDisconnect } from "./lib/commands";
@@ -101,10 +101,11 @@ export default function App() {
               ))
             )}
             {tabs.length > 0 && !activeTab && <Welcome />}
+            {/* Overlay floats over content — does NOT affect layout */}
+            <NotificationOverlay />
           </div>
         </div>
       </div>
-      <NotificationBar />
     </div>
   );
 }
