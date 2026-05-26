@@ -162,5 +162,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE schema_version SET version=2", [])?;
     }
 
+    if ver < 3 {
+        conn.execute(
+            "ALTER TABLE connections ADD COLUMN icon TEXT NOT NULL DEFAULT ''",
+            [],
+        ).ok();
+        conn.execute("UPDATE schema_version SET version=3", [])?;
+    }
+
     Ok(())
 }

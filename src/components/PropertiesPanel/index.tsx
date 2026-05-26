@@ -11,6 +11,7 @@ import {
   hasPassword,
 } from "../../lib/commands";
 import type { AuthType, ConnectionType } from "../../types";
+import { CONN_ICONS, DEFAULT_CONN_ICON, type ConnIconKey } from "../../lib/connIcons";
 
 const DEFAULT_PORTS: Record<ConnectionType, number> = {
   ssh: 22,
@@ -28,7 +29,7 @@ const AUTH_FOR_TYPE: Record<ConnectionType, AuthType[]> = {
   ftp: ["password"],
 };
 
-type FieldKey = "type" | "name" | "desc" | "host" | "port" | "user" | "auth" | "key" | "password" | "domain" | "notes";
+type FieldKey = "type" | "name" | "desc" | "host" | "port" | "user" | "auth" | "key" | "password" | "domain" | "notes" | "icon";
 
 const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string }>> = {
   es: {
@@ -39,10 +40,11 @@ const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string 
     port:     { title: "Puerto", body: "Puerto TCP en el que escucha el servicio remoto. El valor predeterminado depende del tipo: SSH=22, RDP=3389, VNC=5900, FTP=21, SFTP=22." },
     user:     { title: "Usuario", body: "Nombre de usuario con el que se autenticará en el servidor remoto. En Linux suele ser 'root' o un usuario con privilegios sudo." },
     auth:     { title: "Autenticación", body: "Método de autenticación: Password (contraseña), Key File (llave privada SSH), Agent (agente SSH del sistema operativo)." },
-    key:      { title: "Llave SSH", body: "Ruta a su archivo de llave privada SSH. Ejemplo: ~/.ssh/id_rsa o C:\\Users\\user\\.ssh\\id_ed25519. La llave pública correspondiente debe estar en el servidor." },
-    password: { title: "Contraseña", body: "Contraseña del usuario remoto. Se almacena cifrada en el almacén seguro del sistema operativo. Déjelo vacío si no desea modificar la contraseña guardada." },
+    key:      { title: "Llave SSH", body: "Ruta a su archivo de llave privada SSH. Ejemplo: ~/.ssh/id_rsa. La llave pública correspondiente debe estar en el servidor." },
+    password: { title: "Contraseña", body: "Contraseña del usuario remoto. Se almacena cifrada. Déjelo vacío si no desea modificar la contraseña guardada." },
     domain:   { title: "Dominio", body: "Dominio de Windows o Active Directory al que pertenece el usuario. En equipos locales suele ser el nombre del equipo o 'WORKGROUP'." },
-    notes:    { title: "Notas", body: "Campo libre para anotaciones: comandos útiles, credenciales secundarias, historial de cambios o cualquier información relevante de este servidor." },
+    notes:    { title: "Notas", body: "Campo libre para anotaciones: comandos útiles, credenciales secundarias, historial de cambios o cualquier información relevante." },
+    icon:     { title: "Icono", body: "Icono visual que identifica el tipo o rol de este servidor en la lista de conexiones. Se asigna automáticamente según el tipo de conexión." },
   },
   en: {
     type:     { title: "Connection type", body: "Protocol used to connect to the remote server: SSH (Linux/Unix), RDP (Windows), VNC (remote desktop), FTP or SFTP (file transfer)." },
@@ -52,10 +54,11 @@ const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string 
     port:     { title: "Port", body: "TCP port on which the remote service listens. Default depends on type: SSH=22, RDP=3389, VNC=5900, FTP=21, SFTP=22." },
     user:     { title: "Username", body: "Username to authenticate with on the remote server. On Linux this is often 'root' or a user with sudo privileges." },
     auth:     { title: "Authentication", body: "Authentication method: Password, Key File (SSH private key), or Agent (OS SSH agent)." },
-    key:      { title: "SSH Key", body: "Path to your SSH private key file. Example: ~/.ssh/id_rsa or C:\\Users\\user\\.ssh\\id_ed25519. The matching public key must be on the server." },
-    password: { title: "Password", body: "Remote user password. Stored encrypted in the OS secure keystore. Leave empty to keep the currently saved password." },
-    domain:   { title: "Domain", body: "Windows or Active Directory domain the user belongs to. On standalone machines this is usually the machine name or 'WORKGROUP'." },
-    notes:    { title: "Notes", body: "Free-form field for notes: useful commands, secondary credentials, change history, or any relevant info about this server." },
+    key:      { title: "SSH Key", body: "Path to your SSH private key file. Example: ~/.ssh/id_rsa. The matching public key must be on the server." },
+    password: { title: "Password", body: "Remote user password. Stored encrypted. Leave empty to keep the currently saved password." },
+    domain:   { title: "Domain", body: "Windows or Active Directory domain. On standalone machines this is usually the machine name or 'WORKGROUP'." },
+    notes:    { title: "Notes", body: "Free-form field for notes: useful commands, secondary credentials, change history, or any relevant server info." },
+    icon:     { title: "Icon", body: "Visual icon that identifies the role of this server in the connection list. Auto-assigned based on connection type." },
   },
 };
 
@@ -78,7 +81,6 @@ export function PropertiesPanel() {
 
   const existing = connections.find((c) => c.id === selectedConnectionId);
 
-  // Form state
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [type, setType] = useState<ConnectionType>("ssh");
@@ -95,13 +97,11 @@ export function PropertiesPanel() {
   const [rdpAdmin, setRdpAdmin] = useState(false);
   const [notes, setNotes] = useState("");
   const [groupId, setGroupId] = useState("");
+  const [icon, setIcon] = useState<string>("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-
-  // Contextual hint
   const [focusedField, setFocusedField] = useState<FieldKey | null>(null);
 
-  // Load existing connection into form
   useEffect(() => {
     if (existing) {
       setName(existing.name);
@@ -117,6 +117,7 @@ export function PropertiesPanel() {
       setFolderId(existing.folder_id ?? "");
       setGroupId(existing.group_id ?? "");
       setNotes(existing.notes);
+      setIcon(existing.icon || DEFAULT_CONN_ICON[existing.type]);
       setPassword("");
       setError("");
       if (existing.auth_type === "password") {
@@ -136,6 +137,7 @@ export function PropertiesPanel() {
       setAuthType("password");
       setKeyPath("");
       setPassword("");
+      setIcon(DEFAULT_CONN_ICON["ssh"]);
       setFolderId(newConnectionFolderId ?? "");
       const folderGroup = newConnectionFolderId
         ? folders.find((f) => f.id === newConnectionFolderId)?.group_id
@@ -151,9 +153,13 @@ export function PropertiesPanel() {
     setType(newType);
     setPort(DEFAULT_PORTS[newType]);
     const supportedAuth = AUTH_FOR_TYPE[newType];
-    if (!supportedAuth.includes(authType)) {
-      setAuthType(supportedAuth[0]);
-    }
+    if (!supportedAuth.includes(authType)) setAuthType(supportedAuth[0]);
+    // Auto-update icon if it still matches the old type's default
+    setIcon((prev) => {
+      const oldDefault = DEFAULT_CONN_ICON[type];
+      if (!prev || prev === oldDefault) return DEFAULT_CONN_ICON[newType];
+      return prev;
+    });
   };
 
   const handleSave = async (e?: React.FormEvent) => {
@@ -179,6 +185,7 @@ export function PropertiesPanel() {
         folder_id: folderId || null,
         notes,
         group_id: groupId,
+        icon,
       };
 
       let savedId: string;
@@ -210,7 +217,6 @@ export function PropertiesPanel() {
     if (existing) openTab(existing);
   };
 
-  // Empty state
   if (!existing && !isCreatingNew) {
     return (
       <div className="flex items-center justify-center h-full text-[var(--color-text-muted)] text-xs">
@@ -232,13 +238,12 @@ export function PropertiesPanel() {
   const showKeyField = authType === "key";
 
   const hint = focusedField ? HINTS[lang][focusedField] : null;
-
   const focus = (f: FieldKey) => () => setFocusedField(f);
   const blur = () => setFocusedField(null);
 
   return (
     <form onSubmit={handleSave} className="flex flex-col h-full overflow-hidden">
-      {/* Panel header */}
+      {/* Header */}
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--color-border)] shrink-0">
         <span className="text-[12px] uppercase tracking-wider text-[var(--color-text-muted)] font-medium">
           {isCreatingNew ? t("propNewConnection") : t("propProperties")}
@@ -283,58 +288,67 @@ export function PropertiesPanel() {
           </select>
         </Row>
 
+        {/* Icon picker */}
+        <Row label={lang === "es" ? "Icono" : "Icon"}>
+          <div
+            className="flex flex-wrap gap-1"
+            onFocus={focus("icon")} onBlur={blur}
+            tabIndex={-1}
+          >
+            {(Object.entries(CONN_ICONS) as [ConnIconKey, typeof CONN_ICONS[ConnIconKey]][]).map(([key, def]) => {
+              const { Icon, color } = def;
+              const label = lang === "es" ? def.label_es : def.label_en;
+              const selected = (icon || DEFAULT_CONN_ICON[type]) === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  title={label}
+                  onClick={() => setIcon(key)}
+                  className={[
+                    "flex items-center gap-1 px-2 py-1 rounded border text-[11px] transition-colors",
+                    selected
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
+                      : "border-[var(--color-border)] bg-[var(--color-bg-base)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]",
+                  ].join(" ")}
+                >
+                  <Icon size={12} className={selected ? color : undefined} />
+                  <span className="truncate max-w-[60px]">{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </Row>
+
         <Row label={t("propName")}>
-          <input
-            value={name} onChange={(e) => setName(e.target.value)}
-            placeholder="My Server"
-            onFocus={focus("name")} onBlur={blur}
-            className={inp}
-          />
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="My Server"
+            onFocus={focus("name")} onBlur={blur} className={inp} />
         </Row>
 
         <Row label={t("propDesc")}>
-          <input
-            value={description} onChange={(e) => setDescription(e.target.value)}
-            placeholder="Optional description"
-            onFocus={focus("desc")} onBlur={blur}
-            className={inp}
-          />
+          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional description"
+            onFocus={focus("desc")} onBlur={blur} className={inp} />
         </Row>
 
         <Row label={t("propHost")}>
-          <input
-            value={host} onChange={(e) => setHost(e.target.value)}
-            placeholder="192.168.1.10"
-            onFocus={focus("host")} onBlur={blur}
-            className={inp}
-          />
+          <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.10"
+            onFocus={focus("host")} onBlur={blur} className={inp} />
         </Row>
 
         <Row label={t("propPort")}>
-          <input
-            type="number" value={port} onChange={(e) => setPort(Number(e.target.value))}
-            onFocus={focus("port")} onBlur={blur}
-            className={inp}
-          />
+          <input type="number" value={port} onChange={(e) => setPort(Number(e.target.value))}
+            onFocus={focus("port")} onBlur={blur} className={inp} />
         </Row>
 
         <Row label={t("propUser")}>
-          <input
-            value={username} onChange={(e) => setUsername(e.target.value)}
-            placeholder="root"
-            onFocus={focus("user")} onBlur={blur}
-            className={inp}
-          />
+          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="root"
+            onFocus={focus("user")} onBlur={blur} className={inp} />
         </Row>
 
         {showAuthSection && (
           <Row label={t("propAuth")}>
-            <select
-              value={authType}
-              onChange={(e) => setAuthType(e.target.value as AuthType)}
-              onFocus={focus("auth")} onBlur={blur}
-              className={inp}
-            >
+            <select value={authType} onChange={(e) => setAuthType(e.target.value as AuthType)}
+              onFocus={focus("auth")} onBlur={blur} className={inp}>
               {supportedAuthTypes.map((a) => (
                 <option key={a} value={a}>{authLabels[a]}</option>
               ))}
@@ -344,12 +358,8 @@ export function PropertiesPanel() {
 
         {showKeyField && (
           <Row label={t("propSshKey")}>
-            <input
-              value={keyPath} onChange={(e) => setKeyPath(e.target.value)}
-              placeholder="~/.ssh/id_rsa"
-              onFocus={focus("key")} onBlur={blur}
-              className={inp}
-            />
+            <input value={keyPath} onChange={(e) => setKeyPath(e.target.value)} placeholder="~/.ssh/id_rsa"
+              onFocus={focus("key")} onBlur={blur} className={inp} />
           </Row>
         )}
 
@@ -377,31 +387,20 @@ export function PropertiesPanel() {
 
         {showDomain && (
           <Row label={t("propDomain")}>
-            <input
-              value={domain}
-              onChange={(e) => setDomain(e.target.value)}
-              placeholder="WORKGROUP"
-              onFocus={focus("domain")} onBlur={blur}
-              className={inp}
-            />
+            <input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="WORKGROUP"
+              onFocus={focus("domain")} onBlur={blur} className={inp} />
           </Row>
         )}
 
         <Row label={t("propNotes")}>
-          <textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            rows={2}
-            placeholder="…"
-            onFocus={focus("notes")} onBlur={blur}
-            className={inp + " resize-none"}
-          />
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="…"
+            onFocus={focus("notes")} onBlur={blur} className={inp + " resize-none"} />
         </Row>
 
         {error && <p className="text-[var(--color-danger)] text-[12px]">{error}</p>}
       </div>
 
-      {/* Contextual hint box */}
+      {/* Contextual hint */}
       <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 min-h-[72px]">
         {hint ? (
           <div className="flex gap-2">
@@ -410,18 +409,14 @@ export function PropertiesPanel() {
               <p className="text-[12px] font-semibold text-[var(--color-text-primary)] leading-tight mb-0.5">
                 {hint.title}
               </p>
-              <p className="text-[11px] text-[var(--color-text-muted)] leading-snug">
-                {hint.body}
-              </p>
+              <p className="text-[11px] text-[var(--color-text-muted)] leading-snug">{hint.body}</p>
             </div>
           </div>
         ) : (
           <div className="flex gap-2 items-start opacity-40">
             <Info size={13} className="text-[var(--color-text-muted)] shrink-0 mt-0.5" />
             <p className="text-[11px] text-[var(--color-text-muted)] leading-snug italic">
-              {lang === "es"
-                ? "Haz clic en un campo para ver su descripción."
-                : "Click any field to see its description."}
+              {lang === "es" ? "Haz clic en un campo para ver su descripción." : "Click any field to see its description."}
             </p>
           </div>
         )}

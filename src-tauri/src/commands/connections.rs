@@ -30,6 +30,7 @@ pub struct Connection {
     pub updated_at: String,
     pub sort_order: i64,
     pub group_id: String,
+    pub icon: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,6 +51,8 @@ pub struct NewConnection {
     pub rdp_admin: bool,
     #[serde(default)]
     pub group_id: String,
+    #[serde(default)]
+    pub icon: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,11 +91,12 @@ fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
         updated_at: row.get(14)?,
         sort_order: row.get(15).unwrap_or(0),
         group_id: row.get::<_, String>(16).unwrap_or_default(),
+        icon: row.get::<_, String>(17).unwrap_or_default(),
     })
 }
 
 const SELECT_COLS: &str = "id, name, type, host, port, username, auth_type, key_path,
-                           folder_id, notes, description, domain, rdp_admin, created_at, updated_at, sort_order, group_id";
+                           folder_id, notes, description, domain, rdp_admin, created_at, updated_at, sort_order, group_id, icon";
 
 #[tauri::command]
 pub fn get_connections() -> Result<Vec<Connection>, String> {
@@ -132,11 +136,11 @@ pub fn save_connection(conn: NewConnection) -> Result<Connection, String> {
         |row| row.get(0),
     ).unwrap_or(0);
     db.execute(
-        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
         params![id, conn.name, conn.conn_type, conn.host, conn.port,
                 conn.username, conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
-                conn.description, conn.domain, conn.rdp_admin as i64, sort_order, group_id],
+                conn.description, conn.domain, conn.rdp_admin as i64, sort_order, group_id, conn.icon],
     )
     .map_err(|e| e.to_string())?;
 
@@ -154,10 +158,10 @@ pub fn update_connection(conn: Connection) -> Result<Connection, String> {
     db.execute(
         "UPDATE connections SET name=?1,type=?2,host=?3,port=?4,username=?5,
          auth_type=?6,key_path=?7,folder_id=?8,notes=?9,description=?10,domain=?11,
-         rdp_admin=?12,updated_at=datetime('now') WHERE id=?13",
+         rdp_admin=?12,icon=?13,updated_at=datetime('now') WHERE id=?14",
         params![conn.name, conn.conn_type, conn.host, conn.port, conn.username,
                 conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
-                conn.description, conn.domain, conn.rdp_admin as i64, conn.id],
+                conn.description, conn.domain, conn.rdp_admin as i64, conn.icon, conn.id],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)

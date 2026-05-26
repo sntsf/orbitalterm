@@ -21,7 +21,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
     db.query_row(
         "SELECT id, name, type, host, port, username, auth_type, key_path,
                 folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
-                sort_order, group_id
+                sort_order, group_id, icon
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -43,6 +43,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 updated_at: row.get(14)?,
                 sort_order: row.get(15).unwrap_or(0),
                 group_id: row.get::<_, String>(16).unwrap_or_default(),
+                icon: row.get::<_, String>(17).unwrap_or_default(),
             })
         },
     )
@@ -81,6 +82,23 @@ pub async fn delete_password(connection_id: String) -> Result<(), String> {
         "DELETE FROM passwords WHERE connection_id = ?1",
         params![connection_id],
     ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn copy_password(from_id: String, to_id: String) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    let maybe_pw: Option<String> = db.query_row(
+        "SELECT password FROM passwords WHERE connection_id = ?1",
+        params![from_id],
+        |row| row.get(0),
+    ).ok();
+    if let Some(pw) = maybe_pw {
+        db.execute(
+            "INSERT OR REPLACE INTO passwords (connection_id, password) VALUES (?1, ?2)",
+            params![to_id, pw],
+        ).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

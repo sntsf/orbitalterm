@@ -99,6 +99,10 @@ export async function hasPassword(connectionId: string): Promise<boolean> {
   return invoke("has_password", { connectionId });
 }
 
+export async function copyPassword(fromId: string, toId: string): Promise<void> {
+  return invoke("copy_password", { fromId, toId });
+}
+
 // ── SSH sessions ─────────────────────────────────────────────────────────────
 
 export async function connectSsh(connectionId: string): Promise<string> {

@@ -8,11 +8,11 @@ import { useAppStore } from "../../store/useAppStore";
 import {
   getConnections, getFolders, deleteConnection, saveConnection,
   saveFolder, deleteFolder, getFolders as refetchFolders, reorderConnections,
-  getGroups, saveGroup, renameGroup, deleteGroup,
+  getGroups, saveGroup, renameGroup, deleteGroup, copyPassword,
 } from "../../lib/commands";
 import { ContextMenu, useContextMenu } from "../ContextMenu";
 import { PropertiesPanel } from "../PropertiesPanel";
-import { TuxIcon, WindowsIcon, VncIcon, FtpIcon, SftpIcon } from "../ConnectionIcons";
+import { getConnIcon, DEFAULT_CONN_ICON } from "../../lib/connIcons";
 import type { Connection, Folder as FolderType, Group } from "../../types";
 
 // ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -322,12 +322,14 @@ export function Sidebar() {
     ]);
 
   const duplicate = async (conn: Connection) => {
-    await saveConnection({
-      name: `${conn.name} (copy)`, type: conn.type, host: conn.host, port: conn.port,
+    const created = await saveConnection({
+      name: `${conn.name}(duplicado)`, type: conn.type, host: conn.host, port: conn.port,
       username: conn.username, auth_type: conn.auth_type, key_path: conn.key_path,
       folder_id: conn.folder_id, notes: conn.notes, description: conn.description,
       domain: conn.domain, rdp_admin: conn.rdp_admin, group_id: conn.group_id,
+      icon: conn.icon,
     });
+    await copyPassword(conn.id, created.id).catch(() => {});
     setConnections(await getConnections());
   };
 
@@ -897,17 +899,6 @@ const connTypeColors: Record<string, string> = {
   sftp: "text-cyan-400 bg-cyan-400/10",
 };
 
-function connTypeIcon(type: string) {
-  switch (type) {
-    case "ssh":  return TuxIcon;
-    case "rdp":  return WindowsIcon;
-    case "vnc":  return VncIcon;
-    case "ftp":  return FtpIcon;
-    case "sftp": return SftpIcon;
-    default:     return TuxIcon;
-  }
-}
-
 function ConnItem({
   conn, continuations, isLast, selected, onSelect, onOpen, onContextMenu,
   dragging = false, isDropTarget = false,
@@ -930,7 +921,8 @@ function ConnItem({
   isSearchMatch?: boolean;
   isSearchFocus?: boolean;
 }) {
-  const TypeIcon = connTypeIcon(conn.type);
+  const iconKey = conn.icon || DEFAULT_CONN_ICON[conn.type as keyof typeof DEFAULT_CONN_ICON] || "server";
+  const { Icon: TypeIcon, color: iconColor } = getConnIcon(iconKey);
 
   return (
     <button
@@ -961,7 +953,7 @@ function ConnItem({
       ].join(" ")}
     >
       <TreePrefix continuations={continuations} isLast={isLast} />
-      <TypeIcon size={11} className="shrink-0" />
+      <TypeIcon size={12} className={`shrink-0 ${iconColor}`} />
       <span className="text-[13px] truncate flex-1 ml-1">{conn.name}</span>
       <span className={`text-[10px] uppercase font-semibold px-1 rounded shrink-0 ml-1 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
         {conn.type}

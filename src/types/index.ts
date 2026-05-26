@@ -25,6 +25,7 @@ export interface Connection {
   updated_at: string;
   sort_order: number;
   group_id: string;
+  icon: string;
 }
 
 export interface Folder {

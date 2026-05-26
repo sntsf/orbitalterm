@@ -278,7 +278,7 @@ export function MenuBar() {
       {/* Menu bar */}
       <div
         ref={barRef}
-        className="flex items-center h-7 px-1 shrink-0 bg-[var(--color-bg-surface)] border-b border-[var(--color-border)] z-50 select-none"
+        className="flex items-center h-9 px-1 shrink-0 bg-[var(--color-bg-surface)] border-b border-[var(--color-border)] z-50 select-none"
       >
         {menus.map((menu) => (
           <div key={menu.id} className="relative">
@@ -286,7 +286,7 @@ export function MenuBar() {
               onMouseDown={() => setOpenMenuId(openMenuId === menu.id ? null : menu.id)}
               onMouseEnter={() => { if (openMenuId && openMenuId !== menu.id) setOpenMenuId(menu.id); }}
               className={[
-                "px-2.5 py-0.5 text-xs rounded transition-colors",
+                "px-3 py-1 text-[13px] rounded transition-colors",
                 openMenuId === menu.id
                   ? "bg-[var(--color-accent)] text-white"
                   : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
