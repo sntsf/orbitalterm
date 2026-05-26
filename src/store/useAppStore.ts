@@ -30,6 +30,7 @@ interface AppStore {
   setActiveTab: (tabId: string) => void;
   setTabStatus: (tabId: string, status: ConnectionStatus) => void;
   setTabSessionId: (tabId: string, sessionId: string) => void;
+  reorderTabs: (fromId: string, toId: string) => void;
 
   toggleFolder: (folderId: string) => void;
   expandFolder: (folderId: string) => void;
@@ -128,6 +129,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
         f.id === folderId ? { ...f, expanded: true } : f
       ),
     })),
+
+  reorderTabs: (fromId, toId) =>
+    set((state) => {
+      const arr = [...state.tabs];
+      const from = arr.findIndex((t) => t.id === fromId);
+      const to = arr.findIndex((t) => t.id === toId);
+      if (from < 0 || to < 0) return {};
+      const [tab] = arr.splice(from, 1);
+      arr.splice(to, 0, tab);
+      return { tabs: arr };
+    }),
 
   getConnectionById: (id) => get().connections.find((c) => c.id === id),
 }));

@@ -1,50 +1,102 @@
-import { useState } from "react";
-import { X, RefreshCw } from "lucide-react";
+import { useRef, useState } from "react";
+import { X, RefreshCw, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
+import type { Tab } from "../../types";
 
 type MenuState = { tabId: string; x: number; y: number } | null;
 
 export function TabBar() {
-  const { tabs, activeTabId, setActiveTab, closeTab, reconnectTab } = useAppStore();
+  const { tabs, activeTabId, setActiveTab, closeTab, reconnectTab, reorderTabs } = useAppStore();
   const [menu, setMenu] = useState<MenuState>(null);
+  const [dragSrcId, setDragSrcId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const barRef = useRef<HTMLDivElement>(null);
 
   if (tabs.length === 0) return null;
 
   const closeMenu = () => setMenu(null);
 
+  async function tearOut(tab: Tab) {
+    closeTab(tab.id);
+    const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+    const params = new URLSearchParams({
+      detached: "1",
+      connectionId: tab.connection_id,
+    });
+    new WebviewWindow(`detached-${Date.now()}`, {
+      url: `/?${params.toString()}`,
+      title: tab.connection_name,
+      width: 1280,
+      height: 800,
+      decorations: true,
+    });
+  }
+
   return (
     <>
       <div
-        className="flex items-center bg-[var(--color-bg-surface)] border-b border-[var(--color-border)] overflow-x-auto shrink-0"
+        ref={barRef}
+        className="flex items-center bg-[var(--color-bg-surface)] border-b border-[var(--color-border)] overflow-x-auto shrink-0 select-none"
         onClick={closeMenu}
+        onDragOver={(e) => e.preventDefault()}
       >
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
+          const isDragging = tab.id === dragSrcId;
+          const isDropTarget = tab.id === dropTargetId && tab.id !== dragSrcId;
           const iconKey = tab.icon || DEFAULT_CONN_ICON[tab.connection_type] || "server";
+
           return (
             <div
               key={tab.id}
+              draggable
               onClick={() => setActiveTab(tab.id)}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setMenu({ tabId: tab.id, x: e.clientX, y: e.clientY });
               }}
+              onDragStart={(e) => {
+                setDragSrcId(tab.id);
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", tab.id);
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                if (tab.id !== dragSrcId) setDropTargetId(tab.id);
+              }}
+              onDragLeave={() => {
+                if (dropTargetId === tab.id) setDropTargetId(null);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (dragSrcId && dragSrcId !== tab.id) reorderTabs(dragSrcId, tab.id);
+                setDragSrcId(null);
+                setDropTargetId(null);
+              }}
+              onDragEnd={(e) => {
+                const rect = barRef.current?.getBoundingClientRect();
+                // If dropped well below the tab bar → tear out to new window
+                if (rect && e.clientY > rect.bottom + 60) {
+                  tearOut(tab);
+                }
+                setDragSrcId(null);
+                setDropTargetId(null);
+              }}
               className={[
                 "flex items-center gap-2 px-3 py-2 border-r border-[var(--color-border)] cursor-pointer shrink-0 group transition-colors min-w-0 max-w-48",
+                isDragging ? "opacity-40" : "",
+                isDropTarget ? "border-l-2 border-l-[var(--color-accent)]" : "",
                 isActive
                   ? "bg-[var(--color-bg-base)] text-[var(--color-text-primary)] border-t-2 border-t-[var(--color-accent)]"
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)]",
               ].join(" ")}
             >
-              <ConnIconDisplay iconKey={iconKey} size={13} />
+              <ConnIconDisplay iconKey={iconKey} size={16} />
               <span className="text-xs truncate flex-1">{tab.connection_name}</span>
               <StatusDot status={tab.status} />
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  closeTab(tab.id);
-                }}
+                onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
                 className="shrink-0 p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-danger)] transition-all"
               >
                 <X size={11} />
@@ -61,6 +113,17 @@ export function TabBar() {
             className="fixed z-50 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded shadow-lg py-1 min-w-36"
             style={{ left: menu.x, top: menu.y }}
           >
+            <button
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+              onClick={() => {
+                const tab = tabs.find((t) => t.id === menu.tabId);
+                if (tab) tearOut(tab);
+                closeMenu();
+              }}
+            >
+              <PanelLeftClose size={11} />
+              Separar ventana
+            </button>
             <button
               className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
               onClick={() => { reconnectTab(menu.tabId); closeMenu(); }}
@@ -91,8 +154,38 @@ function StatusDot({ status }: { status: string }) {
     error: "bg-[var(--color-danger)]",
   };
   return (
-    <span
-      className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${colors[status] ?? colors.idle}`}
-    />
+    <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${colors[status] ?? colors.idle}`} />
+  );
+}
+
+// ── DetachedTabBar — shown in torn-out windows ────────────────────────────────
+
+export function DetachedTabBar({ tab }: { tab: Tab | undefined }) {
+  const handleDockBack = async () => {
+    if (!tab) return;
+    const { emitTo } = await import("@tauri-apps/api/event");
+    await emitTo("main", "orbital:dock-back", { connectionId: tab.connection_id });
+    const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+    getCurrentWebviewWindow().close();
+  };
+
+  return (
+    <div className="flex items-center bg-[var(--color-bg-surface)] border-b border-[var(--color-border)] shrink-0">
+      {tab && (
+        <div className="flex items-center gap-2 px-3 py-2 border-r border-[var(--color-border)] bg-[var(--color-bg-base)] border-t-2 border-t-[var(--color-accent)] text-[var(--color-text-primary)] min-w-0 max-w-64">
+          <ConnIconDisplay iconKey={tab.icon || DEFAULT_CONN_ICON[tab.connection_type] || "server"} size={16} />
+          <span className="text-xs truncate flex-1">{tab.connection_name}</span>
+          <StatusDot status={tab.status} />
+        </div>
+      )}
+      <button
+        onClick={handleDockBack}
+        className="ml-auto mr-2 flex items-center gap-1.5 px-2 py-1 text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] rounded transition-colors"
+        title="Volver a la ventana principal"
+      >
+        <PanelLeftClose size={12} />
+        Dock back
+      </button>
+    </div>
   );
 }

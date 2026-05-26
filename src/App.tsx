@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
-import { TabBar } from "./components/TabBar";
+import { TabBar, DetachedTabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/Terminal";
 import { RdpPane } from "./components/RdpPane";
 import { VncPane } from "./components/VncPane";
@@ -11,7 +11,7 @@ import { MenuBar } from "./components/MenuBar";
 import { NotificationOverlay } from "./components/NotificationBar";
 import { useAppStore } from "./store/useAppStore";
 import { useNotifStore } from "./store/useNotifStore";
-import { ftpConnect, ftpDisconnect } from "./lib/commands";
+import { ftpConnect, ftpDisconnect, getConnections, getFolders, getGroups } from "./lib/commands";
 import type { Tab } from "./types";
 
 // ── Standalone FTP pane ────────────────────────────────────────────────────────
@@ -60,11 +60,78 @@ function FtpStandalonePane({ tab }: { tab: Tab }) {
   );
 }
 
-// ── App root ───────────────────────────────────────────────────────────────────
+// ── Session renderer (shared between normal and detached layouts) ─────────────
 
-export default function App() {
-  const { tabs, activeTabId, sidebarVisible } = useAppStore();
+function SessionPane({ tab }: { tab: Tab }) {
+  if (tab.connection_type === "ssh") return <TerminalPane tab={tab} />;
+  if (tab.connection_type === "rdp") return <RdpPane tab={tab} />;
+  if (tab.connection_type === "vnc") return <VncPane tab={tab} />;
+  if (tab.connection_type === "sftp") return <SftpDualPane tab={tab} />;
+  if (tab.connection_type === "ftp") return <FtpStandalonePane tab={tab} />;
+  return <RdpPane tab={tab} />;
+}
+
+// ── Detached (torn-out) window layout ─────────────────────────────────────────
+
+function DetachedApp({ connectionId }: { connectionId: string }) {
+  const { connections, tabs, activeTabId, openTab, setConnections, setFolders, setGroups } = useAppStore();
+
+  // Load data (Sidebar not rendered in detached mode, so load here)
+  useEffect(() => {
+    Promise.all([getConnections(), getFolders(), getGroups()])
+      .then(([conns, fldrs, grps]) => {
+        setConnections(conns);
+        setFolders(fldrs);
+        setGroups(grps);
+      })
+      .catch(console.error);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-open the target connection once loaded
+  useEffect(() => {
+    if (connections.length === 0) return;
+    const conn = connections.find((c) => c.id === connectionId);
+    if (conn) openTab(conn);
+  }, [connections, connectionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const activeTab = tabs.find((t) => t.id === activeTabId);
+
+  return (
+    <div className="flex flex-col h-full w-full overflow-hidden">
+      <DetachedTabBar tab={activeTab} />
+      <div className="flex-1 overflow-hidden bg-[var(--color-bg-base)] relative">
+        {tabs.length === 0 ? (
+          <Welcome />
+        ) : (
+          tabs.map((tab) => (
+            <div key={tab.id} className={`absolute inset-0 ${tab.id === activeTabId ? "block" : "hidden"}`}>
+              <SessionPane tab={tab} />
+            </div>
+          ))
+        )}
+        <NotificationOverlay />
+      </div>
+    </div>
+  );
+}
+
+// ── Normal (main window) layout ───────────────────────────────────────────────
+
+function MainApp() {
+  const { tabs, activeTabId, sidebarVisible, openTab, getConnectionById } = useAppStore();
+  const activeTab = tabs.find((t) => t.id === activeTabId);
+
+  // Listen for dock-back events from detached windows
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      listen<{ connectionId: string }>("orbital:dock-back", (ev) => {
+        const conn = getConnectionById(ev.payload.connectionId);
+        if (conn) openTab(conn);
+      }).then((fn) => { unlisten = fn; });
+    });
+    return () => { unlisten?.(); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="flex flex-col h-full w-full overflow-hidden">
@@ -84,28 +151,27 @@ export default function App() {
                   key={tab.id}
                   className={`absolute inset-0 ${tab.id === activeTabId ? "block" : "hidden"}`}
                 >
-                  {tab.connection_type === "ssh" ? (
-                    <TerminalPane tab={tab} />
-                  ) : tab.connection_type === "rdp" ? (
-                    <RdpPane tab={tab} />
-                  ) : tab.connection_type === "vnc" ? (
-                    <VncPane tab={tab} />
-                  ) : tab.connection_type === "sftp" ? (
-                    <SftpDualPane tab={tab} />
-                  ) : tab.connection_type === "ftp" ? (
-                    <FtpStandalonePane tab={tab} />
-                  ) : (
-                    <RdpPane tab={tab} />
-                  )}
+                  <SessionPane tab={tab} />
                 </div>
               ))
             )}
             {tabs.length > 0 && !activeTab && <Welcome />}
-            {/* Overlay floats over content — does NOT affect layout */}
             <NotificationOverlay />
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+// ── App root — decides which layout to render ─────────────────────────────────
+
+export default function App() {
+  const params = new URLSearchParams(window.location.search);
+  const connectionId = params.get("connectionId");
+
+  if (params.get("detached") === "1" && connectionId) {
+    return <DetachedApp connectionId={connectionId} />;
+  }
+  return <MainApp />;
 }

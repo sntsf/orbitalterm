@@ -952,7 +952,7 @@ function ConnItem({
       ].join(" ")}
     >
       <TreePrefix continuations={continuations} isLast={isLast} />
-      <ConnIconDisplay iconKey={iconKey} size={12} />
+      <ConnIconDisplay iconKey={iconKey} size={16} />
       <span className="text-[13px] truncate flex-1 ml-1">{conn.name}</span>
       <span className={`text-[10px] uppercase font-semibold px-1 rounded shrink-0 ml-1 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
         {conn.type}

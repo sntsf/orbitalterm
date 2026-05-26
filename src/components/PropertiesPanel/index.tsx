@@ -291,7 +291,7 @@ export function PropertiesPanel() {
         {/* Icon picker */}
         <Row label={lang === "es" ? "Icono" : "Icon"}>
           <div className="flex items-center gap-2" onFocus={focus("icon")} onBlur={blur}>
-            <ConnIconDisplay iconKey={icon || DEFAULT_CONN_ICON[type]} size={16} />
+            <ConnIconDisplay iconKey={icon || DEFAULT_CONN_ICON[type]} size={20} />
             <select
               value={icon || DEFAULT_CONN_ICON[type]}
               onChange={(e) => setIcon(e.target.value)}
