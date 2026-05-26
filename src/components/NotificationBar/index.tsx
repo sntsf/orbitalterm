@@ -52,38 +52,38 @@ export function NotificationOverlay() {
           <ProgressBar key={progressKey} durationMs={AUTO_HIDE_MS} />
 
           {/* Single-row content */}
-          <div className="flex items-center gap-3 px-4 py-2.5">
-            <AlertTriangle size={15} className="text-[var(--color-warning)] shrink-0" />
+          <div className="flex items-center gap-3 px-4 py-4">
+            <AlertTriangle size={18} className="text-[var(--color-warning)] shrink-0" />
 
             {/* Label */}
-            <span className="text-[13px] font-semibold text-[var(--color-warning)] shrink-0">
+            <span className="text-[14px] font-semibold text-[var(--color-warning)] shrink-0">
               {lang === "es" ? "Error de conexión" : "Connection error"}
             </span>
 
-            <div className="w-px h-4 bg-[var(--color-border)] shrink-0" />
+            <div className="w-px h-5 bg-[var(--color-border)] shrink-0" />
 
             {/* Connection identity */}
-            <span className="text-[13px] font-semibold text-[var(--color-text-primary)] shrink-0">
+            <span className="text-[14px] font-semibold text-[var(--color-text-primary)] shrink-0">
               {latest.connName}
             </span>
-            <span className="text-[10px] uppercase font-mono bg-[var(--color-bg-base)] text-[var(--color-text-muted)] px-1.5 py-0.5 rounded shrink-0">
+            <span className="text-[11px] uppercase font-mono bg-[var(--color-bg-base)] text-[var(--color-text-muted)] px-1.5 py-0.5 rounded shrink-0">
               {latest.connType}
             </span>
             {latest.host && (
-              <span className="text-[12px] text-[var(--color-text-muted)] shrink-0">
+              <span className="text-[13px] text-[var(--color-text-muted)] shrink-0">
                 {latest.host}
               </span>
             )}
 
-            <div className="w-px h-4 bg-[var(--color-border)] shrink-0" />
+            <div className="w-px h-5 bg-[var(--color-border)] shrink-0" />
 
             {/* Friendly error — fills remaining space */}
-            <span className="text-[12px] text-[var(--color-text-muted)] flex-1 truncate min-w-0">
+            <span className="text-[13px] text-[var(--color-text-muted)] flex-1 truncate min-w-0">
               {friendly}
             </span>
 
             {/* Time + extra count + close */}
-            <span className="text-[11px] text-[var(--color-text-muted)] shrink-0">{timeStr}</span>
+            <span className="text-[12px] text-[var(--color-text-muted)] shrink-0">{timeStr}</span>
 
             {notifs.length > 1 && (
               <span className="text-[11px] bg-[var(--color-bg-base)] border border-[var(--color-border)] text-[var(--color-text-muted)] px-1.5 py-0.5 rounded shrink-0">
@@ -96,7 +96,7 @@ export function NotificationOverlay() {
               className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
               title={lang === "es" ? "Cerrar" : "Close"}
             >
-              <X size={14} />
+              <X size={16} />
             </button>
           </div>
         </div>
