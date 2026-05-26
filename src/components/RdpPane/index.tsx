@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Monitor, RefreshCw, AlertCircle, CheckCircle, PackageOpen } from "lucide-react";
 import {
@@ -50,6 +50,8 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
       if (!entry) return;
+      // Skip when element is hidden (display:none gives size 0,0)
+      if (entry.contentRect.width === 0 || entry.contentRect.height === 0) return;
       const w = Math.max(640, Math.floor(entry.contentRect.width));
       const h = Math.max(480, Math.floor(entry.contentRect.height));
       if (timer) clearTimeout(timer);
@@ -308,6 +310,13 @@ export function RdpPane({ tab }: RdpPaneProps) {
     return () => clearInterval(interval);
   }, [status, embedded]);
 
+  // Stable callback reference — prevents EmbeddedViewer's ResizeObserver
+  // effect from reconnecting on every RdpPane re-render.
+  const handleResize = useCallback(
+    (w: number, h: number) => setFrameSize({ width: w, height: h }),
+    [],
+  );
+
   // Embedded canvas mode: render canvas immediately after connected
   if (status === "connected" && embedded && sessionIdRef.current) {
     return (
@@ -329,7 +338,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
             });
           }
         }}
-        onResize={(w, h) => setFrameSize({ width: w, height: h })}
+        onResize={handleResize}
       />
     );
   }

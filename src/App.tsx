@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { TabBar, DetachedTabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/Terminal";
@@ -63,15 +63,19 @@ function FtpStandalonePane({ tab }: { tab: Tab }) {
 }
 
 // ── Session renderer (shared between normal and detached layouts) ─────────────
+// memo: prevents re-render when only activeTabId changes (CSS hidden/block swap).
+// Without this, switching tabs re-renders RdpPane which recreates the onResize
+// callback, causing EmbeddedViewer's ResizeObserver to reconnect and fire at
+// size 0 (hidden element), triggering an unwanted rdpResizeSession call.
 
-function SessionPane({ tab }: { tab: Tab }) {
+const SessionPane = memo(function SessionPane({ tab }: { tab: Tab }) {
   if (tab.connection_type === "ssh") return <TerminalPane tab={tab} />;
   if (tab.connection_type === "rdp") return <RdpPane tab={tab} />;
   if (tab.connection_type === "vnc") return <VncPane tab={tab} />;
   if (tab.connection_type === "sftp") return <SftpDualPane tab={tab} />;
   if (tab.connection_type === "ftp") return <FtpStandalonePane tab={tab} />;
   return <RdpPane tab={tab} />;
-}
+});
 
 // ── Detached (torn-out) window layout ─────────────────────────────────────────
 
