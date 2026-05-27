@@ -12,10 +12,9 @@ import { NotificationOverlay } from "./components/NotificationBar";
 import { useAppStore } from "./store/useAppStore";
 import { useNotifStore } from "./store/useNotifStore";
 import {
-  dockBack, ftpConnect, ftpDisconnect, getConnections, getFolders, getGroups, getWindowLabel,
+  ftpConnect, ftpDisconnect, getConnections, getFolders, getGroups, getWindowLabel,
   notifyDropZone, popDetachedSession,
 } from "./lib/commands";
-import { skipDisconnectSessions } from "./lib/sessionTransfer";
 import type { Tab } from "./types";
 
 // ── Standalone FTP pane ────────────────────────────────────────────────────────
@@ -111,62 +110,36 @@ function DetachedApp({ connectionId, windowLabel }: { connectionId: string; wind
       .catch(() => openTab(conn));
   }, [connections, connectionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Drag-to-dock: detect when this window is dragged near the main window's tab bar
+  // Window-drag-to-dock: poll position every 300ms and show drop zone indicator
+  // when this window's top edge is near the main window's tab bar.
+  // (tauri://move only fires on Linux after the drag is released, so polling
+  // is more reliable for real-time feedback during a title-bar drag.)
   useEffect(() => {
-    let mainBounds: { x: number; y: number; width: number; height: number } | null = null;
-    let myWidth = 0;
-    let dockTimer: ReturnType<typeof setTimeout> | null = null;
     let inDockZone = false;
-    let unlisten: (() => void) | undefined;
 
-    const setup = async () => {
-      const { WebviewWindow, getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-      const { listen } = await import("@tauri-apps/api/event");
-      const mainWin = new WebviewWindow("main");
+    const check = async () => {
       try {
-        const pos = await mainWin.outerPosition();
-        const size = await mainWin.outerSize();
-        mainBounds = { x: pos.x, y: pos.y, width: size.width, height: size.height };
-        myWidth = (await getCurrentWebviewWindow().outerSize()).width;
-      } catch { return; }
-
-      unlisten = await listen<{ x: number; y: number }>("tauri://move", (ev) => {
-        if (!mainBounds) return;
-        const { x, y } = ev.payload;
-        const mb = mainBounds;
-        // In "dock zone" when this window's top edge is within ±120px of main window's top
-        // AND the horizontal range overlaps the main window
-        const horizOverlap = x < mb.x + mb.width && x + myWidth > mb.x;
-        const nearTop = y >= mb.y - 120 && y <= mb.y + 120;
+        const { WebviewWindow, getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+        const mainWin = new WebviewWindow("main");
+        const [myPos, mySize, mainPos, mainSize] = await Promise.all([
+          getCurrentWebviewWindow().outerPosition(),
+          getCurrentWebviewWindow().outerSize(),
+          mainWin.outerPosition(),
+          mainWin.outerSize(),
+        ]);
+        const horizOverlap = myPos.x < mainPos.x + mainSize.width && myPos.x + mySize.width > mainPos.x;
+        const nearTop = myPos.y >= mainPos.y - 120 && myPos.y <= mainPos.y + 120;
         const nowInZone = horizOverlap && nearTop;
-
         if (nowInZone !== inDockZone) {
           inDockZone = nowInZone;
           notifyDropZone(nowInZone, nowInZone ? connectionId : undefined).catch(() => {});
         }
-
-        if (nowInZone) {
-          // Start debounce: if window rests here for 600ms, auto-dock
-          if (!dockTimer) {
-            dockTimer = setTimeout(() => {
-              const state = useAppStore.getState();
-              const activeTab = state.tabs.find((t) => t.id === state.activeTabId);
-              const sid = activeTab?.session_id ?? null;
-              if (sid) skipDisconnectSessions.add(sid);
-              notifyDropZone(false).catch(() => {});
-              dockBack(connectionId, sid).catch(() => {});
-            }, 600);
-          }
-        } else {
-          if (dockTimer) { clearTimeout(dockTimer); dockTimer = null; }
-        }
-      });
+      } catch { /* window might be closing */ }
     };
 
-    setup();
+    const interval = setInterval(check, 300);
     return () => {
-      unlisten?.();
-      if (dockTimer) clearTimeout(dockTimer);
+      clearInterval(interval);
       if (inDockZone) notifyDropZone(false).catch(() => {});
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps

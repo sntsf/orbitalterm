@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { X, RefreshCw, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
-import { dockBack, openDetachedWindow, storeDetachedSession } from "../../lib/commands";
+import { dockBack, notifyDropZone, openDetachedWindow, storeDetachedSession } from "../../lib/commands";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import type { Tab } from "../../types";
 
@@ -185,14 +185,52 @@ export function DetachedTabBar({ tab }: { tab: Tab | undefined }) {
     if (!tab) return;
     const sid = tab.session_id ?? null;
     if (sid) skipDisconnectSessions.add(sid);
-    // dock_back Rust command emits orbital:dock-back to main then destroys this window
     dockBack(tab.connection_id, sid).catch(console.error);
   };
 
+  const onTabDragStart = (e: React.DragEvent) => {
+    e.dataTransfer.effectAllowed = "move";
+    if (tab) notifyDropZone(true, tab.connection_id).catch(() => {});
+  };
+
+  const onTabDragEnd = async (e: React.DragEvent) => {
+    notifyDropZone(false).catch(() => {});
+    if (!tab) return;
+
+    const { screenX, screenY } = e;
+    // screenX/Y are logical pixels; convert to physical to compare with Tauri's outerPosition
+    const dpr = window.devicePixelRatio || 1;
+    const physX = Math.round(screenX * dpr);
+    const physY = Math.round(screenY * dpr);
+
+    try {
+      const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+      const mainWin = new WebviewWindow("main");
+      const [mainPos, mainSize] = await Promise.all([
+        mainWin.outerPosition(),
+        mainWin.outerSize(),
+      ]);
+      // outerPosition includes the title bar. Be generous: check top 180px
+      // of the outer window which covers any title bar + tab bar combination.
+      const overTabBar =
+        physX >= mainPos.x &&
+        physX <= mainPos.x + mainSize.width &&
+        physY >= mainPos.y &&
+        physY <= mainPos.y + 180;
+
+      if (overTabBar) handleDockBack();
+    } catch { /* ignore – window might be moving */ }
+  };
+
   return (
-    <div className="flex items-center bg-[var(--color-bg-surface)] border-b border-[var(--color-border)] shrink-0">
+    <div className="flex items-center bg-[var(--color-bg-surface)] border-b border-[var(--color-border)] shrink-0 select-none">
       {tab && (
-        <div className="flex items-center gap-2 px-3 py-2 border-r border-[var(--color-border)] bg-[var(--color-bg-base)] border-t-2 border-t-[var(--color-accent)] text-[var(--color-text-primary)] min-w-0 max-w-64">
+        <div
+          draggable
+          onDragStart={onTabDragStart}
+          onDragEnd={onTabDragEnd}
+          className="flex items-center gap-2 px-3 py-2 border-r border-[var(--color-border)] bg-[var(--color-bg-base)] border-t-2 border-t-[var(--color-accent)] text-[var(--color-text-primary)] min-w-0 max-w-64 cursor-grab active:cursor-grabbing"
+        >
           <ConnIconDisplay iconKey={tab.icon || DEFAULT_CONN_ICON[tab.connection_type] || "server"} size={16} />
           <span className="text-xs truncate flex-1">{tab.connection_name}</span>
           <StatusDot status={tab.status} />
