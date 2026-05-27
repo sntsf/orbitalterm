@@ -193,6 +193,10 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Detached windows close normally — only the main window needs cleanup.
+                if window.label() != "main" {
+                    return;
+                }
                 // Prevent the default close so we can clean up first.
                 api.prevent_close();
                 let app = window.app_handle().clone();
