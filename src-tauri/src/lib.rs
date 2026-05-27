@@ -29,7 +29,7 @@ use commands::sftp::{
 use commands::vnc::{vnc_connect, vnc_disconnect, vnc_key_event, vnc_pointer_event};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 // ── Detached session store ────────────────────────────────────────────────────
 // Transfers a live session_id from the main window to a detached window
