@@ -1,8 +1,8 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X, RefreshCw, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
-import { openDetachedWindow, storeDetachedSession } from "../../lib/commands";
+import { dockBack, openDetachedWindow, storeDetachedSession } from "../../lib/commands";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import type { Tab } from "../../types";
 
@@ -13,9 +13,21 @@ export function TabBar() {
   const [menu, setMenu] = useState<MenuState>(null);
   const [dragSrcId, setDragSrcId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [dropZoneActive, setDropZoneActive] = useState(false);
   const barRef = useRef<HTMLDivElement>(null);
 
-  if (tabs.length === 0) return null;
+  // Listen for drag-over notifications from detached windows
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      listen<{ active: boolean }>("orbital:drop-zone", (ev) => {
+        setDropZoneActive(ev.payload.active);
+      }).then((fn) => { unlisten = fn; });
+    });
+    return () => { unlisten?.(); };
+  }, []);
+
+  if (tabs.length === 0 && !dropZoneActive) return null;
 
   const closeMenu = () => setMenu(null);
 
@@ -42,6 +54,12 @@ export function TabBar() {
         onClick={closeMenu}
         onDragOver={(e) => e.preventDefault()}
       >
+        {dropZoneActive && (
+          <div className="flex items-center gap-2 px-4 py-2 text-xs text-[var(--color-accent)] border-r border-[var(--color-border)] border-t-2 border-t-[var(--color-accent)] bg-[var(--color-bg-base)] animate-pulse shrink-0">
+            <PanelLeftClose size={13} />
+            Soltar para acoplar
+          </div>
+        )}
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
           const isDragging = tab.id === dragSrcId;
@@ -163,20 +181,12 @@ function StatusDot({ status }: { status: string }) {
 // ── DetachedTabBar — shown in torn-out windows ────────────────────────────────
 
 export function DetachedTabBar({ tab }: { tab: Tab | undefined }) {
-  const handleDockBack = async () => {
+  const handleDockBack = () => {
     if (!tab) return;
-    const { emitTo } = await import("@tauri-apps/api/event");
-    if (tab.session_id) {
-      skipDisconnectSessions.add(tab.session_id);
-    }
-    await emitTo("main", "orbital:dock-back", {
-      connectionId: tab.connection_id,
-      sessionId: tab.session_id ?? null,
-    });
-    const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-    // destroy() force-closes without emitting CloseRequested, ensuring the
-    // window closes immediately regardless of any event handler interception.
-    await getCurrentWebviewWindow().destroy();
+    const sid = tab.session_id ?? null;
+    if (sid) skipDisconnectSessions.add(sid);
+    // dock_back Rust command emits orbital:dock-back to main then destroys this window
+    dockBack(tab.connection_id, sid).catch(console.error);
   };
 
   return (

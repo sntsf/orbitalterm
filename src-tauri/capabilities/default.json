@@ -10,6 +10,8 @@
     "core:event:allow-unlisten",
     "core:event:allow-emit",
     "core:window:default",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
     "core:app:default",
     "shell:allow-open",
     "dialog:allow-open",

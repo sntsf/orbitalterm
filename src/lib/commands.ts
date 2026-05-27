@@ -376,3 +376,11 @@ export async function storeDetachedSession(label: string, sessionId: string): Pr
 export async function popDetachedSession(label: string): Promise<string | null> {
   return invoke("pop_detached_session", { label });
 }
+
+export async function dockBack(connectionId: string, sessionId: string | null): Promise<void> {
+  return invoke("dock_back", { connectionId, sessionId });
+}
+
+export async function notifyDropZone(active: boolean, connectionId?: string | null): Promise<void> {
+  return invoke("notify_drop_zone", { active, connectionId: connectionId ?? null });
+}

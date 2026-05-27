@@ -88,6 +88,47 @@ fn open_detached_window(
     Ok(())
 }
 
+/// Dock a detached window back into the main window.
+/// Emits "orbital:dock-back" to the main window from Rust (no JS ACL needed),
+/// then destroys the calling window after a brief delay so the invoke response
+/// can reach JS before the webview disappears.
+#[tauri::command]
+fn dock_back(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    connection_id: String,
+    session_id: Option<String>,
+) {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.emit(
+            "orbital:dock-back",
+            serde_json::json!({
+                "connectionId": connection_id,
+                "sessionId": session_id,
+            }),
+        );
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let _ = window.destroy();
+    });
+}
+
+/// Notify the main window that a detached window is being dragged over its
+/// tab bar area (for drop-zone visual feedback).
+#[tauri::command]
+fn notify_drop_zone(app: tauri::AppHandle, active: bool, connection_id: Option<String>) {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.emit(
+            "orbital:drop-zone",
+            serde_json::json!({
+                "active": active,
+                "connectionId": connection_id,
+            }),
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -190,6 +231,8 @@ pub fn run() {
             open_detached_window,
             store_detached_session,
             pop_detached_session,
+            dock_back,
+            notify_drop_zone,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
