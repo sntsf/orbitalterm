@@ -174,7 +174,9 @@ export function DetachedTabBar({ tab }: { tab: Tab | undefined }) {
       sessionId: tab.session_id ?? null,
     });
     const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-    getCurrentWebviewWindow().close();
+    // destroy() force-closes without emitting CloseRequested, ensuring the
+    // window closes immediately regardless of any event handler interception.
+    await getCurrentWebviewWindow().destroy();
   };
 
   return (
