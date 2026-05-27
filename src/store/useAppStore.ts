@@ -25,6 +25,7 @@ interface AppStore {
   toggleSidebar: () => void;
 
   openTab: (connection: Connection) => void;
+  openTabConnected: (connection: Connection, sessionId: string) => void;
   closeTab: (tabId: string) => void;
   reconnectTab: (tabId: string) => void;
   setActiveTab: (tabId: string) => void;
@@ -79,6 +80,20 @@ export const useAppStore = create<AppStore>((set, get) => ({
       connection_type: connection.type,
       status: "connecting",
       icon: connection.icon || undefined,
+    };
+    set({ tabs: [...tabs, tab], activeTabId: tab.id });
+  },
+
+  openTabConnected: (connection, sessionId) => {
+    const { tabs } = get();
+    const tab: Tab = {
+      id: crypto.randomUUID(),
+      connection_id: connection.id,
+      connection_name: connection.name,
+      connection_type: connection.type,
+      status: "connected",
+      icon: connection.icon || undefined,
+      session_id: sessionId,
     };
     set({ tabs: [...tabs, tab], activeTabId: tab.id });
   },

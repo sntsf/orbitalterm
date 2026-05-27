@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
 import { HardDrive } from "lucide-react";
 import { connectSsh, disconnectSsh, resizePty, sendInput, sftpConnect, sftpDisconnect } from "../../lib/commands";
+import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import { useAppStore } from "../../store/useAppStore";
 import { usePrefsStore, TERM_THEMES } from "../../store/usePrefsStore";
 import { useNotifStore } from "../../store/useNotifStore";
@@ -101,74 +102,84 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         return;
       }
 
-      term.writeln(
-        `\x1b[2mConnecting to \x1b[0m\x1b[33m${connection.username}@${connection.host}\x1b[0m\x1b[2m...\x1b[0m`
-      );
+      let sessionId: string;
 
-      try {
-        const sessionId = await connectSsh(connection.id);
+      if (tab.session_id) {
+        // Resume a transferred session — skip the SSH handshake
+        sessionId = tab.session_id;
         sessionIdRef.current = sessionId;
-        setTabSessionId(tab.id, sessionId);
         setTabStatus(tab.id, "connected");
-
-        // Auto-open SFTP panel and connect
-        setShowSftp(true);
-        setTimeout(() => fitAddonRef.current?.fit(), 50);
-        sftpConnect(connection.id).then((sid) => {
-          setSftpSessionId(sid);
-          sftpSessionIdRef.current = sid;
-        }).catch(console.error);
-
-        // Stream SSH output into xterm
-        const unlistenData = await listen<string>(`ssh-data-${sessionId}`, (e) => {
-          term.write(e.payload);
-        });
-        cleanups.push(unlistenData);
-
-        // Handle SSH process exit — close SFTP and the tab
-        const unlistenClosed = await listen(`ssh-closed-${sessionId}`, () => {
-          term.writeln("\r\n\x1b[2m[Connection closed]\x1b[0m");
-          if (sftpSessionIdRef.current) {
-            sftpDisconnect(sftpSessionIdRef.current).catch(console.error);
-            sftpSessionIdRef.current = null;
-          }
-          setTimeout(() => closeTab(tab.id), 1500);
-        });
-        cleanups.push(unlistenClosed);
-
-        // Copy-on-select (like PuTTY): selecting text copies it automatically
-        term.onSelectionChange(() => {
-          const sel = term.getSelection();
-          if (sel) navigator.clipboard.writeText(sel).catch(() => {});
-        });
-
-        // Forward keystrokes to SSH
-        term.onData((data) => {
-          if (sessionIdRef.current) {
-            sendInput(sessionIdRef.current, data).catch(console.error);
-          }
-        });
-
-        // Sync terminal size with PTY on resize
-        term.onResize(({ cols, rows }) => {
-          if (sessionIdRef.current) {
-            resizePty(sessionIdRef.current, cols, rows).catch(console.error);
-          }
-        });
-
-        // Initial size sync
-        await resizePty(sessionId, term.cols, term.rows);
-      } catch (err) {
-        const raw = String(err);
-        term.writeln(`\r\n\x1b[31m[Connection failed: ${raw}]\x1b[0m`);
-        setTabStatus(tab.id, "error");
-        useNotifStore.getState().add({
-          connName: connection.name,
-          connType: connection.type,
-          host: connection.host,
-          raw,
-        });
+        term.writeln("\x1b[2m[Session resumed]\x1b[0m");
+      } else {
+        term.writeln(
+          `\x1b[2mConnecting to \x1b[0m\x1b[33m${connection.username}@${connection.host}\x1b[0m\x1b[2m...\x1b[0m`
+        );
+        try {
+          sessionId = await connectSsh(connection.id);
+          sessionIdRef.current = sessionId;
+          setTabSessionId(tab.id, sessionId);
+          setTabStatus(tab.id, "connected");
+        } catch (err) {
+          const raw = String(err);
+          term.writeln(`\r\n\x1b[31m[Connection failed: ${raw}]\x1b[0m`);
+          setTabStatus(tab.id, "error");
+          useNotifStore.getState().add({
+            connName: connection.name,
+            connType: connection.type,
+            host: connection.host,
+            raw,
+          });
+          return;
+        }
       }
+
+      // Auto-open SFTP panel and connect (always reconnect SFTP — it's independent)
+      setShowSftp(true);
+      setTimeout(() => fitAddonRef.current?.fit(), 50);
+      sftpConnect(connection.id).then((sid) => {
+        setSftpSessionId(sid);
+        sftpSessionIdRef.current = sid;
+      }).catch(console.error);
+
+      // Stream SSH output into xterm
+      const unlistenData = await listen<string>(`ssh-data-${sessionId}`, (e) => {
+        term.write(e.payload);
+      });
+      cleanups.push(unlistenData);
+
+      // Handle SSH process exit — close SFTP and the tab
+      const unlistenClosed = await listen(`ssh-closed-${sessionId}`, () => {
+        term.writeln("\r\n\x1b[2m[Connection closed]\x1b[0m");
+        if (sftpSessionIdRef.current) {
+          sftpDisconnect(sftpSessionIdRef.current).catch(console.error);
+          sftpSessionIdRef.current = null;
+        }
+        setTimeout(() => closeTab(tab.id), 1500);
+      });
+      cleanups.push(unlistenClosed);
+
+      // Copy-on-select (like PuTTY): selecting text copies it automatically
+      term.onSelectionChange(() => {
+        const sel = term.getSelection();
+        if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+      });
+
+      // Forward keystrokes to SSH
+      term.onData((data) => {
+        if (sessionIdRef.current) {
+          sendInput(sessionIdRef.current, data).catch(console.error);
+        }
+      });
+
+      // Sync terminal size with PTY on resize
+      term.onResize(({ cols, rows }) => {
+        if (sessionIdRef.current) {
+          resizePty(sessionIdRef.current, cols, rows).catch(console.error);
+        }
+      });
+
+      // Initial size sync
+      await resizePty(sessionId, term.cols, term.rows);
     };
 
     init();
@@ -184,8 +195,14 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
       cleanups.forEach((fn) => fn());
       term.dispose();
       fitAddonRef.current = null;
-      if (sessionIdRef.current) {
-        disconnectSsh(sessionIdRef.current).catch(console.error);
+      const sid = sessionIdRef.current;
+      sessionIdRef.current = null;
+      if (sid) {
+        if (skipDisconnectSessions.has(sid)) {
+          skipDisconnectSessions.delete(sid);
+        } else {
+          disconnectSsh(sid).catch(console.error);
+        }
       }
     };
   }, [tab.id]); // eslint-disable-line react-hooks/exhaustive-deps

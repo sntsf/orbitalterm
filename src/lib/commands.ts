@@ -368,3 +368,11 @@ export async function getWindowLabel(): Promise<string> {
 export async function openDetachedWindow(connectionId: string, title: string): Promise<void> {
   return invoke("open_detached_window", { connectionId, title });
 }
+
+export async function storeDetachedSession(label: string, sessionId: string): Promise<void> {
+  return invoke("store_detached_session", { label, sessionId });
+}
+
+export async function popDetachedSession(label: string): Promise<string | null> {
+  return invoke("pop_detached_session", { label });
+}

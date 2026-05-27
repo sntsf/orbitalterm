@@ -2,7 +2,8 @@ import { useRef, useState } from "react";
 import { X, RefreshCw, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
-import { openDetachedWindow } from "../../lib/commands";
+import { openDetachedWindow, storeDetachedSession } from "../../lib/commands";
+import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import type { Tab } from "../../types";
 
 type MenuState = { tabId: string; x: number; y: number } | null;
@@ -20,11 +21,16 @@ export function TabBar() {
 
   async function tearOut(tab: Tab) {
     try {
+      const label = `detached-${tab.connection_id}`;
+      if (tab.session_id) {
+        skipDisconnectSessions.add(tab.session_id);
+        await storeDetachedSession(label, tab.session_id);
+      }
       await openDetachedWindow(tab.connection_id, tab.connection_name);
       closeTab(tab.id);
     } catch (err) {
+      if (tab.session_id) skipDisconnectSessions.delete(tab.session_id);
       console.error("tearOut error:", err);
-      // Tab stays open if window creation failed
     }
   }
 
@@ -160,7 +166,13 @@ export function DetachedTabBar({ tab }: { tab: Tab | undefined }) {
   const handleDockBack = async () => {
     if (!tab) return;
     const { emitTo } = await import("@tauri-apps/api/event");
-    await emitTo("main", "orbital:dock-back", { connectionId: tab.connection_id });
+    if (tab.session_id) {
+      skipDisconnectSessions.add(tab.session_id);
+    }
+    await emitTo("main", "orbital:dock-back", {
+      connectionId: tab.connection_id,
+      sessionId: tab.session_id ?? null,
+    });
     const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
     getCurrentWebviewWindow().close();
   };

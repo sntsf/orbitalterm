@@ -27,7 +27,36 @@ use commands::sftp::{
     sftp_mkdir, sftp_rename, sftp_upload,
 };
 use commands::vnc::{vnc_connect, vnc_disconnect, vnc_key_event, vnc_pointer_event};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use tauri::Manager;
+
+// ── Detached session store ────────────────────────────────────────────────────
+// Transfers a live session_id from the main window to a detached window
+// (tear-out) or vice-versa (dock-back), so the backend session survives.
+
+type DetachedSessionStore = Mutex<HashMap<String, String>>;
+
+fn new_detached_session_store() -> DetachedSessionStore {
+    Mutex::new(HashMap::new())
+}
+
+#[tauri::command]
+fn store_detached_session(
+    state: tauri::State<DetachedSessionStore>,
+    label: String,
+    session_id: String,
+) {
+    state.lock().unwrap().insert(label, session_id);
+}
+
+#[tauri::command]
+fn pop_detached_session(
+    state: tauri::State<DetachedSessionStore>,
+    label: String,
+) -> Option<String> {
+    state.lock().unwrap().remove(&label)
+}
 
 // ── Window helpers ────────────────────────────────────────────────────────────
 
@@ -64,6 +93,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(new_detached_session_store())
         .manage(ssh::new_ssh_sessions())
         .manage(rdp::new_rdp_sessions())
         .manage(rdp::new_embedded_rdp_sessions())
@@ -158,6 +188,8 @@ pub fn run() {
             // Window management
             get_window_label,
             open_detached_window,
+            store_detached_session,
+            pop_detached_session,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

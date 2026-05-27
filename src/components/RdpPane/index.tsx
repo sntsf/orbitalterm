@@ -12,6 +12,7 @@ import {
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import { useNotifStore } from "../../store/useNotifStore";
+import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import type { Tab } from "../../types";
 
 function parseMissingClient(msg: string): { pkg: string; rest: string } | null {
@@ -282,13 +283,28 @@ export function RdpPane({ tab }: RdpPaneProps) {
   };
 
   useEffect(() => {
-    connect();
+    if (tab.session_id) {
+      // Resume a transferred session — skip connect, show canvas immediately
+      sessionIdRef.current = tab.session_id;
+      setTabSessionId(tab.id, tab.session_id);
+      setEmbedded(true);
+      setStatus("connected");
+      setTabStatus(tab.id, "connected");
+      // Force a full repaint so the canvas shows the current desktop
+      rdpRefreshSession(tab.session_id).catch(() => {});
+    } else {
+      connect();
+    }
     return () => {
-      // Bump generation so any pending connect() discards its result.
       connectGenRef.current++;
-      if (sessionIdRef.current) {
-        disconnectRdp(sessionIdRef.current).catch(console.error);
-        sessionIdRef.current = null;
+      const sid = sessionIdRef.current;
+      sessionIdRef.current = null;
+      if (sid) {
+        if (skipDisconnectSessions.has(sid)) {
+          skipDisconnectSessions.delete(sid);
+        } else {
+          disconnectRdp(sid).catch(console.error);
+        }
       }
     };
   }, [tab.id]); // eslint-disable-line react-hooks/exhaustive-deps

@@ -13,6 +13,7 @@ import { useAppStore } from "./store/useAppStore";
 import { useNotifStore } from "./store/useNotifStore";
 import {
   ftpConnect, ftpDisconnect, getConnections, getFolders, getGroups, getWindowLabel,
+  popDetachedSession,
 } from "./lib/commands";
 import type { Tab } from "./types";
 
@@ -79,8 +80,8 @@ const SessionPane = memo(function SessionPane({ tab }: { tab: Tab }) {
 
 // ── Detached (torn-out) window layout ─────────────────────────────────────────
 
-function DetachedApp({ connectionId }: { connectionId: string }) {
-  const { connections, tabs, activeTabId, openTab, setConnections, setFolders, setGroups } = useAppStore();
+function DetachedApp({ connectionId, windowLabel }: { connectionId: string; windowLabel: string }) {
+  const { connections, tabs, activeTabId, openTab, openTabConnected, setConnections, setFolders, setGroups } = useAppStore();
 
   // Load data (Sidebar not rendered in detached mode, so load here)
   useEffect(() => {
@@ -93,11 +94,20 @@ function DetachedApp({ connectionId }: { connectionId: string }) {
       .catch(console.error);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-open the target connection once loaded
+  // Auto-open the target connection once loaded, resuming existing session if available
   useEffect(() => {
     if (connections.length === 0) return;
     const conn = connections.find((c) => c.id === connectionId);
-    if (conn) openTab(conn);
+    if (!conn) return;
+    popDetachedSession(windowLabel)
+      .then((sessionId) => {
+        if (sessionId) {
+          openTabConnected(conn, sessionId);
+        } else {
+          openTab(conn);
+        }
+      })
+      .catch(() => openTab(conn));
   }, [connections, connectionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -124,16 +134,21 @@ function DetachedApp({ connectionId }: { connectionId: string }) {
 // ── Normal (main window) layout ───────────────────────────────────────────────
 
 function MainApp() {
-  const { tabs, activeTabId, sidebarVisible, openTab, getConnectionById } = useAppStore();
+  const { tabs, activeTabId, sidebarVisible, openTab, openTabConnected, getConnectionById } = useAppStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
   // Listen for dock-back events from detached windows
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     import("@tauri-apps/api/event").then(({ listen }) => {
-      listen<{ connectionId: string }>("orbital:dock-back", (ev) => {
+      listen<{ connectionId: string; sessionId: string | null }>("orbital:dock-back", (ev) => {
         const conn = getConnectionById(ev.payload.connectionId);
-        if (conn) openTab(conn);
+        if (!conn) return;
+        if (ev.payload.sessionId) {
+          openTabConnected(conn, ev.payload.sessionId);
+        } else {
+          openTab(conn);
+        }
       }).then((fn) => { unlisten = fn; });
     });
     return () => { unlisten?.(); };
@@ -175,22 +190,16 @@ function MainApp() {
 export default function App() {
   // "checking" — waiting for Tauri to tell us our window label
   // "main"     — normal app window
-  // string     — connectionId for a detached session window
-  const [mode, setMode] = useState<"checking" | "main" | string>("checking");
+  // otherwise  — full label of a detached session window (e.g. "detached-<id>")
+  const [label, setLabel] = useState<"checking" | "main" | string>("checking");
 
   useEffect(() => {
     getWindowLabel()
-      .then((label) => {
-        if (label.startsWith("detached-")) {
-          setMode(label.slice("detached-".length)); // connectionId
-        } else {
-          setMode("main");
-        }
-      })
-      .catch(() => setMode("main"));
+      .then((l) => setLabel(l.startsWith("detached-") ? l : "main"))
+      .catch(() => setLabel("main"));
   }, []);
 
-  if (mode === "checking") return null;
-  if (mode === "main") return <MainApp />;
-  return <DetachedApp connectionId={mode} />;
+  if (label === "checking") return null;
+  if (label === "main") return <MainApp />;
+  return <DetachedApp connectionId={label.slice("detached-".length)} windowLabel={label} />;
 }
