@@ -13,7 +13,7 @@ import { useAppStore } from "./store/useAppStore";
 import { useNotifStore } from "./store/useNotifStore";
 import {
   ftpConnect, ftpDisconnect, getConnections, getFolders, getGroups, getWindowLabel,
-  notifyDropZone, popDetachedSession,
+  popDetachedSession,
 } from "./lib/commands";
 import type { Tab } from "./types";
 
@@ -109,40 +109,6 @@ function DetachedApp({ connectionId, windowLabel }: { connectionId: string; wind
       })
       .catch(() => openTab(conn));
   }, [connections, connectionId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Window-drag-to-dock: poll position every 300ms and show drop zone indicator
-  // when this window's top edge is near the main window's tab bar.
-  // (tauri://move only fires on Linux after the drag is released, so polling
-  // is more reliable for real-time feedback during a title-bar drag.)
-  useEffect(() => {
-    let inDockZone = false;
-
-    const check = async () => {
-      try {
-        const { WebviewWindow, getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-        const mainWin = new WebviewWindow("main");
-        const [myPos, mySize, mainPos, mainSize] = await Promise.all([
-          getCurrentWebviewWindow().outerPosition(),
-          getCurrentWebviewWindow().outerSize(),
-          mainWin.outerPosition(),
-          mainWin.outerSize(),
-        ]);
-        const horizOverlap = myPos.x < mainPos.x + mainSize.width && myPos.x + mySize.width > mainPos.x;
-        const nearTop = myPos.y >= mainPos.y - 120 && myPos.y <= mainPos.y + 120;
-        const nowInZone = horizOverlap && nearTop;
-        if (nowInZone !== inDockZone) {
-          inDockZone = nowInZone;
-          notifyDropZone(nowInZone, nowInZone ? connectionId : undefined).catch(() => {});
-        }
-      } catch { /* window might be closing */ }
-    };
-
-    const interval = setInterval(check, 300);
-    return () => {
-      clearInterval(interval);
-      if (inDockZone) notifyDropZone(false).catch(() => {});
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
 

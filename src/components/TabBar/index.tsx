@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { X, RefreshCw, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
-import { dockBack, notifyDropZone, openDetachedWindow, storeDetachedSession } from "../../lib/commands";
+import { dockBack, openDetachedWindow, storeDetachedSession } from "../../lib/commands";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import type { Tab } from "../../types";
 
@@ -13,21 +13,9 @@ export function TabBar() {
   const [menu, setMenu] = useState<MenuState>(null);
   const [dragSrcId, setDragSrcId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
-  const [dropZoneActive, setDropZoneActive] = useState(false);
   const barRef = useRef<HTMLDivElement>(null);
 
-  // Listen for drag-over notifications from detached windows
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    import("@tauri-apps/api/event").then(({ listen }) => {
-      listen<{ active: boolean }>("orbital:drop-zone", (ev) => {
-        setDropZoneActive(ev.payload.active);
-      }).then((fn) => { unlisten = fn; });
-    });
-    return () => { unlisten?.(); };
-  }, []);
-
-  if (tabs.length === 0 && !dropZoneActive) return null;
+  if (tabs.length === 0) return null;
 
   const closeMenu = () => setMenu(null);
 
@@ -54,12 +42,6 @@ export function TabBar() {
         onClick={closeMenu}
         onDragOver={(e) => e.preventDefault()}
       >
-        {dropZoneActive && (
-          <div className="flex items-center gap-2 px-4 py-2 text-xs text-[var(--color-accent)] border-r border-[var(--color-border)] border-t-2 border-t-[var(--color-accent)] bg-[var(--color-bg-base)] animate-pulse shrink-0">
-            <PanelLeftClose size={13} />
-            Soltar para acoplar
-          </div>
-        )}
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
           const isDragging = tab.id === dragSrcId;
@@ -190,11 +172,9 @@ export function DetachedTabBar({ tab }: { tab: Tab | undefined }) {
 
   const onTabDragStart = (e: React.DragEvent) => {
     e.dataTransfer.effectAllowed = "move";
-    if (tab) notifyDropZone(true, tab.connection_id).catch(() => {});
   };
 
   const onTabDragEnd = async (e: React.DragEvent) => {
-    notifyDropZone(false).catch(() => {});
     if (!tab) return;
 
     const { screenX, screenY } = e;
