@@ -8,26 +8,26 @@ import type { Tab } from "../../types";
 
 type MenuState = { tabId: string; x: number; y: number } | null;
 
+const TEAR_THRESHOLD = 60; // px below bar bottom to trigger tear-out
+
 export function TabBar() {
   const { tabs, activeTabId, setActiveTab, closeTab, reconnectTab, reorderTabs } = useAppStore();
   const [menu, setMenu] = useState<MenuState>(null);
   const [dragSrcId, setDragSrcId] = useState<string | null>(null);
-  // dropBefore is kept in a ref (for the drop action) AND in state (for the visual indicator).
-  // Using only state would cause a stale-closure bug: onDrop captures the value
-  // from the render before the last onDragOver fired, so the insert position
-  // would be off-by-one or null.
-  const dropBeforeRef = useRef<string | null>(null);
   const [dropBefore, setDropBefore] = useState<string | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
+
+  // Drag state tracked in refs to avoid stale closures in pointermove/pointerup
+  const dragRef = useRef<{
+    tabId: string;
+    tab: Tab;
+    moved: boolean;
+    insertBefore: string | null; // "__end__" or tab id or null
+  } | null>(null);
 
   if (tabs.length === 0) return null;
 
   const closeMenu = () => setMenu(null);
-
-  const setDrop = (val: string | null) => {
-    dropBeforeRef.current = val;
-    setDropBefore(val);
-  };
 
   async function tearOut(tab: Tab) {
     try {
@@ -44,73 +44,122 @@ export function TabBar() {
     }
   }
 
+  function calcInsertBefore(clientX: number): string | null {
+    const bar = barRef.current;
+    if (!bar) return null;
+    const tabEls = Array.from(bar.querySelectorAll<HTMLElement>("[data-tab-id]"));
+    for (const el of tabEls) {
+      const rect = el.getBoundingClientRect();
+      const mid = rect.left + rect.width / 2;
+      if (clientX < mid) return el.dataset.tabId ?? null;
+    }
+    return "__end__";
+  }
+
+  function onPointerDown(e: React.PointerEvent, tab: Tab) {
+    // Only left button; don't interfere with right-click context menu
+    if (e.button !== 0) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+
+    dragRef.current = { tabId: tab.id, tab, moved: false, insertBefore: null };
+
+    function onMove(ev: PointerEvent) {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!dragRef.current) return;
+
+      if (!dragRef.current.moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+
+      if (!dragRef.current.moved) {
+        dragRef.current.moved = true;
+        setDragSrcId(tab.id);
+      }
+
+      const insert = calcInsertBefore(ev.clientX);
+      dragRef.current.insertBefore = insert;
+
+      // Determine visual dropBefore (skip self)
+      const { tabs: curTabs } = useAppStore.getState();
+      const srcIdx = curTabs.findIndex((t) => t.id === tab.id);
+      let visual: string | null = insert;
+      if (insert === tab.id) {
+        // cursor is left of self — show indicator before self (no-op visually)
+        visual = null;
+      } else if (insert === "__end__") {
+        // past last tab
+        const last = curTabs[curTabs.length - 1];
+        visual = last && last.id !== tab.id ? "__end__" : null;
+      } else if (insert !== null) {
+        // insert before `insert`; suppress if insert is immediately after src
+        const insertIdx = curTabs.findIndex((t) => t.id === insert);
+        visual = insertIdx === srcIdx + 1 ? null : insert;
+      }
+      setDropBefore(visual);
+    }
+
+    function onUp(ev: PointerEvent) {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+
+      const state = dragRef.current;
+      dragRef.current = null;
+      setDragSrcId(null);
+      setDropBefore(null);
+
+      if (!state || !state.moved) return;
+
+      const bar = barRef.current;
+      const barRect = bar?.getBoundingClientRect();
+
+      if (barRect && ev.clientY > barRect.bottom + TEAR_THRESHOLD) {
+        tearOut(state.tab);
+        return;
+      }
+
+      const insertBefore = state.insertBefore;
+      if (insertBefore !== null && insertBefore !== state.tabId) {
+        reorderTabs(state.tabId, insertBefore === "__end__" ? null : insertBefore);
+      }
+    }
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
   return (
     <>
       <div
         ref={barRef}
         className="flex items-center bg-[var(--color-bg-surface)] border-b border-[var(--color-border)] overflow-x-auto shrink-0 select-none"
         onClick={closeMenu}
-        onDragOver={(e) => e.preventDefault()}
       >
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
           const isDragging = tab.id === dragSrcId;
           const iconKey = tab.icon || DEFAULT_CONN_ICON[tab.connection_type] || "server";
-          const showLeftBorder = dropBefore === tab.id && tab.id !== dragSrcId;
           const isLast = tabs[tabs.length - 1]?.id === tab.id;
+          const showLeftBorder = dropBefore === tab.id && tab.id !== dragSrcId;
           const showRightBorder = isLast && dropBefore === "__end__" && tab.id !== dragSrcId;
 
           return (
             <div
               key={tab.id}
-              draggable
-              onClick={() => setActiveTab(tab.id)}
+              data-tab-id={tab.id}
+              onPointerDown={(e) => onPointerDown(e, tab)}
+              onClick={() => {
+                // Suppress click if this was a drag
+                if (dragRef.current?.moved) return;
+                setActiveTab(tab.id);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setMenu({ tabId: tab.id, x: e.clientX, y: e.clientY });
               }}
-              onDragStart={(e) => {
-                setDragSrcId(tab.id);
-                e.dataTransfer.effectAllowed = "move";
-              }}
-              onDragOver={(e) => {
-                e.preventDefault();
-                if (tab.id === dragSrcId) return;
-                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                const mid = rect.left + rect.width / 2;
-                if (e.clientX < mid) {
-                  setDrop(tab.id);
-                } else {
-                  const idx = tabs.findIndex((t) => t.id === tab.id);
-                  const next = tabs[idx + 1];
-                  setDrop(next ? next.id : "__end__");
-                }
-              }}
-              onDragLeave={(e) => {
-                if (!barRef.current?.contains(e.relatedTarget as Node)) {
-                  setDrop(null);
-                }
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                const src = dragSrcId;
-                const before = dropBeforeRef.current;
-                setDragSrcId(null);
-                setDrop(null);
-                if (src && src !== tab.id && before !== null) {
-                  reorderTabs(src, before === "__end__" ? null : before);
-                }
-              }}
-              onDragEnd={(e) => {
-                const rect = barRef.current?.getBoundingClientRect();
-                if (rect && e.clientY > rect.bottom + 60) {
-                  tearOut(tab);
-                }
-                setDragSrcId(null);
-                setDrop(null);
-              }}
               className={[
-                "flex items-center gap-2 px-3 py-2 border-r border-[var(--color-border)] cursor-pointer shrink-0 group transition-colors min-w-0 max-w-48",
+                "flex items-center gap-2 px-3 py-2 border-r border-[var(--color-border)] cursor-pointer shrink-0 group transition-colors min-w-0 max-w-48 touch-none",
                 isDragging ? "opacity-40" : "",
                 showLeftBorder ? "border-l-2 border-l-[var(--color-accent)]" : "",
                 showRightBorder ? "border-r-2 border-r-[var(--color-accent)]" : "",
@@ -123,6 +172,7 @@ export function TabBar() {
               <span className="text-xs truncate flex-1">{tab.connection_name}</span>
               <StatusDot status={tab.status} />
               <button
+                onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
                 className="shrink-0 p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-danger)] transition-all"
               >
