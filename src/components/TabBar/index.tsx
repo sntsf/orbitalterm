@@ -12,13 +12,22 @@ export function TabBar() {
   const { tabs, activeTabId, setActiveTab, closeTab, reconnectTab, reorderTabs } = useAppStore();
   const [menu, setMenu] = useState<MenuState>(null);
   const [dragSrcId, setDragSrcId] = useState<string | null>(null);
-  // dropBefore: the tab id BEFORE which the dragged tab will be inserted
+  // dropBefore is kept in a ref (for the drop action) AND in state (for the visual indicator).
+  // Using only state would cause a stale-closure bug: onDrop captures the value
+  // from the render before the last onDragOver fired, so the insert position
+  // would be off-by-one or null.
+  const dropBeforeRef = useRef<string | null>(null);
   const [dropBefore, setDropBefore] = useState<string | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
 
   if (tabs.length === 0) return null;
 
   const closeMenu = () => setMenu(null);
+
+  const setDrop = (val: string | null) => {
+    dropBeforeRef.current = val;
+    setDropBefore(val);
+  };
 
   async function tearOut(tab: Tab) {
     try {
@@ -47,9 +56,7 @@ export function TabBar() {
           const isActive = tab.id === activeTabId;
           const isDragging = tab.id === dragSrcId;
           const iconKey = tab.icon || DEFAULT_CONN_ICON[tab.connection_type] || "server";
-          // Show insert-before indicator: left border on the target tab
           const showLeftBorder = dropBefore === tab.id && tab.id !== dragSrcId;
-          // Show insert-after indicator: right border on the last tab when dropping at end
           const isLast = tabs[tabs.length - 1]?.id === tab.id;
           const showRightBorder = isLast && dropBefore === "__end__" && tab.id !== dragSrcId;
 
@@ -69,32 +76,30 @@ export function TabBar() {
               onDragOver={(e) => {
                 e.preventDefault();
                 if (tab.id === dragSrcId) return;
-                // Determine insert-before or insert-after based on cursor X within the tab
                 const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                 const mid = rect.left + rect.width / 2;
                 if (e.clientX < mid) {
-                  setDropBefore(tab.id);
+                  setDrop(tab.id);
                 } else {
-                  // After this tab = before the next tab; if it's the last, mark as "__end__"
                   const idx = tabs.findIndex((t) => t.id === tab.id);
                   const next = tabs[idx + 1];
-                  setDropBefore(next ? next.id : "__end__");
+                  setDrop(next ? next.id : "__end__");
                 }
               }}
               onDragLeave={(e) => {
-                // Only clear if we're leaving the tab bar entirely
                 if (!barRef.current?.contains(e.relatedTarget as Node)) {
-                  setDropBefore(null);
+                  setDrop(null);
                 }
               }}
               onDrop={(e) => {
                 e.preventDefault();
-                if (dragSrcId && dragSrcId !== tab.id) {
-                  const insertBeforeId = dropBefore === "__end__" ? null : dropBefore;
-                  reorderTabs(dragSrcId, insertBeforeId);
-                }
+                const src = dragSrcId;
+                const before = dropBeforeRef.current;
                 setDragSrcId(null);
-                setDropBefore(null);
+                setDrop(null);
+                if (src && src !== tab.id && before !== null) {
+                  reorderTabs(src, before === "__end__" ? null : before);
+                }
               }}
               onDragEnd={(e) => {
                 const rect = barRef.current?.getBoundingClientRect();
@@ -102,7 +107,7 @@ export function TabBar() {
                   tearOut(tab);
                 }
                 setDragSrcId(null);
-                setDropBefore(null);
+                setDrop(null);
               }}
               className={[
                 "flex items-center gap-2 px-3 py-2 border-r border-[var(--color-border)] cursor-pointer shrink-0 group transition-colors min-w-0 max-w-48",
