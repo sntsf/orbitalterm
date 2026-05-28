@@ -12,7 +12,8 @@ export function TabBar() {
   const { tabs, activeTabId, setActiveTab, closeTab, reconnectTab, reorderTabs } = useAppStore();
   const [menu, setMenu] = useState<MenuState>(null);
   const [dragSrcId, setDragSrcId] = useState<string | null>(null);
-  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  // dropBefore: the tab id BEFORE which the dragged tab will be inserted
+  const [dropBefore, setDropBefore] = useState<string | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
 
   if (tabs.length === 0) return null;
@@ -45,8 +46,12 @@ export function TabBar() {
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
           const isDragging = tab.id === dragSrcId;
-          const isDropTarget = tab.id === dropTargetId && tab.id !== dragSrcId;
           const iconKey = tab.icon || DEFAULT_CONN_ICON[tab.connection_type] || "server";
+          // Show insert-before indicator: left border on the target tab
+          const showLeftBorder = dropBefore === tab.id && tab.id !== dragSrcId;
+          // Show insert-after indicator: right border on the last tab when dropping at end
+          const isLast = tabs[tabs.length - 1]?.id === tab.id;
+          const showRightBorder = isLast && dropBefore === "__end__" && tab.id !== dragSrcId;
 
           return (
             <div
@@ -59,36 +64,51 @@ export function TabBar() {
               }}
               onDragStart={(e) => {
                 setDragSrcId(tab.id);
-                // Don't set any dataTransfer data — the OS would create a file
-                // if the tab is dropped on the desktop. Track state in dragSrcId only.
                 e.dataTransfer.effectAllowed = "move";
               }}
               onDragOver={(e) => {
                 e.preventDefault();
-                if (tab.id !== dragSrcId) setDropTargetId(tab.id);
+                if (tab.id === dragSrcId) return;
+                // Determine insert-before or insert-after based on cursor X within the tab
+                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                const mid = rect.left + rect.width / 2;
+                if (e.clientX < mid) {
+                  setDropBefore(tab.id);
+                } else {
+                  // After this tab = before the next tab; if it's the last, mark as "__end__"
+                  const idx = tabs.findIndex((t) => t.id === tab.id);
+                  const next = tabs[idx + 1];
+                  setDropBefore(next ? next.id : "__end__");
+                }
               }}
-              onDragLeave={() => {
-                if (dropTargetId === tab.id) setDropTargetId(null);
+              onDragLeave={(e) => {
+                // Only clear if we're leaving the tab bar entirely
+                if (!barRef.current?.contains(e.relatedTarget as Node)) {
+                  setDropBefore(null);
+                }
               }}
               onDrop={(e) => {
                 e.preventDefault();
-                if (dragSrcId && dragSrcId !== tab.id) reorderTabs(dragSrcId, tab.id);
+                if (dragSrcId && dragSrcId !== tab.id) {
+                  const insertBeforeId = dropBefore === "__end__" ? null : dropBefore;
+                  reorderTabs(dragSrcId, insertBeforeId);
+                }
                 setDragSrcId(null);
-                setDropTargetId(null);
+                setDropBefore(null);
               }}
               onDragEnd={(e) => {
                 const rect = barRef.current?.getBoundingClientRect();
-                // If dropped well below the tab bar → tear out to new window
                 if (rect && e.clientY > rect.bottom + 60) {
                   tearOut(tab);
                 }
                 setDragSrcId(null);
-                setDropTargetId(null);
+                setDropBefore(null);
               }}
               className={[
                 "flex items-center gap-2 px-3 py-2 border-r border-[var(--color-border)] cursor-pointer shrink-0 group transition-colors min-w-0 max-w-48",
                 isDragging ? "opacity-40" : "",
-                isDropTarget ? "border-l-2 border-l-[var(--color-accent)]" : "",
+                showLeftBorder ? "border-l-2 border-l-[var(--color-accent)]" : "",
+                showRightBorder ? "border-r-2 border-r-[var(--color-accent)]" : "",
                 isActive
                   ? "bg-[var(--color-bg-base)] text-[var(--color-text-primary)] border-t-2 border-t-[var(--color-accent)]"
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)]",

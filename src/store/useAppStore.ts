@@ -31,7 +31,7 @@ interface AppStore {
   setActiveTab: (tabId: string) => void;
   setTabStatus: (tabId: string, status: ConnectionStatus) => void;
   setTabSessionId: (tabId: string, sessionId: string) => void;
-  reorderTabs: (fromId: string, toId: string) => void;
+  reorderTabs: (fromId: string, insertBeforeId: string | null) => void;
 
   toggleFolder: (folderId: string) => void;
   expandFolder: (folderId: string) => void;
@@ -145,14 +145,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
       ),
     })),
 
-  reorderTabs: (fromId, toId) =>
+  reorderTabs: (fromId, insertBeforeId) =>
     set((state) => {
       const arr = [...state.tabs];
       const from = arr.findIndex((t) => t.id === fromId);
-      const to = arr.findIndex((t) => t.id === toId);
-      if (from < 0 || to < 0) return {};
+      if (from < 0) return {};
       const [tab] = arr.splice(from, 1);
-      arr.splice(to, 0, tab);
+      if (insertBeforeId === null) {
+        arr.push(tab);
+      } else {
+        const to = arr.findIndex((t) => t.id === insertBeforeId);
+        if (to < 0) { arr.push(tab); } else { arr.splice(to, 0, tab); }
+      }
       return { tabs: arr };
     }),
 
