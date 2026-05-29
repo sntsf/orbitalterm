@@ -52,8 +52,11 @@ pub fn browser_open(
     let conn_id_for_close = connection_id.clone();
     win.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
-            let state = app_clone.state::<BrowserSessionMap>();
-            if let Some(s) = state.lock().unwrap().remove(&conn_id_for_close) {
+            let session = {
+                let state = app_clone.state::<BrowserSessionMap>();
+                state.lock().unwrap().remove(&conn_id_for_close)
+            };
+            if let Some(s) = session {
                 stop_proxy(s);
             }
         }
