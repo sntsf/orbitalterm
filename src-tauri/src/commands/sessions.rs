@@ -21,7 +21,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
     db.query_row(
         "SELECT id, name, type, host, port, username, auth_type, key_path,
                 folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
-                sort_order, group_id, icon
+                sort_order, group_id, icon, url, custom_hosts
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -44,6 +44,8 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 sort_order: row.get(15).unwrap_or(0),
                 group_id: row.get::<_, String>(16).unwrap_or_default(),
                 icon: row.get::<_, String>(17).unwrap_or_default(),
+                url: row.get::<_, String>(18).unwrap_or_default(),
+                custom_hosts: row.get::<_, String>(19).unwrap_or_default(),
             })
         },
     )

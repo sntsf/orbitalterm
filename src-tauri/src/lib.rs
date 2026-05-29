@@ -1,3 +1,4 @@
+mod browser;
 mod commands;
 mod db;
 mod ftp;
@@ -6,6 +7,7 @@ mod sftp;
 mod ssh;
 mod vnc;
 
+use commands::browser::{browser_close, browser_open};
 use commands::connections::{
     delete_connection, delete_folder, delete_group, export_connections, export_selected_to_file,
     export_to_file, get_connections, get_folders, get_groups, import_connections, import_from_file,
@@ -135,6 +137,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(new_detached_session_store())
+        .manage(browser::new_browser_sessions())
         .manage(ssh::new_ssh_sessions())
         .manage(rdp::new_rdp_sessions())
         .manage(rdp::new_embedded_rdp_sessions())
@@ -226,6 +229,9 @@ pub fn run() {
             vnc_key_event,
             vnc_pointer_event,
             vnc_disconnect,
+            // Browser
+            browser_open,
+            browser_close,
             // Window management
             get_window_label,
             open_detached_window,

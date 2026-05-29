@@ -1,4 +1,4 @@
-export type ConnectionType = "ssh" | "rdp" | "vnc" | "ftp" | "sftp";
+export type ConnectionType = "ssh" | "rdp" | "vnc" | "ftp" | "sftp" | "browser";
 export type AuthType = "agent" | "password" | "key";
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "error";
 
@@ -26,6 +26,8 @@ export interface Connection {
   sort_order: number;
   group_id: string;
   icon: string;
+  url: string;
+  custom_hosts: string;
 }
 
 export interface Folder {

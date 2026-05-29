@@ -359,6 +359,16 @@ export async function vncDisconnect(sessionId: string): Promise<void> {
   return invoke("vnc_disconnect", { sessionId });
 }
 
+// ── Browser ───────────────────────────────────────────────────────────────────
+
+export async function browserOpen(connectionId: string): Promise<void> {
+  return invoke("browser_open", { connectionId });
+}
+
+export async function browserClose(connectionId: string): Promise<void> {
+  return invoke("browser_close", { connectionId });
+}
+
 // ── Window management ─────────────────────────────────────────────────────────
 
 export async function getWindowLabel(): Promise<string> {

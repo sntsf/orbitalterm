@@ -19,6 +19,7 @@ const DEFAULT_PORTS: Record<ConnectionType, number> = {
   vnc: 5900,
   ftp: 21,
   sftp: 22,
+  browser: 443,
 };
 
 const AUTH_FOR_TYPE: Record<ConnectionType, AuthType[]> = {
@@ -27,9 +28,10 @@ const AUTH_FOR_TYPE: Record<ConnectionType, AuthType[]> = {
   rdp: ["password"],
   vnc: ["password"],
   ftp: ["password"],
+  browser: [],
 };
 
-type FieldKey = "type" | "name" | "desc" | "host" | "port" | "user" | "auth" | "key" | "password" | "domain" | "notes" | "icon";
+type FieldKey = "type" | "name" | "desc" | "host" | "port" | "user" | "auth" | "key" | "password" | "domain" | "notes" | "icon" | "url" | "customHosts";
 
 const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string }>> = {
   es: {
@@ -45,6 +47,8 @@ const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string 
     domain:   { title: "Dominio", body: "Dominio de Windows o Active Directory al que pertenece el usuario. En equipos locales suele ser el nombre del equipo o 'WORKGROUP'." },
     notes:    { title: "Notas", body: "Campo libre para anotaciones: comandos útiles, credenciales secundarias, historial de cambios o cualquier información relevante." },
     icon:     { title: "Icono", body: "Icono visual que identifica el tipo o rol de este servidor en la lista de conexiones. Se asigna automáticamente según el tipo de conexión." },
+    url:      { title: "URL", body: "Dirección web a la que se conectará el navegador integrado. Ejemplo: https://vcenter.empresa.local o 10.0.0.1. Si no incluye protocolo se usará https:// por defecto." },
+    customHosts: { title: "Hosts personalizados", body: "Entradas DNS locales para esta conexión, con el mismo formato que /etc/hosts. Se aplican solo cuando este navegador está abierto, sin modificar el sistema. Ejemplo:\n10.0.0.5 vcenter.empresa.local" },
   },
   en: {
     type:     { title: "Connection type", body: "Protocol used to connect to the remote server: SSH (Linux/Unix), RDP (Windows), VNC (remote desktop), FTP or SFTP (file transfer)." },
@@ -59,6 +63,8 @@ const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string 
     domain:   { title: "Domain", body: "Windows or Active Directory domain. On standalone machines this is usually the machine name or 'WORKGROUP'." },
     notes:    { title: "Notes", body: "Free-form field for notes: useful commands, secondary credentials, change history, or any relevant server info." },
     icon:     { title: "Icon", body: "Visual icon that identifies the role of this server in the connection list. Auto-assigned based on connection type." },
+    url:      { title: "URL", body: "The web address the embedded browser will open. Example: https://vcenter.company.local or 10.0.0.1. If no scheme is given, https:// is assumed." },
+    customHosts: { title: "Custom hosts", body: "Per-connection DNS overrides in /etc/hosts format. Applied only while this browser window is open — the system hosts file is never modified. Example:\n10.0.0.5 vcenter.company.local" },
   },
 };
 
@@ -99,6 +105,8 @@ export function PropertiesPanel() {
   const [notes, setNotes] = useState("");
   const [groupId, setGroupId] = useState("");
   const [icon, setIcon] = useState<string>("");
+  const [url, setUrl] = useState("");
+  const [customHosts, setCustomHosts] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [focusedField, setFocusedField] = useState<FieldKey | null>(null);
@@ -119,6 +127,8 @@ export function PropertiesPanel() {
       setGroupId(existing.group_id ?? "");
       setNotes(existing.notes);
       setIcon(existing.icon || DEFAULT_CONN_ICON[existing.type]);
+      setUrl(existing.url ?? "");
+      setCustomHosts(existing.custom_hosts ?? "");
       setPassword("");
       setError("");
       if (existing.auth_type === "password") {
@@ -145,6 +155,8 @@ export function PropertiesPanel() {
         : null;
       setGroupId(folderGroup ?? newConnectionGroupId ?? groups[0]?.id ?? "");
       setNotes("");
+      setUrl("");
+      setCustomHosts("");
       setHasSaved(false);
       setError("");
     }
@@ -166,8 +178,13 @@ export function PropertiesPanel() {
   const handleSave = async (e?: React.FormEvent) => {
     e?.preventDefault();
     setError("");
-    if (!name.trim() || !host.trim() || !username.trim()) {
-      setError(t("propRequired"));
+    const isBrowser = type === "browser";
+    if (!name.trim() || (!isBrowser && (!host.trim() || !username.trim()))) {
+      setError(isBrowser ? (lang === "es" ? "El nombre y la URL son obligatorios." : "Name and URL are required.") : t("propRequired"));
+      return;
+    }
+    if (isBrowser && !url.trim()) {
+      setError(lang === "es" ? "El nombre y la URL son obligatorios." : "Name and URL are required.");
       return;
     }
     setSaving(true);
@@ -187,6 +204,8 @@ export function PropertiesPanel() {
         notes,
         group_id: groupId,
         icon,
+        url: url.trim(),
+        custom_hosts: customHosts,
       };
 
       let savedId: string;
@@ -289,6 +308,7 @@ export function PropertiesPanel() {
             <option value="vnc">VNC</option>
             <option value="ftp">FTP</option>
             <option value="sftp">SFTP</option>
+            <option value="browser">{lang === "es" ? "Navegador" : "Browser"}</option>
           </select>
         </Row>
 
@@ -320,20 +340,22 @@ export function PropertiesPanel() {
             onFocus={focus("desc")} onBlur={blur} className={inp} />
         </Row>
 
-        <Row label={t("propHost")}>
-          <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.10"
-            onFocus={focus("host")} onBlur={blur} className={inp} />
-        </Row>
-
-        <Row label={t("propPort")}>
-          <input type="number" value={port} onChange={(e) => setPort(Number(e.target.value))}
-            onFocus={focus("port")} onBlur={blur} className={inp} />
-        </Row>
-
-        <Row label={t("propUser")}>
-          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="root"
-            onFocus={focus("user")} onBlur={blur} className={inp} />
-        </Row>
+        {type !== "browser" && (
+          <>
+            <Row label={t("propHost")}>
+              <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.10"
+                onFocus={focus("host")} onBlur={blur} className={inp} />
+            </Row>
+            <Row label={t("propPort")}>
+              <input type="number" value={port} onChange={(e) => setPort(Number(e.target.value))}
+                onFocus={focus("port")} onBlur={blur} className={inp} />
+            </Row>
+            <Row label={t("propUser")}>
+              <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="root"
+                onFocus={focus("user")} onBlur={blur} className={inp} />
+            </Row>
+          </>
+        )}
 
         {showAuthSection && (
           <Row label={t("propAuth")}>
@@ -382,10 +404,30 @@ export function PropertiesPanel() {
           </Row>
         )}
 
-        <Row label={t("propNotes")}>
-          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="…"
-            onFocus={focus("notes")} onBlur={blur} className={inp + " resize-none"} />
-        </Row>
+        {type === "browser" ? (
+          <>
+            <Row label={t("propUrl")}>
+              <input value={url} onChange={(e) => setUrl(e.target.value)}
+                placeholder="https://vcenter.empresa.local"
+                onFocus={focus("url")} onBlur={blur} className={inp} />
+            </Row>
+            <Row label={t("propCustomHosts")}>
+              <textarea
+                value={customHosts}
+                onChange={(e) => setCustomHosts(e.target.value)}
+                rows={5}
+                placeholder={"# Formato /etc/hosts\n10.0.0.10 vcenter.empresa.local\n10.0.0.11 esxi.empresa.local"}
+                onFocus={focus("customHosts")} onBlur={blur}
+                className={inp + " resize-none font-mono text-[11px]"}
+              />
+            </Row>
+          </>
+        ) : (
+          <Row label={t("propNotes")}>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="…"
+              onFocus={focus("notes")} onBlur={blur} className={inp + " resize-none"} />
+          </Row>
+        )}
 
         {error && <p className="text-[var(--color-danger)] text-[12px]">{error}</p>}
       </div>

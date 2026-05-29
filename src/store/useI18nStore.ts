@@ -79,6 +79,8 @@ const T = {
     propDomain: "Dominio",
     propNotes: "Notas",
     propSelectOrCreate: "Selecciona una conexión o haz clic en + para crear una",
+    propUrl: "URL",
+    propCustomHosts: "Hosts personalizados",
     // Welcome
     welcomeSubtitle: "Todas tus conexiones remotas en un mismo espacio de trabajo",
     welcomeNewSsh: "Nueva SSH",
@@ -166,6 +168,8 @@ const T = {
     propDomain: "Domain",
     propNotes: "Notes",
     propSelectOrCreate: "Select a connection or click + to create one",
+    propUrl: "URL",
+    propCustomHosts: "Custom hosts",
     welcomeSubtitle: "All your remote connections in one workspace",
     welcomeNewSsh: "New SSH",
     welcomeNewSshDesc: "Connect to a Linux / Unix server",

@@ -4,6 +4,7 @@ import { TabBar, DetachedTabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/Terminal";
 import { RdpPane } from "./components/RdpPane";
 import { VncPane } from "./components/VncPane";
+import { BrowserPane } from "./components/BrowserPane";
 import { FtpBrowser } from "./components/FtpBrowser";
 import { SftpDualPane } from "./components/SftpDualPane";
 import { Welcome } from "./components/Welcome";
@@ -75,6 +76,7 @@ const SessionPane = memo(function SessionPane({ tab }: { tab: Tab }) {
   if (tab.connection_type === "vnc") return <VncPane tab={tab} />;
   if (tab.connection_type === "sftp") return <SftpDualPane tab={tab} />;
   if (tab.connection_type === "ftp") return <FtpStandalonePane tab={tab} />;
+  if (tab.connection_type === "browser") return <BrowserPane tab={tab} />;
   return <RdpPane tab={tab} />;
 });
 

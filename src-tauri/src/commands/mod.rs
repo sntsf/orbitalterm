@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod connections;
 pub mod ftp;
 pub mod local_fs;

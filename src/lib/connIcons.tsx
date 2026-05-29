@@ -58,11 +58,12 @@ export const CONN_ICONS: Record<ConnIconKey, IconDef> = {
 };
 
 export const DEFAULT_CONN_ICON: Record<ConnectionType, ConnIconKey> = {
-  ssh:  "linux",
-  rdp:  "windows",
-  vnc:  "vnc",
-  ftp:  "ftp",
-  sftp: "sftp",
+  ssh:     "linux",
+  rdp:     "windows",
+  vnc:     "vnc",
+  ftp:     "ftp",
+  sftp:    "sftp",
+  browser: "browser",
 };
 
 export function getConnIcon(key: string): IconDef {

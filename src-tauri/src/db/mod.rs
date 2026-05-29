@@ -170,5 +170,17 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE schema_version SET version=3", [])?;
     }
 
+    if ver < 4 {
+        conn.execute(
+            "ALTER TABLE connections ADD COLUMN url TEXT NOT NULL DEFAULT ''",
+            [],
+        ).ok();
+        conn.execute(
+            "ALTER TABLE connections ADD COLUMN custom_hosts TEXT NOT NULL DEFAULT ''",
+            [],
+        ).ok();
+        conn.execute("UPDATE schema_version SET version=4", [])?;
+    }
+
     Ok(())
 }
