@@ -79,6 +79,7 @@ export function PropertiesPanel() {
     openTab,
   } = useAppStore();
 
+  const { sidebarHint } = useAppStore();
   const existing = connections.find((c) => c.id === selectedConnectionId);
 
   const [name, setName] = useState("");
@@ -219,8 +220,11 @@ export function PropertiesPanel() {
 
   if (!existing && !isCreatingNew) {
     return (
-      <div className="flex items-center justify-center h-full text-[var(--color-text-muted)] text-xs">
-        {t("propSelectOrCreate")}
+      <div className="flex flex-col h-full">
+        <div className="flex-1 flex items-center justify-center text-[var(--color-text-muted)] text-xs px-4 text-center">
+          {t("propSelectOrCreate")}
+        </div>
+        <HintBox hint={sidebarHint} lang={lang} />
       </div>
     );
   }
@@ -237,7 +241,7 @@ export function PropertiesPanel() {
   const showPasswordField = authType === "password";
   const showKeyField = authType === "key";
 
-  const hint = focusedField ? HINTS[lang][focusedField] : null;
+  const hint = focusedField ? HINTS[lang][focusedField] : sidebarHint;
   const focus = (f: FieldKey) => () => setFocusedField(f);
   const blur = () => setFocusedField(null);
 
@@ -387,27 +391,35 @@ export function PropertiesPanel() {
       </div>
 
       {/* Contextual hint */}
-      <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 min-h-[72px]">
-        {hint ? (
-          <div className="flex gap-2">
-            <Info size={13} className="text-[var(--color-accent)] shrink-0 mt-0.5" />
-            <div>
-              <p className="text-[12px] font-semibold text-[var(--color-text-primary)] leading-tight mb-0.5">
-                {hint.title}
-              </p>
-              <p className="text-[11px] text-[var(--color-text-muted)] leading-snug">{hint.body}</p>
-            </div>
-          </div>
-        ) : (
-          <div className="flex gap-2 items-start opacity-40">
-            <Info size={13} className="text-[var(--color-text-muted)] shrink-0 mt-0.5" />
-            <p className="text-[11px] text-[var(--color-text-muted)] leading-snug italic">
-              {lang === "es" ? "Haz clic en un campo para ver su descripción." : "Click any field to see its description."}
-            </p>
-          </div>
-        )}
-      </div>
+      <HintBox hint={hint} lang={lang} />
     </form>
+  );
+}
+
+function HintBox({ hint, lang }: { hint: { title: string; body: string } | null; lang: "es" | "en" }) {
+  return (
+    <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 min-h-[72px]">
+      {hint ? (
+        <div className="flex gap-2">
+          <Info size={13} className="text-[var(--color-accent)] shrink-0 mt-0.5" />
+          <div>
+            <p className="text-[12px] font-semibold text-[var(--color-text-primary)] leading-tight mb-0.5">
+              {hint.title}
+            </p>
+            <p className="text-[11px] text-[var(--color-text-muted)] leading-snug">{hint.body}</p>
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-2 items-start opacity-40">
+          <Info size={13} className="text-[var(--color-text-muted)] shrink-0 mt-0.5" />
+          <p className="text-[11px] text-[var(--color-text-muted)] leading-snug italic">
+            {lang === "es"
+              ? "Haz clic en un campo para ver su descripción."
+              : "Click any field to see its description."}
+          </p>
+        </div>
+      )}
+    </div>
   );
 }
 

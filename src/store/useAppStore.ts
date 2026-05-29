@@ -33,6 +33,9 @@ interface AppStore {
   setTabSessionId: (tabId: string, sessionId: string) => void;
   reorderTabs: (fromId: string, insertBeforeId: string | null) => void;
 
+  sidebarHint: { title: string; body: string } | null;
+  setSidebarHint: (h: { title: string; body: string } | null) => void;
+
   toggleFolder: (folderId: string) => void;
   expandFolder: (folderId: string) => void;
   getConnectionById: (id: string) => Connection | undefined;
@@ -50,6 +53,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   sidebarVisible: true,
   tabs: [],
   activeTabId: null,
+  sidebarHint: null,
+  setSidebarHint: (sidebarHint) => set({ sidebarHint }),
 
   setConnections: (connections) => set({ connections }),
   setFolders: (folders) => set({ folders }),

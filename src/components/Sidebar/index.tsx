@@ -5,6 +5,7 @@ import {
   ChevronRight, ChevronDown, Database, X,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
+import { useI18nStore } from "../../store/useI18nStore";
 import {
   getConnections, getFolders, deleteConnection, saveConnection,
   saveFolder, deleteFolder, getFolders as refetchFolders, reorderConnections,
@@ -15,6 +16,35 @@ import { PropertiesPanel } from "../PropertiesPanel";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
 import type { Connection, Folder as FolderType, Group } from "../../types";
 
+// ── Sidebar hint builders ──────────────────────────────────────────────────────
+
+function buildConnHint(conn: Connection, lang: "es" | "en") {
+  const type = conn.type.toUpperCase();
+  return lang === "es"
+    ? { title: `Conexión: ${conn.name}`, body: `Tipo ${type} · ${conn.host}:${conn.port} · Usuario: ${conn.username}` }
+    : { title: `Connection: ${conn.name}`, body: `Type ${type} · ${conn.host}:${conn.port} · User: ${conn.username}` };
+}
+
+function buildFolderHint(folder: FolderType, lang: "es" | "en", allConnections: Connection[]) {
+  const count = allConnections.filter((c) => c.folder_id === folder.id).length;
+  return lang === "es"
+    ? { title: `Carpeta: ${folder.name}`, body: `Contiene ${count} conexión${count !== 1 ? "es" : ""}. Haz doble clic en una conexión para abrirla.` }
+    : { title: `Folder: ${folder.name}`, body: `Contains ${count} connection${count !== 1 ? "s" : ""}. Double-click a connection to open it.` };
+}
+
+function buildGroupHint(group: Group, lang: "es" | "en", allConnections: Connection[]) {
+  const count = allConnections.filter((c) => c.group_id === group.id).length;
+  return lang === "es"
+    ? { title: `Fuente de datos: ${group.name}`, body: `${count} conexión${count !== 1 ? "es" : ""} en esta fuente. Haz clic derecho para ver opciones.` }
+    : { title: `Data source: ${group.name}`, body: `${count} connection${count !== 1 ? "s" : ""} in this source. Right-click for options.` };
+}
+
+function buildSearchHint(lang: "es" | "en") {
+  return lang === "es"
+    ? { title: "Buscador de conexiones", body: "Escribe para filtrar por nombre o dirección IP. Usa ↑↓ para navegar entre resultados y Enter para abrir." }
+    : { title: "Connection search", body: "Type to filter by name or IP address. Use ↑↓ to navigate results and Enter to open." };
+}
+
 // ── Sidebar ────────────────────────────────────────────────────────────────────
 
 export function Sidebar() {
@@ -23,7 +53,9 @@ export function Sidebar() {
     setConnections, setFolders, setGroups, setSearchQuery, searchQuery,
     selectConnection, selectedConnectionId,
     openTab, toggleFolder, expandFolder, startNewConnection,
+    setSidebarHint,
   } = useAppStore();
+  const { lang } = useI18nStore();
 
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
 
@@ -420,6 +452,8 @@ export function Sidebar() {
     onFolderContextMenu: folderMenu,
     selectedId: selectedConnectionId,
     onSelect: selectConnection,
+    onConnHint: (conn: Connection) => setSidebarHint(buildConnHint(conn, lang)),
+    onFolderHint: (folder: FolderType) => setSidebarHint(buildFolderHint(folder, lang, connections)),
     renamingFolderId,
     renameFolderName,
     onRenameChange: setRenameFolderName,
@@ -489,10 +523,12 @@ export function Sidebar() {
           <Search size={12} className="text-[var(--color-text-muted)] shrink-0" />
           <input
             type="text"
-            placeholder="Buscar por nombre o IP…"
+            placeholder={lang === "es" ? "Buscar por nombre o IP…" : "Search by name or IP…"}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={handleSearchKeyDown}
+            onFocus={() => setSidebarHint(buildSearchHint(lang))}
+            onBlur={() => setSidebarHint(null)}
             className="bg-transparent outline-none text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] w-full text-xs"
           />
           {searchQuery && (
@@ -504,11 +540,17 @@ export function Sidebar() {
         {searchQuery && (
           <div className="mt-1 text-[11px] text-[var(--color-text-muted)] flex items-center gap-1 px-0.5">
             {searchMatches.length === 0 ? (
-              <span className="text-[var(--color-danger)]">Sin resultados</span>
+              <span className="text-[var(--color-danger)]">
+                {lang === "es" ? "Sin resultados" : "No results"}
+              </span>
             ) : (
               <>
                 <span className="text-[var(--color-accent)]">{searchFocusIdx + 1}</span>
-                <span className="opacity-50">de {searchMatches.length} · ↑↓ navegar · Enter abrir</span>
+                <span className="opacity-50">
+                  {lang === "es"
+                    ? ` de ${searchMatches.length} · ↑↓ navegar · Enter abrir`
+                    : ` of ${searchMatches.length} · ↑↓ navigate · Enter open`}
+                </span>
               </>
             )}
           </div>
@@ -567,7 +609,7 @@ export function Sidebar() {
                 </div>
               ) : (
                 <button
-                  onClick={() => toggleGroupExpanded(group.id)}
+                  onClick={() => { toggleGroupExpanded(group.id); setSidebarHint(buildGroupHint(group, lang, connections)); }}
                   onContextMenu={(e) => groupMenu(e, group)}
                   onDragOver={(e) => { e.preventDefault(); setDropTarget(`group:${group.id}`); }}
                   onDragLeave={() => setDropTarget(null)}
@@ -643,6 +685,7 @@ export function Sidebar() {
                             onSelect={() => selectConnection(conn.id)}
                             onOpen={() => openTab(conn)}
                             onContextMenu={(e) => connMenu(e, conn)}
+                            onHint={() => setSidebarHint(buildConnHint(conn, lang))}
                             dragging={dragId === conn.id}
                             isDropTarget={dropTarget === conn.id}
                             onDragStart={() => setDragId(conn.id)}
@@ -725,6 +768,8 @@ interface SharedProps {
   onFolderContextMenu: (e: React.MouseEvent, f: FolderType) => void;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onConnHint: (conn: Connection) => void;
+  onFolderHint: (folder: FolderType) => void;
   renamingFolderId: string | null;
   renameFolderName: string;
   onRenameChange: (v: string) => void;
@@ -757,6 +802,7 @@ function FolderItem({
   const {
     allFolders, allConnections, openTab, toggleFolder,
     onConnContextMenu, onFolderContextMenu, selectedId, onSelect,
+    onConnHint, onFolderHint,
     renamingFolderId, renameFolderName, onRenameChange, onRenameConfirm, onRenameCancel, renameInputRef,
     creatingFolder, newFolderParentId, newFolderName,
     onSubfolderNameChange, onSubfolderConfirm, onSubfolderCancel, folderInputRef,
@@ -804,7 +850,7 @@ function FolderItem({
         </div>
       ) : (
         <button
-          onClick={() => toggleFolder(folder.id)}
+          onClick={() => { toggleFolder(folder.id); onFolderHint(folder); }}
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
           onDragOver={(e) => { e.preventDefault(); onDropTarget(`folder:${folder.id}`); }}
           onDragLeave={() => onDropTarget(null)}
@@ -871,6 +917,7 @@ function FolderItem({
                   onSelect={() => onSelect(conn.id)}
                   onOpen={() => openTab(conn)}
                   onContextMenu={(e) => onConnContextMenu(e, conn)}
+                  onHint={() => onConnHint(conn)}
                   dragging={dragId === conn.id}
                   isDropTarget={dropTarget === conn.id}
                   onDragStart={() => onDragStart(conn.id)}
@@ -901,6 +948,7 @@ const connTypeColors: Record<string, string> = {
 
 function ConnItem({
   conn, continuations, isLast, selected, onSelect, onOpen, onContextMenu,
+  onHint,
   dragging = false, isDropTarget = false,
   onDragStart, onDragEnd, onDragOver, onDrop,
   isSearchMatch = false, isSearchFocus = false,
@@ -912,6 +960,7 @@ function ConnItem({
   onSelect: () => void;
   onOpen: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
+  onHint?: () => void;
   dragging?: boolean;
   isDropTarget?: boolean;
   onDragStart?: () => void;
@@ -927,7 +976,7 @@ function ConnItem({
     <button
       draggable
       data-conn-id={conn.id}
-      onClick={onSelect}
+      onClick={() => { onSelect(); onHint?.(); }}
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
       onDragStart={(e) => {
