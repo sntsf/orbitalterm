@@ -17,6 +17,16 @@ use std::{
     time::Duration,
 };
 
+fn build_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
+}
+
 // ── Session map ───────────────────────────────────────────────────────────────
 
 pub struct BrowserSession {
@@ -42,6 +52,8 @@ pub struct TargetConfig {
     pub port: u16,
     /// custom_hosts overrides: hostname → IP
     pub hosts_map: HashMap<String, String>,
+    /// Shared HTTP client (one tokio runtime per session, not per request)
+    pub client: Arc<reqwest::blocking::Client>,
 }
 
 impl TargetConfig {
@@ -58,6 +70,32 @@ impl TargetConfig {
     /// Build a target URL for the given request path.
     pub fn target_url(&self, path: &str) -> String {
         format!("{}://{}:{}{}", self.scheme, self.host, self.port, path)
+    }
+
+    /// Build the Host header value, omitting the port for default ports.
+    pub fn host_header(&self) -> String {
+        let is_default = (self.scheme == "http" && self.port == 80)
+            || (self.scheme == "https" && self.port == 443);
+        if is_default {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+
+    pub fn new(
+        scheme: String,
+        host: String,
+        port: u16,
+        hosts_map: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            scheme,
+            host,
+            port,
+            hosts_map,
+            client: Arc::new(build_client()),
+        }
     }
 }
 
@@ -152,14 +190,7 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>, proxy_port: 
     // Build target URL
     let target_url = config.target_url(&path);
 
-    // Make the upstream request with reqwest::blocking
-    let client = reqwest::blocking::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .build()
-        .unwrap_or_default();
+    let client = &config.client;
 
     let mut rb = match method.as_str() {
         "POST" => client.post(&target_url),
@@ -177,7 +208,7 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>, proxy_port: 
         }
         rb = rb.header(k.as_str(), v.as_str());
     }
-    rb = rb.header("Host", format!("{}:{}", config.host, config.port));
+    rb = rb.header("Host", config.host_header());
 
     if !body.is_empty() {
         rb = rb.body(body);

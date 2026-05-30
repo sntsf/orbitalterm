@@ -42,7 +42,7 @@ pub fn browser_open(
     let (scheme, host, port) = parse_target(&conn.url)?;
     let hosts_map = parse_hosts(&conn.custom_hosts);
 
-    let config = Arc::new(TargetConfig { scheme, host, port, hosts_map });
+    let config = Arc::new(TargetConfig::new(scheme, host, port, hosts_map));
     let session = start_reverse_proxy(config)?;
     let proxy_port = session.proxy_port;
     sessions.lock().unwrap().insert(connection_id, session);
