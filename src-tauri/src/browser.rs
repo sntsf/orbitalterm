@@ -198,10 +198,22 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>, proxy_port: 
     };
 
     let status = resp.status().as_u16();
+    let reason = resp.status().canonical_reason().unwrap_or("OK");
     let mut out_headers: Vec<(String, String)> = Vec::new();
 
     for (name, value) in resp.headers() {
         let n = name.as_str();
+        // Strip hop-by-hop headers (we set our own Content-Length)
+        if n.eq_ignore_ascii_case("transfer-encoding")
+            || n.eq_ignore_ascii_case("content-length")
+            || n.eq_ignore_ascii_case("connection")
+            || n.eq_ignore_ascii_case("keep-alive")
+            || n.eq_ignore_ascii_case("te")
+            || n.eq_ignore_ascii_case("trailers")
+            || n.eq_ignore_ascii_case("upgrade")
+        {
+            continue;
+        }
         // Strip headers that block iframe embedding
         if n.eq_ignore_ascii_case("x-frame-options")
             || n.eq_ignore_ascii_case("content-security-policy")
@@ -224,12 +236,12 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>, proxy_port: 
         }
     }
 
-    // Add CORS header so the page can make same-origin requests through the proxy
+    // Allow the iframe to load this response
     out_headers.push(("Access-Control-Allow-Origin".to_owned(), "*".to_owned()));
 
     let resp_body = resp.bytes().unwrap_or_default();
 
-    let mut header_block = format!("HTTP/1.1 {} \r\n", status);
+    let mut header_block = format!("HTTP/1.1 {} {}\r\n", status, reason);
     for (k, v) in &out_headers {
         header_block += &format!("{}: {}\r\n", k, v);
     }
