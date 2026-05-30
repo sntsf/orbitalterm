@@ -166,7 +166,8 @@ export function PropertiesPanel() {
     setType(newType);
     setPort(DEFAULT_PORTS[newType]);
     const supportedAuth = AUTH_FOR_TYPE[newType];
-    if (!supportedAuth.includes(authType)) setAuthType(supportedAuth[0]);
+    if (supportedAuth.length === 0) setAuthType("password");
+    else if (!supportedAuth.includes(authType)) setAuthType(supportedAuth[0]);
     // Auto-update icon if it still matches the old type's default
     setIcon((prev) => {
       const oldDefault = DEFAULT_CONN_ICON[type];
@@ -255,7 +256,7 @@ export function PropertiesPanel() {
   };
 
   const supportedAuthTypes = AUTH_FOR_TYPE[type];
-  const showAuthSection = supportedAuthTypes.length > 1 || supportedAuthTypes[0] !== "password";
+  const showAuthSection = supportedAuthTypes.length > 1 || (supportedAuthTypes.length === 1 && supportedAuthTypes[0] !== "password");
   const showDomain = type === "rdp";
   const showPasswordField = authType === "password";
   const showKeyField = authType === "key";
