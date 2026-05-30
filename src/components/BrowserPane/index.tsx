@@ -1,77 +1,61 @@
-import { useEffect, useRef, useState } from "react";
-import { AlertCircle, RefreshCw } from "lucide-react";
-import { browserOpen, browserSetBounds, browserClose } from "../../lib/commands";
+import { useRef, useState } from "react";
+import { AlertCircle, RotateCcw } from "lucide-react";
+import { useAppStore } from "../../store/useAppStore";
 import { useI18nStore } from "../../store/useI18nStore";
 import type { Tab } from "../../types";
 
 export function BrowserPane({ tab }: { tab: Tab }) {
   const { lang } = useI18nStore();
-  const containerRef = useRef<HTMLDivElement>(null);
-  const openedRef = useRef(false);
-  const [error, setError] = useState<string | null>(null);
+  const connection = useAppStore(s => s.getConnectionById(tab.connection_id));
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [errored, setErrored] = useState(false);
 
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const connId = tab.connection_id;
+  const rawUrl = connection?.url ?? "";
+  const url = rawUrl.includes("://") ? rawUrl : rawUrl ? `https://${rawUrl}` : "";
 
-    const sync = () => {
-      // Defer to next animation frame so layout is fully settled before reading bounds
-      requestAnimationFrame(() => {
-        const r = el.getBoundingClientRect();
-        const visible = r.width > 1 && r.height > 1;
-        console.debug('[BrowserPane] bounds', Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height), 'dpr', window.devicePixelRatio);
-        if (!openedRef.current) {
-          if (!visible) return;
-          browserOpen(connId, r.x, r.y, r.width, r.height)
-            .then(() => { openedRef.current = true; setError(null); })
-            .catch(e => setError(String(e)));
-        } else {
-          browserSetBounds(connId, r.x, r.y, r.width, r.height).catch(console.error);
-        }
-      });
-    };
-
-    const ro = new ResizeObserver(sync);
-    ro.observe(el);
-
-    return () => {
-      ro.disconnect();
-      if (openedRef.current) {
-        browserClose(connId).catch(console.error);
-        openedRef.current = false;
-      }
-    };
-  }, [tab.connection_id]);
-
-  const retry = () => {
-    openedRef.current = false;
-    setError(null);
-    const el = containerRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    browserOpen(tab.connection_id, r.x, r.y, r.width, r.height)
-      .then(() => { openedRef.current = true; })
-      .catch(e => setError(String(e)));
+  const reload = () => {
+    setErrored(false);
+    if (iframeRef.current) iframeRef.current.src = url;
   };
 
   const es = lang === "es";
 
+  if (!url) {
+    return (
+      <div className="flex items-center justify-center h-full text-[var(--color-text-muted)] text-sm">
+        {es ? "Sin URL configurada. Edita la conexión y agrega una URL." : "No URL configured. Edit the connection and add a URL."}
+      </div>
+    );
+  }
+
   return (
-    <div ref={containerRef} className="absolute inset-0">
-      {error && (
+    <div className="absolute inset-0 flex flex-col">
+      {errored && (
         <div className="flex flex-col items-center justify-center h-full gap-3 text-[var(--color-text-muted)]">
           <AlertCircle size={32} className="text-[var(--color-danger)]" />
-          <p className="text-sm max-w-xs text-center">{error}</p>
+          <p className="text-sm max-w-xs text-center">
+            {es
+              ? "El sitio no permite ser cargado aquí (X-Frame-Options). Prueba abrirlo en el navegador del sistema."
+              : "The site does not allow embedding (X-Frame-Options). Try opening it in the system browser."}
+          </p>
           <button
-            onClick={retry}
+            onClick={reload}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white text-sm font-medium transition-colors"
           >
-            <RefreshCw size={14} />
+            <RotateCcw size={14} />
             {es ? "Reintentar" : "Retry"}
           </button>
         </div>
       )}
+      <iframe
+        ref={iframeRef}
+        src={url}
+        className="flex-1 w-full border-none bg-white"
+        style={{ display: errored ? "none" : "block" }}
+        sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-top-navigation allow-modals allow-downloads"
+        onError={() => setErrored(true)}
+        title={tab.connection_name}
+      />
     </div>
   );
 }
