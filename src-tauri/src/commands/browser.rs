@@ -14,6 +14,17 @@ fn build_url(raw: &str) -> Result<tauri::Url, String> {
     s.parse().map_err(|e| format!("Invalid URL: {e}"))
 }
 
+/// Convert viewport-relative CSS pixel coords to logical screen coords.
+fn to_screen_logical(
+    main_win: &tauri::WebviewWindow,
+    vx: f64,
+    vy: f64,
+) -> Result<(f64, f64), String> {
+    let inner = main_win.inner_position().map_err(|e| e.to_string())?;
+    let scale = main_win.scale_factor().map_err(|e| e.to_string())?;
+    Ok((inner.x as f64 / scale + vx, inner.y as f64 / scale + vy))
+}
+
 #[tauri::command]
 pub fn browser_open(
     connection_id: String,
@@ -26,9 +37,14 @@ pub fn browser_open(
 ) -> Result<(), String> {
     let label = format!("browser-{}", connection_id);
 
+    let main_win = app
+        .get_webview_window("main")
+        .ok_or("main window not found")?;
+    let (sx, sy) = to_screen_logical(&main_win, x, y)?;
+
     // Already open: reposition and show.
     if let Some(win) = app.get_webview_window(&label) {
-        win.set_position(tauri::Position::Logical(LogicalPosition::new(x, y)))
+        win.set_position(tauri::Position::Logical(LogicalPosition::new(sx, sy)))
             .map_err(|e| e.to_string())?;
         win.set_size(tauri::Size::Logical(LogicalSize::new(width, height)))
             .map_err(|e| e.to_string())?;
@@ -54,7 +70,7 @@ pub fn browser_open(
         .decorations(false)
         .shadow(false)
         .skip_taskbar(true)
-        .position(x, y)
+        .position(sx, sy)
         .inner_size(width, height)
         .proxy_url(proxy_url)
         .build()
@@ -96,7 +112,11 @@ pub fn browser_set_position(
     if !visible {
         win.hide().map_err(|e| e.to_string())?;
     } else {
-        win.set_position(tauri::Position::Logical(LogicalPosition::new(x, y)))
+        let main_win = app
+            .get_webview_window("main")
+            .ok_or("main window not found")?;
+        let (sx, sy) = to_screen_logical(&main_win, x, y)?;
+        win.set_position(tauri::Position::Logical(LogicalPosition::new(sx, sy)))
             .map_err(|e| e.to_string())?;
         win.set_size(tauri::Size::Logical(LogicalSize::new(width, height)))
             .map_err(|e| e.to_string())?;

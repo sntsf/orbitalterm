@@ -5,19 +5,6 @@ import { browserOpen, browserSetPosition, browserClose } from "../../lib/command
 import { useI18nStore } from "../../store/useI18nStore";
 import type { Tab } from "../../types";
 
-// Convert a viewport-relative DOMRect to logical screen coordinates,
-// adding the main window's inner (client-area) screen position.
-async function toScreenBounds(r: DOMRect) {
-  const win = getCurrentWindow();
-  const [inner, scale] = await Promise.all([win.innerPosition(), win.scaleFactor()]);
-  return {
-    x: inner.x / scale + r.x,
-    y: inner.y / scale + r.y,
-    width: r.width,
-    height: r.height,
-  };
-}
-
 export function BrowserPane({ tab }: { tab: Tab }) {
   const { lang } = useI18nStore();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -29,30 +16,27 @@ export function BrowserPane({ tab }: { tab: Tab }) {
     if (!el) return;
     const connId = tab.connection_id;
 
-    const sync = async () => {
+    const sync = () => {
       const r = el.getBoundingClientRect();
       const visible = r.width > 1 && r.height > 1;
 
       if (!openedRef.current) {
         if (!visible) return;
-        try {
-          const b = await toScreenBounds(r);
-          await browserOpen(connId, b.x, b.y, b.width, b.height);
-          openedRef.current = true;
-          setError(null);
-        } catch (e) {
-          setError(String(e));
-        }
+        browserOpen(connId, r.x, r.y, r.width, r.height)
+          .then(() => {
+            openedRef.current = true;
+            setError(null);
+          })
+          .catch((e: unknown) => setError(String(e)));
       } else {
-        const b = await toScreenBounds(r);
-        browserSetPosition(connId, b.x, b.y, b.width, b.height, visible).catch(console.error);
+        browserSetPosition(connId, r.x, r.y, r.width, r.height, visible).catch(console.error);
       }
     };
 
     const ro = new ResizeObserver(() => { sync(); });
     ro.observe(el);
 
-    // Also reposition when the main window moves
+    // Also reposition when the main window moves.
     let unlisten: (() => void) | undefined;
     getCurrentWindow().onMoved(() => { sync(); }).then(fn => { unlisten = fn; });
 
