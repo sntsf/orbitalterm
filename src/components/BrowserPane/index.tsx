@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, ExternalLink, Loader } from "lucide-react";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { browserOpen, browserClose } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import { useI18nStore } from "../../store/useI18nStore";
@@ -16,7 +17,8 @@ function getInitialPath(url: string): string {
 
 export function BrowserPane({ tab }: { tab: Tab }) {
   const { lang } = useI18nStore();
-  const conn = useAppStore().getConnectionById(tab.connection_id);
+  const { getConnectionById, setTabStatus } = useAppStore();
+  const conn = getConnectionById(tab.connection_id);
   const [proxyPort, setProxyPort] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,20 +26,28 @@ export function BrowserPane({ tab }: { tab: Tab }) {
     let cancelled = false;
     setProxyPort(null);
     setError(null);
+    setTabStatus(tab.id, "connecting");
 
     browserOpen(tab.connection_id)
       .then((port) => {
-        if (!cancelled) setProxyPort(port);
+        if (!cancelled) {
+          setProxyPort(port);
+          setTabStatus(tab.id, "connected");
+        }
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(String(e));
+        if (!cancelled) {
+          setError(String(e));
+          setTabStatus(tab.id, "error");
+        }
       });
 
     return () => {
       cancelled = true;
+      setTabStatus(tab.id, "idle");
       browserClose(tab.connection_id).catch(console.error);
     };
-  }, [tab.connection_id]);
+  }, [tab.connection_id, tab.id]);
 
   const es = lang === "es";
   const url = conn?.url ?? "";
@@ -52,21 +62,23 @@ export function BrowserPane({ tab }: { tab: Tab }) {
         <p className="text-sm max-w-xs text-center">{error}</p>
         <div className="flex gap-2">
           <button
-            onClick={() => { setError(null); setProxyPort(null); }}
+            onClick={() => {
+              setError(null);
+              setProxyPort(null);
+              setTabStatus(tab.id, "connecting");
+            }}
             className="px-4 py-2 rounded-lg bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white text-sm font-medium transition-colors"
           >
             {es ? "Reintentar" : "Retry"}
           </button>
           {url && (
-            <a
-              href={url}
-              target="_blank"
-              rel="noreferrer"
+            <button
+              onClick={() => shellOpen(url).catch(console.error)}
               className="flex items-center gap-1 px-4 py-2 rounded-lg bg-[var(--color-bg-subtle)] hover:bg-[var(--color-bg-hover)] text-sm font-medium transition-colors"
             >
               <ExternalLink size={13} />
               {es ? "Abrir en navegador" : "Open in browser"}
-            </a>
+            </button>
           )}
         </div>
       </div>
@@ -83,11 +95,23 @@ export function BrowserPane({ tab }: { tab: Tab }) {
   }
 
   return (
-    <div className="absolute inset-0">
+    <div className="absolute inset-0 flex flex-col">
+      <div className="flex items-center gap-2 px-2 py-1 bg-[var(--color-bg-subtle)] border-b border-[var(--color-border)] shrink-0">
+        <span className="flex-1 text-xs text-[var(--color-text-muted)] truncate">{url}</span>
+        {url && (
+          <button
+            title={es ? "Abrir en navegador externo" : "Open in external browser"}
+            onClick={() => shellOpen(url).catch(console.error)}
+            className="shrink-0 p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+          >
+            <ExternalLink size={13} />
+          </button>
+        )}
+      </div>
       <iframe
         key={iframeSrc}
         src={iframeSrc}
-        className="w-full h-full"
+        className="flex-1 w-full"
         style={{ border: "none", display: "block" }}
         allow="fullscreen; autoplay; clipboard-read; clipboard-write"
         sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-modals allow-downloads"
