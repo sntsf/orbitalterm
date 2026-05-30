@@ -52,7 +52,6 @@ export function BrowserPane({ tab }: { tab: Tab }) {
         src={url}
         className="flex-1 w-full border-none bg-white"
         style={{ display: errored ? "none" : "block" }}
-        sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-top-navigation allow-modals allow-downloads"
         onError={() => setErrored(true)}
         title={tab.connection_name}
       />
