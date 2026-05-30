@@ -53,6 +53,7 @@ pub fn browser_open(
         .ok_or_else(|| "Main window not found".to_string())?;
 
     main_win
+        .window()
         .add_child(
             WebviewBuilder::new(&label, tauri::WebviewUrl::External(url))
                 .proxy_url(proxy_url),
