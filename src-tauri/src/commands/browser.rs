@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager};
 
 use crate::{
     browser::{start_proxy, stop_proxy, BrowserSessionMap},
@@ -8,25 +8,28 @@ use crate::{
 #[tauri::command]
 pub fn browser_open(
     connection_id: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
     app: AppHandle,
     sessions: tauri::State<BrowserSessionMap>,
 ) -> Result<(), String> {
-    let conn = load_connection(&connection_id)?;
-
-    // If a window is already open for this connection, just focus it
     let label = format!("browser-{}", connection_id);
-    if let Some(win) = app.get_webview_window(&label) {
-        win.set_focus().ok();
+
+    // If the child webview already exists (e.g. after a re-mount), just reposition it.
+    if let Some(wv) = app.get_webview(&label) {
+        wv.set_bounds(tauri::Rect {
+            position: tauri::Position::Logical(LogicalPosition::new(x, y)),
+            size: tauri::Size::Logical(LogicalSize::new(width, height)),
+        })
+        .map_err(|e| e.to_string())?;
+        wv.show().map_err(|e| e.to_string())?;
         return Ok(());
     }
 
-    // Start the custom-hosts proxy
-    let session = start_proxy(&conn.custom_hosts)?;
-    let proxy_port = session.proxy_port;
+    let conn = load_connection(&connection_id)?;
 
-    sessions.lock().unwrap().insert(connection_id.clone(), session);
-
-    // Build the URL (default to https:// if no scheme present)
     let raw_url = if conn.url.is_empty() {
         return Err("No URL configured for this browser connection.".into());
     } else {
@@ -38,31 +41,53 @@ pub fn browser_open(
         format!("https://{}", raw_url)
     };
     let url: tauri::Url = url_str.parse().map_err(|e| format!("Invalid URL: {e}"))?;
+
+    let session = start_proxy(&conn.custom_hosts)?;
+    let proxy_port = session.proxy_port;
+    sessions.lock().unwrap().insert(connection_id.clone(), session);
+
     let proxy_url: tauri::Url = format!("http://127.0.0.1:{}", proxy_port).parse().unwrap();
 
-    let win = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(url))
-        .title(&conn.name)
-        .proxy_url(proxy_url)
-        .inner_size(1280.0, 800.0)
-        .build()
+    let main_win = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window not found".to_string())?;
+
+    main_win
+        .add_child(
+            tauri::WebviewBuilder::new(&label, tauri::WebviewUrl::External(url))
+                .proxy_url(proxy_url),
+            LogicalPosition::new(x, y),
+            LogicalSize::new(width, height),
+        )
         .map_err(|e| e.to_string())?;
 
-    // Clean up proxy when the browser window is closed
-    let app_clone = app.clone();
-    let conn_id_for_close = connection_id.clone();
-    win.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed) {
-            let session = {
-                let state = app_clone.state::<BrowserSessionMap>();
-                let result = state.lock().unwrap().remove(&conn_id_for_close);
-                result
-            };
-            if let Some(s) = session {
-                stop_proxy(s);
-            }
-        }
-    });
+    Ok(())
+}
 
+#[tauri::command]
+pub fn browser_set_bounds(
+    connection_id: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    app: AppHandle,
+) -> Result<(), String> {
+    let label = format!("browser-{}", connection_id);
+    let Some(wv) = app.get_webview(&label) else {
+        return Ok(());
+    };
+
+    if width < 2.0 || height < 2.0 {
+        wv.hide().map_err(|e| e.to_string())?;
+    } else {
+        wv.set_bounds(tauri::Rect {
+            position: tauri::Position::Logical(LogicalPosition::new(x, y)),
+            size: tauri::Size::Logical(LogicalSize::new(width, height)),
+        })
+        .map_err(|e| e.to_string())?;
+        wv.show().map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -73,10 +98,14 @@ pub fn browser_close(
     sessions: tauri::State<BrowserSessionMap>,
 ) -> Result<(), String> {
     let label = format!("browser-{}", connection_id);
-    if let Some(win) = app.get_webview_window(&label) {
-        win.destroy().ok();
+    if let Some(wv) = app.get_webview(&label) {
+        wv.close().map_err(|e| e.to_string())?;
     }
-    if let Some(s) = sessions.lock().unwrap().remove(&connection_id) {
+    let session = {
+        let result = sessions.lock().unwrap().remove(&connection_id);
+        result
+    };
+    if let Some(s) = session {
         stop_proxy(s);
     }
     Ok(())

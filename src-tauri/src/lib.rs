@@ -7,7 +7,7 @@ mod sftp;
 mod ssh;
 mod vnc;
 
-use commands::browser::{browser_close, browser_open};
+use commands::browser::{browser_close, browser_open, browser_set_bounds};
 use commands::connections::{
     delete_connection, delete_folder, delete_group, export_connections, export_selected_to_file,
     export_to_file, get_connections, get_folders, get_groups, import_connections, import_from_file,
@@ -231,6 +231,7 @@ pub fn run() {
             vnc_disconnect,
             // Browser
             browser_open,
+            browser_set_bounds,
             browser_close,
             // Window management
             get_window_label,
