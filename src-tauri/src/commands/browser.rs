@@ -1,4 +1,4 @@
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewBuilder};
 
 use crate::{
     browser::{start_proxy, stop_proxy, BrowserSessionMap},
@@ -54,7 +54,7 @@ pub fn browser_open(
 
     main_win
         .add_child(
-            tauri::WebviewBuilder::new(&label, tauri::WebviewUrl::External(url))
+            WebviewBuilder::new(&label, tauri::WebviewUrl::External(url))
                 .proxy_url(proxy_url),
             LogicalPosition::new(x, y),
             LogicalSize::new(width, height),
