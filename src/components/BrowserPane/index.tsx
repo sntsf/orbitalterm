@@ -36,7 +36,7 @@ export function BrowserPane({ tab }: { tab: Tab }) {
     const ro = new ResizeObserver(() => { sync(); });
     ro.observe(el);
 
-    // Also reposition when the main window moves.
+    // Reposition the overlay whenever the main window moves.
     let unlisten: (() => void) | undefined;
     getCurrentWindow().onMoved(() => { sync(); }).then(fn => { unlisten = fn; });
 
