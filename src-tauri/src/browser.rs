@@ -1,10 +1,13 @@
-// Simple HTTP-CONNECT proxy used to apply per-connection custom hosts to the
-// embedded browser window.  Each browser session gets its own proxy on a
-// random loopback port so sessions are fully isolated.
+// HTTP reverse proxy for browser connections.
+// Each session starts a local TCP server on a random loopback port.
+// The iframe loads http://127.0.0.1:<port>/<path>, which the proxy
+// transparently forwards to the connection's target URL.
+// Response headers that block iframe embedding (X-Frame-Options, CSP
+// frame-ancestors) are stripped so the page renders correctly.
 
 use std::{
     collections::HashMap,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -27,13 +30,40 @@ pub fn new_browser_sessions() -> BrowserSessionMap {
     Mutex::new(HashMap::new())
 }
 
+// ── Target config ─────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct TargetConfig {
+    /// "http" or "https"
+    pub scheme: String,
+    /// Original hostname as it appears in the connection URL
+    pub host: String,
+    /// Target port
+    pub port: u16,
+    /// custom_hosts overrides: hostname → IP
+    pub hosts_map: HashMap<String, String>,
+}
+
+impl TargetConfig {
+    /// Resolve the actual TCP address to connect to (applying custom hosts).
+    pub fn resolved_addr(&self) -> String {
+        let resolved = self
+            .hosts_map
+            .get(&self.host)
+            .cloned()
+            .unwrap_or_else(|| self.host.clone());
+        format!("{}:{}", resolved, self.port)
+    }
+
+    /// Build a target URL for the given request path.
+    pub fn target_url(&self, path: &str) -> String {
+        format!("{}://{}:{}{}", self.scheme, self.host, self.port, path)
+    }
+}
+
 // ── Proxy lifecycle ───────────────────────────────────────────────────────────
 
-/// Start a CONNECT proxy for the given custom-hosts text.
-/// Returns the port the proxy is listening on.
-pub fn start_proxy(custom_hosts_text: &str) -> Result<BrowserSession, String> {
-    let hosts = Arc::new(parse_hosts(custom_hosts_text));
-
+pub fn start_reverse_proxy(config: Arc<TargetConfig>) -> Result<BrowserSession, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
@@ -47,13 +77,13 @@ pub fn start_proxy(custom_hosts_text: &str) -> Result<BrowserSession, String> {
                 break;
             }
             match listener.accept() {
-                Ok((client, _)) => {
-                    client.set_nonblocking(false).ok();
-                    let h = hosts.clone();
-                    thread::spawn(move || handle_connection(client, h));
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).ok();
+                    let cfg = config.clone();
+                    thread::spawn(move || handle_request(stream, cfg, port));
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(50));
+                    thread::sleep(Duration::from_millis(30));
                 }
                 Err(_) => break,
             }
@@ -65,194 +95,180 @@ pub fn start_proxy(custom_hosts_text: &str) -> Result<BrowserSession, String> {
 
 pub fn stop_proxy(session: BrowserSession) {
     session.stop.store(true, Ordering::Relaxed);
-    // Wake up the accept loop with a quick connection attempt
     let _ = TcpStream::connect(format!("127.0.0.1:{}", session.proxy_port));
 }
 
-// ── Connection handler ────────────────────────────────────────────────────────
+// ── Request handler ───────────────────────────────────────────────────────────
 
-fn handle_connection(mut client: TcpStream, hosts: Arc<HashMap<String, String>>) {
-    // Read the first line of the HTTP request
-    let mut first_line = String::new();
-    let mut one = [0u8; 1];
-    loop {
-        match client.read(&mut one) {
-            Ok(1) => {
-                first_line.push(one[0] as char);
-                if first_line.ends_with("\r\n") || first_line.ends_with('\n') {
-                    break;
-                }
-                if first_line.len() > 4096 {
-                    return;
-                }
-            }
-            _ => return,
-        }
+fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>, proxy_port: u16) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .ok();
+
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+
+    // Read request line
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
+        return;
     }
-
-    let parts: Vec<&str> = first_line.trim().splitn(3, ' ').collect();
+    let request_line = request_line.trim().to_owned();
+    let parts: Vec<&str> = request_line.splitn(3, ' ').collect();
     if parts.len() < 2 {
         return;
     }
+    let method = parts[0].to_uppercase();
+    let path = parts[1].to_owned();
 
-    if parts[0].eq_ignore_ascii_case("CONNECT") {
-        handle_connect(client, parts[1], &hosts);
-    } else {
-        // Plain HTTP – rare for admin consoles, but handle it
-        let remaining = drain_headers(&mut client);
-        handle_http(client, parts[0], parts[1], &first_line, &remaining, &hosts);
-    }
-}
-
-/// Read and discard remaining HTTP headers, returning them as a byte vec.
-fn drain_headers(client: &mut TcpStream) -> Vec<u8> {
-    let mut headers = Vec::new();
-    let mut one = [0u8; 1];
+    // Read and collect request headers
+    let mut req_headers: Vec<(String, String)> = Vec::new();
+    let mut content_length: usize = 0;
     loop {
-        match client.read(&mut one) {
-            Ok(1) => {
-                headers.push(one[0]);
-                // Check for \r\n\r\n or \n\n
-                let n = headers.len();
-                if (n >= 4 && &headers[n - 4..] == b"\r\n\r\n")
-                    || (n >= 2 && &headers[n - 2..] == b"\n\n")
-                {
-                    break;
-                }
-                if headers.len() > 32768 {
-                    break;
-                }
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = trimmed.split_once(':') {
+            let k = k.trim().to_owned();
+            let v = v.trim().to_owned();
+            if k.eq_ignore_ascii_case("content-length") {
+                content_length = v.parse().unwrap_or(0);
             }
-            _ => break,
+            req_headers.push((k, v));
         }
     }
-    headers
-}
 
-fn resolve(host: &str, hosts: &HashMap<String, String>) -> String {
-    hosts.get(host).cloned().unwrap_or_else(|| host.to_owned())
-}
-
-fn handle_connect(mut client: TcpStream, target: &str, hosts: &HashMap<String, String>) {
-    // target = "hostname:port"
-    let (hostname, port_str) = target.rfind(':').map_or((target, "443"), |i| {
-        (&target[..i], &target[i + 1..])
-    });
-    let port: u16 = port_str.parse().unwrap_or(443);
-    let ip = resolve(hostname, hosts);
-
-    // Drain remaining headers
-    drain_headers(&mut client);
-
-    match TcpStream::connect(format!("{ip}:{port}")) {
-        Ok(server) => {
-            let _ = client.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
-            relay(client, server);
-        }
-        Err(_) => {
-            let _ = client.write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n");
-        }
+    // Read request body if any
+    let mut body: Vec<u8> = Vec::new();
+    if content_length > 0 {
+        body.resize(content_length, 0);
+        reader.read_exact(&mut body).ok();
     }
-}
 
-fn handle_http(
-    mut client: TcpStream,
-    method: &str,
-    url: &str,
-    first_line: &str,
-    rest_headers: &[u8],
-    hosts: &HashMap<String, String>,
-) {
-    // Extract host from URL or Host header in rest_headers
-    let host_hdr = String::from_utf8_lossy(rest_headers);
-    let hostname = host_hdr
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("host:"))
-        .and_then(|l| l.splitn(2, ':').nth(1))
-        .map(|h| h.trim().split(':').next().unwrap_or("").to_owned())
+    // Build target URL
+    let target_url = config.target_url(&path);
+
+    // Make the upstream request with reqwest::blocking
+    let client = reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
         .unwrap_or_default();
 
-    let port: u16 = host_hdr
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("host:"))
-        .and_then(|l| l.splitn(2, ':').nth(1))
-        .and_then(|h| h.trim().splitn(2, ':').nth(1))
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(80);
+    let mut rb = match method.as_str() {
+        "POST" => client.post(&target_url),
+        "PUT" => client.put(&target_url),
+        "DELETE" => client.delete(&target_url),
+        "PATCH" => client.patch(&target_url),
+        "HEAD" => client.head(&target_url),
+        _ => client.get(&target_url),
+    };
 
-    if hostname.is_empty() {
-        let _ = client.write_all(b"HTTP/1.0 400 Bad Request\r\n\r\n");
-        return;
+    // Forward request headers (skip hop-by-hop and Host — we set our own)
+    for (k, v) in &req_headers {
+        if skip_request_header(k) {
+            continue;
+        }
+        rb = rb.header(k.as_str(), v.as_str());
+    }
+    rb = rb.header("Host", format!("{}:{}", config.host, config.port));
+
+    if !body.is_empty() {
+        rb = rb.body(body);
     }
 
-    let ip = resolve(&hostname, hosts);
-    match TcpStream::connect(format!("{ip}:{port}")) {
-        Ok(mut server) => {
-            // Re-send the request as-is (using HTTP/1.0 to avoid chunked encoding complexity)
-            let req = format!("{} {} HTTP/1.0\r\n", method, url);
-            let _ = server.write_all(req.as_bytes());
-            let _ = server.write_all(rest_headers);
+    let resp = match rb.send() {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!("Upstream error: {e}");
+            let _ = write!(
+                stream,
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                msg.len(),
+                msg
+            );
+            return;
+        }
+    };
 
-            let mut buf = [0u8; 8192];
-            loop {
-                match server.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if client.write_all(&buf[..n]).is_err() {
-                            break;
-                        }
-                    }
-                }
+    let status = resp.status().as_u16();
+    let mut out_headers: Vec<(String, String)> = Vec::new();
+
+    for (name, value) in resp.headers() {
+        let n = name.as_str();
+        // Strip headers that block iframe embedding
+        if n.eq_ignore_ascii_case("x-frame-options")
+            || n.eq_ignore_ascii_case("content-security-policy")
+            || n.eq_ignore_ascii_case("cross-origin-opener-policy")
+            || n.eq_ignore_ascii_case("cross-origin-embedder-policy")
+            || n.eq_ignore_ascii_case("cross-origin-resource-policy")
+        {
+            continue;
+        }
+        // Rewrite Location headers so redirects stay inside the proxy
+        if n.eq_ignore_ascii_case("location") {
+            if let Ok(loc) = value.to_str() {
+                let rewritten = rewrite_location(loc, &config, proxy_port);
+                out_headers.push(("Location".to_owned(), rewritten));
+                continue;
             }
         }
-        Err(_) => {
-            let _ = client.write_all(b"HTTP/1.0 503 Service Unavailable\r\n\r\n");
+        if let Ok(v) = value.to_str() {
+            out_headers.push((n.to_owned(), v.to_owned()));
         }
     }
-    let _ = first_line; // suppress unused warning
+
+    // Add CORS header so the page can make same-origin requests through the proxy
+    out_headers.push(("Access-Control-Allow-Origin".to_owned(), "*".to_owned()));
+
+    let resp_body = resp.bytes().unwrap_or_default();
+
+    let mut header_block = format!("HTTP/1.1 {} \r\n", status);
+    for (k, v) in &out_headers {
+        header_block += &format!("{}: {}\r\n", k, v);
+    }
+    header_block += &format!("Content-Length: {}\r\n\r\n", resp_body.len());
+
+    let _ = stream.write_all(header_block.as_bytes());
+    let _ = stream.write_all(&resp_body);
 }
 
-/// Bidirectional relay between two TCP streams.
-fn relay(client: TcpStream, server: TcpStream) {
-    let client2 = match client.try_clone() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let server2 = match server.try_clone() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    let mut c = client;
-    let mut s = server;
-    let mut c2 = client2;
-    let mut s2 = server2;
-
-    thread::spawn(move || {
-        let mut buf = [0u8; 65536];
-        loop {
-            match s2.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if c2.write_all(&buf[..n]).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    let mut buf = [0u8; 65536];
-    loop {
-        match c.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                if s.write_all(&buf[..n]).is_err() {
-                    break;
-                }
-            }
+/// Convert an upstream absolute Location URL to a proxy-relative URL.
+fn rewrite_location(loc: &str, config: &TargetConfig, proxy_port: u16) -> String {
+    // If it looks like an absolute URL pointing to the same host, strip origin
+    if let Ok(u) = reqwest::Url::parse(loc) {
+        let same_host = u.host_str().map_or(false, |h| h == config.host);
+        let same_port = u.port().unwrap_or(if u.scheme() == "https" { 443 } else { 80 })
+            == config.port;
+        if same_host && same_port {
+            let path_and_query = u.path().to_owned()
+                + u.query().map(|q| format!("?{q}")).unwrap_or_default().as_str();
+            return format!("http://127.0.0.1:{}{}", proxy_port, path_and_query);
         }
     }
+    loc.to_owned()
+}
+
+/// Returns true for hop-by-hop request headers we should not forward.
+fn skip_request_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailers"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }
 
 // ── Hosts file parser ─────────────────────────────────────────────────────────
@@ -260,7 +276,6 @@ fn relay(client: TcpStream, server: TcpStream) {
 pub fn parse_hosts(text: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for raw_line in text.lines() {
-        // Strip inline comments
         let line = if let Some(pos) = raw_line.find('#') {
             &raw_line[..pos]
         } else {

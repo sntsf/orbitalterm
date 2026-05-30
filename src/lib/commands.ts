@@ -361,12 +361,8 @@ export async function vncDisconnect(sessionId: string): Promise<void> {
 
 // ── Browser ───────────────────────────────────────────────────────────────────
 
-export async function browserOpen(connectionId: string, x: number, y: number, width: number, height: number): Promise<void> {
-  return invoke("browser_open", { connectionId, x, y, width, height });
-}
-
-export async function browserSetPosition(connectionId: string, x: number, y: number, width: number, height: number, visible: boolean): Promise<void> {
-  return invoke("browser_set_position", { connectionId, x, y, width, height, visible });
+export async function browserOpen(connectionId: string): Promise<number> {
+  return invoke("browser_open", { connectionId });
 }
 
 export async function browserClose(connectionId: string): Promise<void> {
