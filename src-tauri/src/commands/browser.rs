@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tauri::AppHandle;
 
 use crate::{
-    browser::{new_browser_sessions, parse_hosts, start_reverse_proxy, stop_proxy, BrowserSessionMap, TargetConfig},
+    browser::{new_browser_sessions, start_reverse_proxy, stop_proxy, BrowserSessionMap, TargetConfig},
     commands::sessions::load_connection,
 };
 
@@ -40,9 +40,7 @@ pub fn browser_open(
     }
 
     let (scheme, host, port) = parse_target(&conn.url)?;
-    let hosts_map = parse_hosts(&conn.custom_hosts);
-
-    let config = Arc::new(TargetConfig::new(scheme, host, port, hosts_map));
+    let config = Arc::new(TargetConfig::new(scheme, host, port));
     let session = start_reverse_proxy(config)?;
     let proxy_port = session.proxy_port;
     sessions.lock().unwrap().insert(connection_id, session);

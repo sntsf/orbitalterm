@@ -4,6 +4,8 @@
 // transparently forwards to the connection's target URL.
 // Response headers that block iframe embedding (X-Frame-Options, CSP
 // frame-ancestors) are stripped so the page renders correctly.
+// Redirects (including HTTP→HTTPS) are followed internally by reqwest so
+// the iframe never sees a Location pointing outside the proxy.
 
 use std::{
     collections::HashMap,
@@ -21,7 +23,7 @@ fn build_client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .danger_accept_invalid_certs(true)
         .danger_accept_invalid_hostnames(true)
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(Duration::from_secs(30))
         .build()
         .unwrap_or_default()
@@ -50,21 +52,18 @@ pub struct TargetConfig {
     pub host: String,
     /// Target port
     pub port: u16,
-    /// custom_hosts overrides: hostname → IP
-    pub hosts_map: HashMap<String, String>,
     /// Shared HTTP client (one tokio runtime per session, not per request)
     pub client: Arc<reqwest::blocking::Client>,
 }
 
 impl TargetConfig {
-    /// Resolve the actual TCP address to connect to (applying custom hosts).
-    pub fn resolved_addr(&self) -> String {
-        let resolved = self
-            .hosts_map
-            .get(&self.host)
-            .cloned()
-            .unwrap_or_else(|| self.host.clone());
-        format!("{}:{}", resolved, self.port)
+    pub fn new(scheme: String, host: String, port: u16) -> Self {
+        Self {
+            scheme,
+            host,
+            port,
+            client: Arc::new(build_client()),
+        }
     }
 
     /// Build a target URL for the given request path.
@@ -80,21 +79,6 @@ impl TargetConfig {
             self.host.clone()
         } else {
             format!("{}:{}", self.host, self.port)
-        }
-    }
-
-    pub fn new(
-        scheme: String,
-        host: String,
-        port: u16,
-        hosts_map: HashMap<String, String>,
-    ) -> Self {
-        Self {
-            scheme,
-            host,
-            port,
-            hosts_map,
-            client: Arc::new(build_client()),
         }
     }
 }
@@ -118,7 +102,7 @@ pub fn start_reverse_proxy(config: Arc<TargetConfig>) -> Result<BrowserSession, 
                 Ok((stream, _)) => {
                     stream.set_nonblocking(false).ok();
                     let cfg = config.clone();
-                    thread::spawn(move || handle_request(stream, cfg, port));
+                    thread::spawn(move || handle_request(stream, cfg));
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(30));
@@ -138,10 +122,8 @@ pub fn stop_proxy(session: BrowserSession) {
 
 // ── Request handler ───────────────────────────────────────────────────────────
 
-fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>, proxy_port: u16) {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .ok();
+fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>) {
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
 
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
 
@@ -187,9 +169,7 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>, proxy_port: 
         reader.read_exact(&mut body).ok();
     }
 
-    // Build target URL
     let target_url = config.target_url(&path);
-
     let client = &config.client;
 
     let mut rb = match method.as_str() {
@@ -234,7 +214,7 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>, proxy_port: 
 
     for (name, value) in resp.headers() {
         let n = name.as_str();
-        // Strip hop-by-hop headers (we set our own Content-Length)
+        // Strip hop-by-hop headers (we write our own Content-Length)
         if n.eq_ignore_ascii_case("transfer-encoding")
             || n.eq_ignore_ascii_case("content-length")
             || n.eq_ignore_ascii_case("connection")
@@ -253,14 +233,6 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>, proxy_port: 
             || n.eq_ignore_ascii_case("cross-origin-resource-policy")
         {
             continue;
-        }
-        // Rewrite Location headers so redirects stay inside the proxy
-        if n.eq_ignore_ascii_case("location") {
-            if let Ok(loc) = value.to_str() {
-                let rewritten = rewrite_location(loc, &config, proxy_port);
-                out_headers.push(("Location".to_owned(), rewritten));
-                continue;
-            }
         }
         if let Ok(v) = value.to_str() {
             out_headers.push((n.to_owned(), v.to_owned()));
@@ -282,22 +254,6 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>, proxy_port: 
     let _ = stream.write_all(&resp_body);
 }
 
-/// Convert an upstream absolute Location URL to a proxy-relative URL.
-fn rewrite_location(loc: &str, config: &TargetConfig, proxy_port: u16) -> String {
-    // If it looks like an absolute URL pointing to the same host, strip origin
-    if let Ok(u) = reqwest::Url::parse(loc) {
-        let same_host = u.host_str().map_or(false, |h| h == config.host);
-        let same_port = u.port().unwrap_or(if u.scheme() == "https" { 443 } else { 80 })
-            == config.port;
-        if same_host && same_port {
-            let path_and_query = u.path().to_owned()
-                + u.query().map(|q| format!("?{q}")).unwrap_or_default().as_str();
-            return format!("http://127.0.0.1:{}{}", proxy_port, path_and_query);
-        }
-    }
-    loc.to_owned()
-}
-
 /// Returns true for hop-by-hop request headers we should not forward.
 fn skip_request_header(name: &str) -> bool {
     matches!(
@@ -312,25 +268,4 @@ fn skip_request_header(name: &str) -> bool {
             | "transfer-encoding"
             | "upgrade"
     )
-}
-
-// ── Hosts file parser ─────────────────────────────────────────────────────────
-
-pub fn parse_hosts(text: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for raw_line in text.lines() {
-        let line = if let Some(pos) = raw_line.find('#') {
-            &raw_line[..pos]
-        } else {
-            raw_line
-        };
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let ip = parts[0];
-            for hostname in &parts[1..] {
-                map.insert((*hostname).to_owned(), ip.to_owned());
-            }
-        }
-    }
-    map
 }
