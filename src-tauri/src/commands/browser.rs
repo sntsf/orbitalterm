@@ -53,6 +53,7 @@ pub fn browser_open(
         .ok_or_else(|| "Main window not found".to_string())?;
 
     main_win
+        .as_ref()
         .window()
         .add_child(
             WebviewBuilder::new(&label, tauri::WebviewUrl::External(url))
