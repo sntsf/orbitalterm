@@ -16,16 +16,20 @@ export function BrowserPane({ tab }: { tab: Tab }) {
     const connId = tab.connection_id;
 
     const sync = () => {
-      const r = el.getBoundingClientRect();
-      const visible = r.width > 1 && r.height > 1;
-      if (!openedRef.current) {
-        if (!visible) return;
-        browserOpen(connId, r.x, r.y, r.width, r.height)
-          .then(() => { openedRef.current = true; setError(null); })
-          .catch(e => setError(String(e)));
-      } else {
-        browserSetBounds(connId, r.x, r.y, r.width, r.height).catch(console.error);
-      }
+      // Defer to next animation frame so layout is fully settled before reading bounds
+      requestAnimationFrame(() => {
+        const r = el.getBoundingClientRect();
+        const visible = r.width > 1 && r.height > 1;
+        console.debug('[BrowserPane] bounds', Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height), 'dpr', window.devicePixelRatio);
+        if (!openedRef.current) {
+          if (!visible) return;
+          browserOpen(connId, r.x, r.y, r.width, r.height)
+            .then(() => { openedRef.current = true; setError(null); })
+            .catch(e => setError(String(e)));
+        } else {
+          browserSetBounds(connId, r.x, r.y, r.width, r.height).catch(console.error);
+        }
+      });
     };
 
     const ro = new ResizeObserver(sync);
