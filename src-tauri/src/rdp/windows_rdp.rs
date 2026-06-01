@@ -1,22 +1,48 @@
 #![cfg(target_os = "windows")]
 
-//! Embedded RDP on Windows using Win32 window reparenting.
+//! Embedded RDP on Windows via COM in-process hosting of mstscax.dll.
 //!
-//! mstsc.exe is launched, its main HWND is located by PID and window class,
-//! then reparented as a child of the Tauri top-level window.  The window is
-//! stripped of chrome and positioned over the RDP canvas area reported by the
-//! frontend.  This gives a fully embedded experience identical to mRemoteNG.
+//! We load MsRdpClient10 (`mstscax.dll`) directly in-process using COM
+//! ActiveX, identical to how mRemoteNG embeds RDP.  No mstsc.exe is launched.
+//!
+//! Architecture:
+//!   - A dedicated STA COM thread owns the Win32 host window and all COM objects.
+//!   - The public API communicates with that thread via an `mpsc` channel.
+//!   - The STA thread runs a Win32 message loop; COM events are dispatched there.
 
-use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HWND, LPARAM};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use windows::Win32::Foundation::{BOOL, E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::System::Com::*;
+use windows::Win32::System::Ole::*;
+use windows::Win32::System::Variant::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::BOOL;
+use windows::core::{implement, w, BSTR, GUID, IUnknown, Interface, PCWSTR};
 
-// ── Session ───────────────────────────────────────────────────────────────────
+// ── CLSID ─────────────────────────────────────────────────────────────────────
+
+// MsRdpClient10 shipped in mstscax.dll
+const CLSID_MSTSC: GUID = GUID::from_values(
+    0xC0EFA91A,
+    0xEEB7,
+    0x41C7,
+    [0x97, 0xFA, 0xF0, 0xED, 0x64, 0x5E, 0xFB, 0x24],
+);
+
+// ── Command channel ───────────────────────────────────────────────────────────
+
+enum ComCmd {
+    Reposition { x: i32, y: i32, width: i32, height: i32 },
+    Show,
+    Hide,
+    Disconnect,
+}
+
+// ── Session (public handle) ───────────────────────────────────────────────────
 
 pub struct WindowsRdpSession {
-    pub child: std::process::Child,
-    pub mstsc_hwnd: isize,
+    tx: mpsc::SyncSender<ComCmd>,
 }
 
 unsafe impl Send for WindowsRdpSession {}
@@ -24,71 +50,446 @@ unsafe impl Sync for WindowsRdpSession {}
 
 impl Drop for WindowsRdpSession {
     fn drop(&mut self) {
+        let _ = self.tx.send(ComCmd::Disconnect);
+    }
+}
+
+// ── OLE site ──────────────────────────────────────────────────────────────────
+//
+// MsRdpClient10 calls back into IOleClientSite / IOleInPlaceSite during
+// in-place activation.  We implement the minimum set of methods required for
+// the control to render into our host window.
+
+#[implement(IOleClientSite, IOleInPlaceSite, IOleInPlaceFrame)]
+struct RdpSite {
+    hwnd: HWND,
+}
+
+impl IOleClientSite_Impl for RdpSite_Impl {
+    fn SaveObject(&self) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetMoniker(&self, _: u32, _: u32) -> windows::core::Result<IMoniker> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetContainer(&self) -> windows::core::Result<IOleContainer> {
+        Err(E_NOTIMPL.into())
+    }
+    fn ShowObject(&self) -> windows::core::Result<()> { Ok(()) }
+    fn OnShowWindow(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
+    fn RequestNewObjectLayout(&self) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+impl IOleWindow_Impl for RdpSite_Impl {
+    fn GetWindow(&self) -> windows::core::Result<HWND> {
+        Ok(self.hwnd)
+    }
+    fn ContextSensitiveHelp(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
+}
+
+impl IOleInPlaceSite_Impl for RdpSite_Impl {
+    fn CanInPlaceActivate(&self) -> windows::core::Result<()> { Ok(()) }
+    fn OnInPlaceActivate(&self) -> windows::core::Result<()> { Ok(()) }
+    fn OnUIActivate(&self) -> windows::core::Result<()> { Ok(()) }
+    fn GetWindowContext(
+        &self,
+        ppframe: *mut Option<IOleInPlaceFrame>,
+        ppdoc: *mut Option<IOleInPlaceUIWindow>,
+        lprcposrect: *mut RECT,
+        lprccliprect: *mut RECT,
+        lpframeinfo: *mut OLEINPLACEFRAMEINFO,
+    ) -> windows::core::Result<()> {
         unsafe {
-            let hwnd = HWND(self.mstsc_hwnd as *mut _);
-            let _ = ShowWindow(hwnd, SW_HIDE);
-            let _ = SetParent(hwnd, None);
+            // No frame or doc — the control renders standalone
+            if !ppframe.is_null() { *ppframe = None; }
+            if !ppdoc.is_null()   { *ppdoc   = None; }
+
+            let mut rc = RECT::default();
+            GetClientRect(self.hwnd, &mut rc).ok();
+
+            if !lprcposrect.is_null()  { *lprcposrect  = rc; }
+            if !lprccliprect.is_null() { *lprccliprect = rc; }
+
+            if !lpframeinfo.is_null() {
+                (*lpframeinfo).cb           = std::mem::size_of::<OLEINPLACEFRAMEINFO>() as u32;
+                (*lpframeinfo).fMDIApp      = BOOL(0);
+                (*lpframeinfo).hwndFrame    = self.hwnd;
+                (*lpframeinfo).haccel       = HACCEL::default();
+                (*lpframeinfo).cAccelEntries = 0;
+            }
         }
-        let _ = self.child.kill();
+        Ok(())
+    }
+    fn Scroll(&self, _: windows::Win32::Foundation::SIZE) -> windows::core::Result<()> { Ok(()) }
+    fn OnUIDeactivate(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
+    fn OnInPlaceDeactivate(&self) -> windows::core::Result<()> { Ok(()) }
+    fn DiscardUndoState(&self) -> windows::core::Result<()> { Ok(()) }
+    fn DeactivateAndUndo(&self) -> windows::core::Result<()> { Ok(()) }
+    fn OnPosRectChange(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
+}
+
+impl IOleInPlaceUIWindow_Impl for RdpSite_Impl {
+    fn GetBorder(&self, _: *mut RECT) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn RequestBorderSpace(&self, _: *const BORDERWIDTHS) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn SetBorderSpace(&self, _: *const BORDERWIDTHS) -> windows::core::Result<()> { Ok(()) }
+    fn SetActiveObject(
+        &self,
+        _: Option<&IOleInPlaceActiveObject>,
+        _: &PCWSTR,
+    ) -> windows::core::Result<()> { Ok(()) }
+}
+
+impl IOleInPlaceFrame_Impl for RdpSite_Impl {
+    fn InsertMenus(
+        &self,
+        _: HMENU,
+        _: *mut OLEMENUGROUPWIDTHS,
+    ) -> windows::core::Result<()> { Ok(()) }
+    fn SetMenu(&self, _: HMENU, _: OLE_HANDLE, _: HWND) -> windows::core::Result<()> { Ok(()) }
+    fn RemoveMenus(&self, _: HMENU) -> windows::core::Result<()> { Ok(()) }
+    fn SetStatusText(&self, _: &PCWSTR) -> windows::core::Result<()> { Ok(()) }
+    fn EnableModeless(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
+    fn TranslateAccelerator(
+        &self,
+        _: *mut MSG,
+        _: u16,
+    ) -> windows::core::Result<()> {
+        // S_FALSE = "not handled" — the control should try its own accelerator
+        Err(windows::Win32::Foundation::S_FALSE.into())
     }
 }
 
-// ── HWND search ───────────────────────────────────────────────────────────────
+// ── IDispatch helpers ─────────────────────────────────────────────────────────
 
-struct FindData {
-    target_pid: u32,
-    // Best match (TscShellContainerClass) and any-match fallback
-    best: Option<HWND>,
-    fallback: Option<HWND>,
+fn get_dispid(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let bname = BSTR::from_wide(&wide[..wide.len() - 1])?;
+    let mut name_ptr = bname.as_raw();
+    let mut id = 0i32;
+    unsafe {
+        disp.GetIDsOfNames(&GUID::zeroed(), &mut name_ptr, 1, 0x0409, &mut id)?;
+    }
+    Ok(id)
 }
 
-unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let data = &mut *(lparam.0 as *mut FindData);
-    let mut pid = 0u32;
-    GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    if pid != data.target_pid {
-        return BOOL(1);
+fn put_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core::Result<()> {
+    let id = get_dispid(disp, name)?;
+    let bval = BSTR::from(value);
+    let mut var = VARIANT::default();
+    unsafe {
+        let inner = var.as_raw_mut();
+        (*inner).Anonymous.Anonymous.vt = VT_BSTR;
+        (*inner).Anonymous.Anonymous.Anonymous.bstrVal =
+            std::mem::ManuallyDrop::new(bval);
+        let mut named = DISPID_PROPERTYPUT;
+        disp.Invoke(
+            id,
+            &GUID::zeroed(),
+            0x0409,
+            DISPATCH_PROPERTYPUT,
+            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
+            None, None, None,
+        )?;
     }
-
-    // Enumerate top-level windows (EnumWindows skips child windows).
-    let mut buf = [0u16; 256];
-    let len = GetClassNameW(hwnd, &mut buf);
-    if len == 0 {
-        return BOOL(1);
-    }
-    let class = String::from_utf16_lossy(&buf[..len as usize]);
-
-    // TscShellContainerClass = definitive mstsc main window (connecting + session)
-    if class == "TscShellContainerClass" {
-        data.best = Some(hwnd);
-        return BOOL(0); // stop
-    }
-
-    // Accept any other visible window from this process as a fallback
-    // (covers credential dialogs or alternative mstsc window classes)
-    if data.fallback.is_none() && IsWindowVisible(hwnd).as_bool() {
-        data.fallback = Some(hwnd);
-    }
-
-    BOOL(1)
+    Ok(())
 }
 
-/// Poll until a usable mstsc window appears.
-/// Prefers TscShellContainerClass; falls back to any visible window from the process.
-fn find_mstsc_hwnd(pid: u32, timeout_ms: u64) -> Option<HWND> {
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    loop {
-        let mut data = FindData { target_pid: pid, best: None, fallback: None };
-        unsafe {
-            let _ = EnumWindows(Some(enum_windows_cb), LPARAM(&mut data as *mut _ as isize));
+fn put_i4(disp: &IDispatch, name: &str, value: i32) -> windows::core::Result<()> {
+    let id = get_dispid(disp, name)?;
+    let mut var = VARIANT::default();
+    unsafe {
+        let inner = var.as_raw_mut();
+        (*inner).Anonymous.Anonymous.vt = VT_I4;
+        (*inner).Anonymous.Anonymous.Anonymous.lVal = value;
+        let mut named = DISPID_PROPERTYPUT;
+        disp.Invoke(
+            id,
+            &GUID::zeroed(),
+            0x0409,
+            DISPATCH_PROPERTYPUT,
+            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
+            None, None, None,
+        )?;
+    }
+    Ok(())
+}
+
+fn put_bool_prop(disp: &IDispatch, name: &str, value: bool) -> windows::core::Result<()> {
+    let id = get_dispid(disp, name)?;
+    let mut var = VARIANT::default();
+    unsafe {
+        let inner = var.as_raw_mut();
+        (*inner).Anonymous.Anonymous.vt = VT_BOOL;
+        (*inner).Anonymous.Anonymous.Anonymous.boolVal =
+            if value { VARIANT_TRUE } else { VARIANT_FALSE };
+        let mut named = DISPID_PROPERTYPUT;
+        disp.Invoke(
+            id,
+            &GUID::zeroed(),
+            0x0409,
+            DISPATCH_PROPERTYPUT,
+            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
+            None, None, None,
+        )?;
+    }
+    Ok(())
+}
+
+fn get_dispatch_sub(disp: &IDispatch, name: &str) -> windows::core::Result<IDispatch> {
+    let id = get_dispid(disp, name)?;
+    let mut result = VARIANT::default();
+    unsafe {
+        disp.Invoke(
+            id,
+            &GUID::zeroed(),
+            0x0409,
+            DISPATCH_PROPERTYGET,
+            &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
+            Some(&mut result),
+            None,
+            None,
+        )?;
+        let vt = (*result.as_raw()).Anonymous.Anonymous.vt;
+        if vt == VT_DISPATCH {
+            let raw = (*result.as_raw()).Anonymous.Anonymous.Anonymous.pdispVal;
+            if !raw.is_null() {
+                let iface = IDispatch::from_raw(raw as *mut _);
+                std::mem::forget(result);
+                return Ok(iface);
+            }
         }
-        if let Some(h) = data.best.or(data.fallback) {
-            return Some(h);
+    }
+    Err(E_NOTIMPL.into())
+}
+
+fn call_no_args(disp: &IDispatch, name: &str) -> windows::core::Result<()> {
+    let id = get_dispid(disp, name)?;
+    unsafe {
+        disp.Invoke(
+            id,
+            &GUID::zeroed(),
+            0x0409,
+            DISPATCH_METHOD,
+            &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
+            None, None, None,
+        )?;
+    }
+    Ok(())
+}
+
+// ── Host window ───────────────────────────────────────────────────────────────
+
+const HOST_CLASS: PCWSTR = w!("OrbRdpHostWnd");
+
+unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    DefWindowProcW(hwnd, msg, wp, lp)
+}
+
+fn register_host_class() {
+    unsafe {
+        let hmod = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+            .unwrap_or_default();
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(host_wnd_proc),
+            lpszClassName: HOST_CLASS,
+            hInstance: hmod.into(),
+            ..Default::default()
+        };
+        RegisterClassW(&wc); // ignore "already registered" error
+    }
+}
+
+// ── STA thread ────────────────────────────────────────────────────────────────
+
+struct LaunchParams {
+    parent_hwnd: isize,
+    host: String,
+    port: u16,
+    username: String,
+    password: Option<String>,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+fn sta_thread(
+    params: LaunchParams,
+    result_tx: mpsc::SyncSender<Result<mpsc::SyncSender<ComCmd>, String>>,
+) {
+    unsafe {
+        if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
+            let _ = result_tx.send(Err("CoInitializeEx failed".into()));
+            return;
         }
-        if Instant::now() >= deadline {
-            return None;
+
+        register_host_class();
+
+        let hmod = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+            .unwrap_or_default();
+        let parent = HWND(params.parent_hwnd as *mut _);
+        let w = params.width.max(640);
+        let h = params.height.max(480);
+
+        let host_hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            HOST_CLASS,
+            w!(""),
+            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+            params.x, params.y, w, h,
+            Some(parent),
+            None,
+            Some(hmod.into()),
+            None,
+        );
+        if host_hwnd.is_invalid() {
+            let _ = result_tx.send(Err("CreateWindowExW failed".into()));
+            CoUninitialize();
+            return;
         }
-        std::thread::sleep(Duration::from_millis(150));
+
+        // Load mstscax.dll in-process
+        let rdp_unk: IUnknown = match CoCreateInstance(&CLSID_MSTSC, None, CLSCTX_INPROC_SERVER) {
+            Ok(u) => u,
+            Err(e) => {
+                let _ = result_tx.send(Err(format!(
+                    "mstscax.dll not found (CoCreateInstance: {e})\n\
+                     Instala Remote Desktop Connection en Windows."
+                )));
+                DestroyWindow(host_hwnd).ok();
+                CoUninitialize();
+                return;
+            }
+        };
+
+        let ole_obj: IOleObject = match rdp_unk.cast() {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = result_tx.send(Err(format!("IOleObject QI failed: {e}")));
+                DestroyWindow(host_hwnd).ok();
+                CoUninitialize();
+                return;
+            }
+        };
+
+        // Build OLE client site and attach it to the control
+        let site: IOleClientSite = RdpSite { hwnd: host_hwnd }.into();
+
+        if let Err(e) = ole_obj.SetClientSite(Some(&site)) {
+            let _ = result_tx.send(Err(format!("SetClientSite failed: {e}")));
+            DestroyWindow(host_hwnd).ok();
+            CoUninitialize();
+            return;
+        }
+
+        // Trigger in-place activation so the control renders into host_hwnd
+        let mut rc = RECT::default();
+        GetClientRect(host_hwnd, &mut rc).ok();
+        let _ = ole_obj.DoVerb(
+            OLEIVERB_INPLACEACTIVATE,
+            None,
+            Some(&site),
+            0,
+            Some(host_hwnd),
+            Some(&rc),
+        );
+
+        // Configure via IDispatch
+        let disp: IDispatch = match rdp_unk.cast() {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = result_tx.send(Err(format!("IDispatch QI failed: {e}")));
+                DestroyWindow(host_hwnd).ok();
+                CoUninitialize();
+                return;
+            }
+        };
+
+        let _ = put_bstr(&disp, "Server", &params.host);
+        let _ = put_i4(&disp, "RDPPort", params.port as i32);
+        let _ = put_bstr(&disp, "UserName", &params.username);
+        let _ = put_i4(&disp, "DesktopWidth", w);
+        let _ = put_i4(&disp, "DesktopHeight", h);
+        let _ = put_bool_prop(&disp, "FullScreen", false);
+
+        // AdvancedSettings — try newest API surface first, fall back
+        let adv = get_dispatch_sub(&disp, "AdvancedSettings9")
+            .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings7"))
+            .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings2"));
+        if let Ok(adv) = adv {
+            if let Some(ref pw) = params.password {
+                let _ = put_bstr(&adv, "ClearTextPassword", pw);
+            }
+            let _ = put_i4(&adv, "RDPPort", params.port as i32);
+            let _ = put_bool_prop(&adv, "EnableCredSspSupport", true);
+            let _ = put_bool_prop(&adv, "NegotiateSecurityLayer", true);
+        }
+
+        if let Err(e) = call_no_args(&disp, "Connect") {
+            let _ = result_tx.send(Err(format!("RDP Connect() failed: {e}")));
+            DestroyWindow(host_hwnd).ok();
+            CoUninitialize();
+            return;
+        }
+
+        // Send back the command channel — UI is now showing
+        let (tx, rx) = mpsc::sync_channel::<ComCmd>(16);
+        let _ = result_tx.send(Ok(tx));
+
+        // Message + command loop
+        let mut msg = MSG::default();
+        'outer: loop {
+            // Drain channel
+            loop {
+                match rx.try_recv() {
+                    Ok(ComCmd::Reposition { x, y, width, height }) => {
+                        SetWindowPos(
+                            host_hwnd,
+                            Some(HWND_TOP),
+                            x, y, width, height,
+                            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                        ).ok();
+                    }
+                    Ok(ComCmd::Show) => {
+                        ShowWindow(host_hwnd, SW_SHOW);
+                        SetWindowPos(
+                            host_hwnd,
+                            Some(HWND_TOP),
+                            0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
+                        ).ok();
+                    }
+                    Ok(ComCmd::Hide) => { ShowWindow(host_hwnd, SW_HIDE); }
+                    Ok(ComCmd::Disconnect) | Err(mpsc::TryRecvError::Disconnected) => {
+                        let _ = call_no_args(&disp, "Disconnect");
+                        PostQuitMessage(0);
+                        break 'outer;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                }
+            }
+
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT { break 'outer; }
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+
+            std::thread::sleep(Duration::from_millis(16));
+        }
+
+        // Teardown
+        DestroyWindow(host_hwnd).ok();
+        drop(disp);
+        drop(ole_obj);
+        drop(site);
+        CoUninitialize();
     }
 }
 
@@ -104,88 +505,35 @@ pub fn launch(
     y: i32,
     width: i32,
     height: i32,
-    admin_mode: bool,
+    _admin_mode: bool,
 ) -> Result<WindowsRdpSession, String> {
-    if let Some(p) = password {
-        let _ = std::process::Command::new("cmdkey")
-            .args([
-                &format!("/add:{}", host),
-                &format!("/user:{}", username),
-                &format!("/pass:{}", p),
-            ])
-            .status();
-    }
+    let params = LaunchParams {
+        parent_hwnd: parent_hwnd.0 as isize,
+        host: host.to_string(),
+        port,
+        username: username.to_string(),
+        password: password.map(str::to_string),
+        x, y, width, height,
+    };
 
-    let mut cmd = std::process::Command::new("mstsc.exe");
-    cmd.arg(format!("/v:{}:{}", host, port));
-    cmd.arg(format!("/w:{}", width.max(640)));
-    cmd.arg(format!("/h:{}", height.max(480)));
-    if admin_mode {
-        cmd.arg("/admin");
-    }
+    let (result_tx, result_rx) = mpsc::sync_channel::<Result<mpsc::SyncSender<ComCmd>, String>>(1);
+    std::thread::spawn(move || sta_thread(params, result_tx));
 
-    let child = cmd.spawn().map_err(|e| format!("Failed to launch mstsc: {e}"))?;
-    let pid = child.id();
+    let tx = result_rx
+        .recv_timeout(Duration::from_secs(20))
+        .map_err(|_| "El hilo COM-RDP no respondió a tiempo".to_string())??;
 
-    let mstsc_hwnd = find_mstsc_hwnd(pid, 15_000)
-        .ok_or_else(|| {
-            "No se pudo encontrar la ventana de mstsc.\n\
-             Verifica que RDP esté habilitado en el servidor y que el puerto sea correcto."
-                .to_string()
-        })?;
-
-    unsafe {
-        // Strip decorations, add WS_CHILD so it clips to parent
-        let style = GetWindowLongW(mstsc_hwnd, GWL_STYLE);
-        let new_style = (style
-            & !(WS_CAPTION.0 as i32
-                | WS_THICKFRAME.0 as i32
-                | WS_MINIMIZEBOX.0 as i32
-                | WS_MAXIMIZEBOX.0 as i32
-                | WS_SYSMENU.0 as i32))
-            | WS_CHILD.0 as i32;
-        SetWindowLongW(mstsc_hwnd, GWL_STYLE, new_style);
-
-        let ex_style = GetWindowLongW(mstsc_hwnd, GWL_EXSTYLE);
-        SetWindowLongW(mstsc_hwnd, GWL_EXSTYLE, ex_style & !(WS_EX_APPWINDOW.0 as i32));
-
-        SetParent(mstsc_hwnd, Some(parent_hwnd))
-            .map_err(|e| format!("SetParent failed: {e}"))?;
-
-        let _ = SetWindowPos(
-            mstsc_hwnd,
-            Some(HWND_TOP),
-            x,
-            y,
-            width,
-            height,
-            SWP_SHOWWINDOW | SWP_FRAMECHANGED,
-        );
-    }
-
-    Ok(WindowsRdpSession {
-        child,
-        mstsc_hwnd: mstsc_hwnd.0 as isize,
-    })
+    Ok(WindowsRdpSession { tx })
 }
 
 pub fn reposition(session: &WindowsRdpSession, x: i32, y: i32, width: i32, height: i32) {
-    unsafe {
-        let hwnd = HWND(session.mstsc_hwnd as *mut _);
-        let _ = SetWindowPos(hwnd, Some(HWND_TOP), x, y, width, height, SWP_SHOWWINDOW);
-    }
+    let _ = session.tx.try_send(ComCmd::Reposition { x, y, width, height });
 }
 
 pub fn show(session: &WindowsRdpSession) {
-    unsafe {
-        let hwnd = HWND(session.mstsc_hwnd as *mut _);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-    }
+    let _ = session.tx.try_send(ComCmd::Show);
 }
 
 pub fn hide(session: &WindowsRdpSession) {
-    unsafe {
-        let _ = ShowWindow(HWND(session.mstsc_hwnd as *mut _), SW_HIDE);
-    }
+    let _ = session.tx.try_send(ComCmd::Hide);
 }
