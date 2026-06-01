@@ -6,6 +6,14 @@
 // frame-ancestors) are stripped so the page renders correctly.
 // Redirects (including HTTP→HTTPS) are followed internally by reqwest so
 // the iframe never sees a Location pointing outside the proxy.
+//
+// Multi-domain routing:
+//   /<path>                              → configured target host/<path>
+//   /__p/<scheme>/<host[:port]>/<path>  → <scheme>://<host>/<path>
+//
+// HTML responses get a small injected script that intercepts link clicks
+// and form submissions, redirecting external hosts through /__p/... so
+// the user can navigate across subdomains (e.g. AWS service subdomains).
 
 use std::{
     collections::HashMap,
@@ -24,6 +32,7 @@ fn build_client() -> reqwest::blocking::Client {
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(Duration::from_secs(30))
+        .cookie_store(true)
         .build()
         .unwrap_or_default()
 }
@@ -45,36 +54,25 @@ pub fn new_browser_sessions() -> BrowserSessionMap {
 
 #[derive(Clone)]
 pub struct TargetConfig {
-    /// "http" or "https"
     pub scheme: String,
-    /// Original hostname as it appears in the connection URL
     pub host: String,
-    /// Target port
     pub port: u16,
-    /// Shared HTTP client (one tokio runtime per session, not per request)
     pub client: Arc<reqwest::blocking::Client>,
 }
 
 impl TargetConfig {
     pub fn new(scheme: String, host: String, port: u16) -> Self {
-        Self {
-            scheme,
-            host,
-            port,
-            client: Arc::new(build_client()),
-        }
+        Self { scheme, host, port, client: Arc::new(build_client()) }
     }
 
-    /// Build a target URL for the given request path.
     pub fn target_url(&self, path: &str) -> String {
         format!("{}://{}:{}{}", self.scheme, self.host, self.port, path)
     }
 
-    /// Build the Host header value, omitting the port for default ports.
     pub fn host_header(&self) -> String {
-        let is_default = (self.scheme == "http" && self.port == 80)
-            || (self.scheme == "https" && self.port == 443);
-        if is_default {
+        if (self.scheme == "http" && self.port == 80)
+            || (self.scheme == "https" && self.port == 443)
+        {
             self.host.clone()
         } else {
             format!("{}:{}", self.host, self.port)
@@ -86,7 +84,7 @@ impl TargetConfig {
 
 pub fn start_reverse_proxy(config: Arc<TargetConfig>) -> Result<BrowserSession, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let own_port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = stop.clone();
@@ -101,7 +99,7 @@ pub fn start_reverse_proxy(config: Arc<TargetConfig>) -> Result<BrowserSession, 
                 Ok((stream, _)) => {
                     stream.set_nonblocking(false).ok();
                     let cfg = config.clone();
-                    thread::spawn(move || handle_request(stream, cfg));
+                    thread::spawn(move || handle_request(stream, cfg, own_port));
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(30));
@@ -111,7 +109,7 @@ pub fn start_reverse_proxy(config: Arc<TargetConfig>) -> Result<BrowserSession, 
         }
     });
 
-    Ok(BrowserSession { proxy_port: port, stop })
+    Ok(BrowserSession { proxy_port: own_port, stop })
 }
 
 pub fn stop_proxy(session: BrowserSession) {
@@ -119,9 +117,86 @@ pub fn stop_proxy(session: BrowserSession) {
     let _ = TcpStream::connect(format!("127.0.0.1:{}", session.proxy_port));
 }
 
+// ── Multi-domain path parsing ─────────────────────────────────────────────────
+
+const PROXY_PREFIX: &str = "/__p/";
+
+/// Parse `scheme/host[:port]/rest...` → (target_url, host_header).
+fn parse_proxy_path(proxy_path: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = proxy_path.splitn(3, '/').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let scheme = parts[0];
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let host_part = parts[1];
+    let rest = if parts.len() > 2 { format!("/{}", parts[2]) } else { "/".to_owned() };
+
+    let (host, port) = if let Some((h, p)) = host_part.rsplit_once(':') {
+        if let Ok(port) = p.parse::<u16>() {
+            (h.to_owned(), port)
+        } else {
+            (host_part.to_owned(), default_port(scheme))
+        }
+    } else {
+        (host_part.to_owned(), default_port(scheme))
+    };
+
+    let target_url = format!("{}://{}:{}{}", scheme, host, port, rest);
+    let host_header = if (scheme == "http" && port == 80) || (scheme == "https" && port == 443) {
+        host
+    } else {
+        format!("{}:{}", host, port)
+    };
+
+    Some((target_url, host_header))
+}
+
+fn default_port(scheme: &str) -> u16 {
+    if scheme == "https" { 443 } else { 80 }
+}
+
+// ── Navigation-intercept script injected into HTML responses ──────────────────
+
+fn nav_script(own_port: u16) -> String {
+    // Intercepts <a> clicks and <form> submissions that leave the proxy host,
+    // rewriting the URL to /__p/scheme/host/path so they stay in-proxy.
+    format!(
+        r#"<script data-orbital-proxy="nav">
+(function(){{
+  var B='http://127.0.0.1:{p}/__p/';
+  function px(url){{
+    try{{
+      var u=new URL(url,location.href);
+      if(u.hostname==='127.0.0.1')return null;
+      var h=u.hostname+(u.port?':'+u.port:'');
+      return B+u.protocol.replace(':','')+'/'+h+u.pathname+u.search;
+    }}catch(e){{return null;}}
+  }}
+  document.addEventListener('click',function(e){{
+    var path=e.composedPath?e.composedPath():[];
+    var a=path.find(function(n){{return n instanceof HTMLAnchorElement;}});
+    if(!a&&e.target)a=e.target.closest&&e.target.closest('a');
+    if(!a||!a.href)return;
+    var p=px(a.href);
+    if(p){{e.preventDefault();e.stopPropagation();location.href=p;}}
+  }},true);
+  document.addEventListener('submit',function(e){{
+    var f=e.target;if(!f||!f.action)return;
+    var p=px(f.action);
+    if(p){{e.preventDefault();f.action=p;f.submit();}}
+  }},true);
+}})();
+</script>"#,
+        p = own_port
+    )
+}
+
 // ── Request handler ───────────────────────────────────────────────────────────
 
-fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>) {
+fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>, own_port: u16) {
     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
 
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
@@ -139,7 +214,7 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>) {
     let method = parts[0].to_uppercase();
     let path = parts[1].to_owned();
 
-    // Read and collect request headers
+    // Read request headers
     let mut req_headers: Vec<(String, String)> = Vec::new();
     let mut content_length: usize = 0;
     loop {
@@ -168,26 +243,35 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>) {
         reader.read_exact(&mut body).ok();
     }
 
-    let target_url = config.target_url(&path);
+    // Resolve actual target URL and Host header.
+    // Paths starting with /__p/ are multi-domain routed; everything else
+    // goes to the initially configured target host.
+    let (target_url, host_header) =
+        if let Some(proxy_path) = path.strip_prefix(PROXY_PREFIX) {
+            parse_proxy_path(proxy_path)
+                .unwrap_or_else(|| (config.target_url(&path), config.host_header()))
+        } else {
+            (config.target_url(&path), config.host_header())
+        };
+
     let client = &config.client;
 
     let mut rb = match method.as_str() {
-        "POST" => client.post(&target_url),
-        "PUT" => client.put(&target_url),
+        "POST"   => client.post(&target_url),
+        "PUT"    => client.put(&target_url),
         "DELETE" => client.delete(&target_url),
-        "PATCH" => client.patch(&target_url),
-        "HEAD" => client.head(&target_url),
-        _ => client.get(&target_url),
+        "PATCH"  => client.patch(&target_url),
+        "HEAD"   => client.head(&target_url),
+        _        => client.get(&target_url),
     };
 
-    // Forward request headers (skip hop-by-hop and Host — we set our own)
     for (k, v) in &req_headers {
         if skip_request_header(k) {
             continue;
         }
         rb = rb.header(k.as_str(), v.as_str());
     }
-    rb = rb.header("Host", config.host_header());
+    rb = rb.header("Host", &host_header);
 
     if !body.is_empty() {
         rb = rb.body(body);
@@ -209,6 +293,15 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>) {
 
     let status = resp.status().as_u16();
     let reason = resp.status().canonical_reason().unwrap_or("OK");
+
+    // Read content-type before consuming the response body
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+
     let mut out_headers: Vec<(String, String)> = Vec::new();
 
     for (name, value) in resp.headers() {
@@ -238,10 +331,13 @@ fn handle_request(mut stream: TcpStream, config: Arc<TargetConfig>) {
         }
     }
 
-    // Allow the iframe to load this response
     out_headers.push(("Access-Control-Allow-Origin".to_owned(), "*".to_owned()));
 
-    let resp_body = resp.bytes().unwrap_or_default();
+    // Collect body; inject nav script into HTML responses
+    let mut resp_body = resp.bytes().unwrap_or_default().to_vec();
+    if content_type.contains("text/html") {
+        resp_body.extend_from_slice(nav_script(own_port).as_bytes());
+    }
 
     let mut header_block = format!("HTTP/1.1 {} {}\r\n", status, reason);
     for (k, v) in &out_headers {
