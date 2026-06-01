@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tauri::AppHandle;
 
 use crate::{
-    browser::{new_browser_sessions, start_reverse_proxy, stop_proxy, BrowserSessionMap, TargetConfig},
+    browser::{start_reverse_proxy, stop_proxy, BrowserSessionMap, TargetConfig},
     commands::sessions::load_connection,
 };
 
