@@ -13,12 +13,13 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use windows::Win32::Foundation::{BOOL, E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::Com::*;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::Variant::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{implement, w, BSTR, GUID, IUnknown, Interface, PCWSTR};
+use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, Ref, PCWSTR};
 
 // ── CLSID ─────────────────────────────────────────────────────────────────────
 
@@ -55,10 +56,6 @@ impl Drop for WindowsRdpSession {
 }
 
 // ── OLE site ──────────────────────────────────────────────────────────────────
-//
-// MsRdpClient10 calls back into IOleClientSite / IOleInPlaceSite during
-// in-place activation.  We implement the minimum set of methods required for
-// the control to render into our host window.
 
 #[implement(IOleClientSite, IOleInPlaceSite, IOleInPlaceFrame)]
 struct RdpSite {
@@ -69,7 +66,11 @@ impl IOleClientSite_Impl for RdpSite_Impl {
     fn SaveObject(&self) -> windows::core::Result<()> {
         Err(E_NOTIMPL.into())
     }
-    fn GetMoniker(&self, _: u32, _: u32) -> windows::core::Result<IMoniker> {
+    fn GetMoniker(
+        &self,
+        _dwassign: &OLEGETMONIKER,
+        _dwwhichmoniker: &OLEWHICHMK,
+    ) -> windows::core::Result<IMoniker> {
         Err(E_NOTIMPL.into())
     }
     fn GetContainer(&self) -> windows::core::Result<IOleContainer> {
@@ -95,16 +96,15 @@ impl IOleInPlaceSite_Impl for RdpSite_Impl {
     fn OnUIActivate(&self) -> windows::core::Result<()> { Ok(()) }
     fn GetWindowContext(
         &self,
-        ppframe: *mut Option<IOleInPlaceFrame>,
-        ppdoc: *mut Option<IOleInPlaceUIWindow>,
+        ppframe: OutRef<'_, IOleInPlaceFrame>,
+        ppdoc: OutRef<'_, IOleInPlaceUIWindow>,
         lprcposrect: *mut RECT,
         lprccliprect: *mut RECT,
         lpframeinfo: *mut OLEINPLACEFRAMEINFO,
     ) -> windows::core::Result<()> {
         unsafe {
-            // No frame or doc — the control renders standalone
-            if !ppframe.is_null() { *ppframe = None; }
-            if !ppdoc.is_null()   { *ppdoc   = None; }
+            ppframe.write(None);
+            ppdoc.write(None);
 
             let mut rc = RECT::default();
             GetClientRect(self.hwnd, &mut rc).ok();
@@ -113,16 +113,16 @@ impl IOleInPlaceSite_Impl for RdpSite_Impl {
             if !lprccliprect.is_null() { *lprccliprect = rc; }
 
             if !lpframeinfo.is_null() {
-                (*lpframeinfo).cb           = std::mem::size_of::<OLEINPLACEFRAMEINFO>() as u32;
-                (*lpframeinfo).fMDIApp      = BOOL(0);
-                (*lpframeinfo).hwndFrame    = self.hwnd;
-                (*lpframeinfo).haccel       = HACCEL::default();
+                (*lpframeinfo).cb            = std::mem::size_of::<OLEINPLACEFRAMEINFO>() as u32;
+                (*lpframeinfo).fMDIApp       = BOOL(0);
+                (*lpframeinfo).hwndFrame     = self.hwnd;
+                (*lpframeinfo).haccel        = HACCEL::default();
                 (*lpframeinfo).cAccelEntries = 0;
             }
         }
         Ok(())
     }
-    fn Scroll(&self, _: windows::Win32::Foundation::SIZE) -> windows::core::Result<()> { Ok(()) }
+    fn Scroll(&self, _: &windows::Win32::Foundation::SIZE) -> windows::core::Result<()> { Ok(()) }
     fn OnUIDeactivate(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
     fn OnInPlaceDeactivate(&self) -> windows::core::Result<()> { Ok(()) }
     fn DiscardUndoState(&self) -> windows::core::Result<()> { Ok(()) }
@@ -131,7 +131,7 @@ impl IOleInPlaceSite_Impl for RdpSite_Impl {
 }
 
 impl IOleInPlaceUIWindow_Impl for RdpSite_Impl {
-    fn GetBorder(&self, _: *mut RECT) -> windows::core::Result<()> {
+    fn GetBorder(&self) -> windows::core::Result<RECT> {
         Err(E_NOTIMPL.into())
     }
     fn RequestBorderSpace(&self, _: *const BORDERWIDTHS) -> windows::core::Result<()> {
@@ -140,7 +140,7 @@ impl IOleInPlaceUIWindow_Impl for RdpSite_Impl {
     fn SetBorderSpace(&self, _: *const BORDERWIDTHS) -> windows::core::Result<()> { Ok(()) }
     fn SetActiveObject(
         &self,
-        _: Option<&IOleInPlaceActiveObject>,
+        _: Ref<'_, IOleInPlaceActiveObject>,
         _: &PCWSTR,
     ) -> windows::core::Result<()> { Ok(()) }
 }
@@ -151,16 +151,11 @@ impl IOleInPlaceFrame_Impl for RdpSite_Impl {
         _: HMENU,
         _: *mut OLEMENUGROUPWIDTHS,
     ) -> windows::core::Result<()> { Ok(()) }
-    fn SetMenu(&self, _: HMENU, _: OLE_HANDLE, _: HWND) -> windows::core::Result<()> { Ok(()) }
+    fn SetMenu(&self, _: HMENU, _: isize, _: HWND) -> windows::core::Result<()> { Ok(()) }
     fn RemoveMenus(&self, _: HMENU) -> windows::core::Result<()> { Ok(()) }
     fn SetStatusText(&self, _: &PCWSTR) -> windows::core::Result<()> { Ok(()) }
     fn EnableModeless(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
-    fn TranslateAccelerator(
-        &self,
-        _: *mut MSG,
-        _: u16,
-    ) -> windows::core::Result<()> {
-        // S_FALSE = "not handled" — the control should try its own accelerator
+    fn TranslateAccelerator(&self, _: *const MSG, _: u16) -> windows::core::Result<()> {
         Err(windows::Win32::Foundation::S_FALSE.into())
     }
 }
@@ -185,8 +180,7 @@ fn put_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core::Result<
     unsafe {
         let inner = var.as_raw_mut();
         (*inner).Anonymous.Anonymous.vt = VT_BSTR;
-        (*inner).Anonymous.Anonymous.Anonymous.bstrVal =
-            std::mem::ManuallyDrop::new(bval);
+        (*inner).Anonymous.Anonymous.Anonymous.bstrVal = std::mem::ManuallyDrop::new(bval);
         let mut named = DISPID_PROPERTYPUT;
         disp.Invoke(
             id,
@@ -226,8 +220,8 @@ fn put_bool_prop(disp: &IDispatch, name: &str, value: bool) -> windows::core::Re
     unsafe {
         let inner = var.as_raw_mut();
         (*inner).Anonymous.Anonymous.vt = VT_BOOL;
-        (*inner).Anonymous.Anonymous.Anonymous.boolVal =
-            if value { VARIANT_TRUE } else { VARIANT_FALSE };
+        // VARIANT_BOOL: -1 = TRUE, 0 = FALSE
+        (*inner).Anonymous.Anonymous.Anonymous.boolVal = if value { -1i16 } else { 0i16 };
         let mut named = DISPID_PROPERTYPUT;
         disp.Invoke(
             id,
@@ -250,7 +244,12 @@ fn get_dispatch_sub(disp: &IDispatch, name: &str) -> windows::core::Result<IDisp
             &GUID::zeroed(),
             0x0409,
             DISPATCH_PROPERTYGET,
-            &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
+            &DISPPARAMS {
+                rgvarg: std::ptr::null_mut(),
+                rgdispidNamedArgs: std::ptr::null_mut(),
+                cArgs: 0,
+                cNamedArgs: 0,
+            },
             Some(&mut result),
             None,
             None,
@@ -276,7 +275,12 @@ fn call_no_args(disp: &IDispatch, name: &str) -> windows::core::Result<()> {
             &GUID::zeroed(),
             0x0409,
             DISPATCH_METHOD,
-            &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
+            &DISPPARAMS {
+                rgvarg: std::ptr::null_mut(),
+                rgdispidNamedArgs: std::ptr::null_mut(),
+                cArgs: 0,
+                cNamedArgs: 0,
+            },
             None, None, None,
         )?;
     }
@@ -293,8 +297,7 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
 
 fn register_host_class() {
     unsafe {
-        let hmod = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-            .unwrap_or_default();
+        let hmod = GetModuleHandleW(None).unwrap_or_default();
         let wc = WNDCLASSW {
             lpfnWndProc: Some(host_wnd_proc),
             lpszClassName: HOST_CLASS,
@@ -331,8 +334,7 @@ fn sta_thread(
 
         register_host_class();
 
-        let hmod = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-            .unwrap_or_default();
+        let hmod = GetModuleHandleW(None).unwrap_or_default();
         let parent = HWND(params.parent_hwnd as *mut _);
         let w = params.width.max(640);
         let h = params.height.max(480);
@@ -359,7 +361,7 @@ fn sta_thread(
             Ok(u) => u,
             Err(e) => {
                 let _ = result_tx.send(Err(format!(
-                    "mstscax.dll not found (CoCreateInstance: {e})\n\
+                    "mstscax.dll no encontrado (CoCreateInstance: {e})\n\
                      Instala Remote Desktop Connection en Windows."
                 )));
                 DestroyWindow(host_hwnd).ok();
@@ -378,7 +380,7 @@ fn sta_thread(
             }
         };
 
-        // Build OLE client site and attach it to the control
+        // Build OLE client site and attach
         let site: IOleClientSite = RdpSite { hwnd: host_hwnd }.into();
 
         if let Err(e) = ole_obj.SetClientSite(Some(&site)) {
@@ -388,7 +390,7 @@ fn sta_thread(
             return;
         }
 
-        // Trigger in-place activation so the control renders into host_hwnd
+        // In-place activate → control renders into host_hwnd
         let mut rc = RECT::default();
         GetClientRect(host_hwnd, &mut rc).ok();
         let _ = ole_obj.DoVerb(
@@ -418,7 +420,7 @@ fn sta_thread(
         let _ = put_i4(&disp, "DesktopHeight", h);
         let _ = put_bool_prop(&disp, "FullScreen", false);
 
-        // AdvancedSettings — try newest API surface first, fall back
+        // AdvancedSettings — try newest surface first
         let adv = get_dispatch_sub(&disp, "AdvancedSettings9")
             .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings7"))
             .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings2"));
@@ -438,14 +440,13 @@ fn sta_thread(
             return;
         }
 
-        // Send back the command channel — UI is now showing
+        // Hand back the command channel
         let (tx, rx) = mpsc::sync_channel::<ComCmd>(16);
         let _ = result_tx.send(Ok(tx));
 
         // Message + command loop
         let mut msg = MSG::default();
         'outer: loop {
-            // Drain channel
             loop {
                 match rx.try_recv() {
                     Ok(ComCmd::Reposition { x, y, width, height }) => {
@@ -484,7 +485,6 @@ fn sta_thread(
             std::thread::sleep(Duration::from_millis(16));
         }
 
-        // Teardown
         DestroyWindow(host_hwnd).ok();
         drop(disp);
         drop(ole_obj);
