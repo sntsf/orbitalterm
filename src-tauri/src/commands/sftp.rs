@@ -1,11 +1,36 @@
 use serde::Serialize;
-use ssh2::Session;
+use ssh2::{MethodType, Session};
 use std::net::TcpStream;
 use std::path::Path;
 use tauri::{Emitter, State};
 use uuid::Uuid;
 
 use crate::{commands::sessions::load_connection, sftp::{SftpConn, SftpSessionMap}};
+
+/// Set broad algorithm preferences so libssh2 can negotiate with modern servers.
+/// method_pref rejects lists containing unsupported algorithms, so we try
+/// progressively shorter lists until one is accepted.
+fn configure_algorithms(session: &Session) {
+    for kex in &[
+        "curve25519-sha256,curve25519-sha256@libssh2.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha256",
+        "ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group14-sha256,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha256",
+        "ecdh-sha2-nistp256,diffie-hellman-group14-sha256,diffie-hellman-group14-sha1",
+        "diffie-hellman-group14-sha256,diffie-hellman-group14-sha1",
+    ] {
+        if session.method_pref(MethodType::Kex, kex).is_ok() {
+            break;
+        }
+    }
+    for hostkey in &[
+        "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-256,rsa-sha2-512,ssh-rsa",
+        "ecdsa-sha2-nistp256,rsa-sha2-256,rsa-sha2-512,ssh-rsa",
+        "ssh-rsa",
+    ] {
+        if session.method_pref(MethodType::HostKey, hostkey).is_ok() {
+            break;
+        }
+    }
+}
 
 #[derive(Serialize, Clone)]
 pub struct SftpEntry {
@@ -35,6 +60,8 @@ pub async fn sftp_connect(
 
     let mut session = Session::new().map_err(|e| format!("SSH session error: {e}"))?;
     session.set_tcp_stream(tcp);
+    session.set_timeout(30_000);
+    configure_algorithms(&session);
     session.handshake().map_err(|e| format!("SSH handshake failed: {e}"))?;
 
     let username = &connection.username;

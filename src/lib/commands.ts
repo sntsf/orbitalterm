@@ -126,6 +126,7 @@ export async function disconnectSsh(sessionId: string): Promise<void> {
 export interface RdpConnectResult {
   session_id: string;
   embedded: boolean;
+  native_window: boolean; // true = Windows mstsc reparented
   width: number;
   height: number;
 }
@@ -135,8 +136,24 @@ export async function connectRdp(
   width = 1280,
   height = 800,
   adminMode = false,
+  canvasX = 0,
+  canvasY = 0,
 ): Promise<RdpConnectResult> {
-  return invoke("connect_rdp", { connectionId, width, height, adminMode });
+  return invoke("connect_rdp", { connectionId, width, height, adminMode, canvasX, canvasY });
+}
+
+export async function rdpWindowsReposition(
+  sessionId: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): Promise<void> {
+  return invoke("rdp_windows_reposition", { sessionId, x, y, width, height });
+}
+
+export async function rdpWindowsVisibility(sessionId: string, visible: boolean): Promise<void> {
+  return invoke("rdp_windows_visibility", { sessionId, visible });
 }
 
 export async function rdpResizeSession(sessionId: string, width: number, height: number): Promise<void> {

@@ -250,6 +250,7 @@ pub async fn disconnect_ssh(
 pub struct RdpConnectResult {
     pub session_id: String,
     pub embedded: bool,
+    pub native_window: bool, // true = Windows mstsc reparented (no canvas frames)
     pub width: u16,
     pub height: u16,
 }
@@ -263,6 +264,9 @@ pub async fn connect_rdp(
     width: Option<u16>,
     height: Option<u16>,
     admin_mode: Option<bool>,
+    // Canvas position relative to Tauri window (needed for Windows embedded mode)
+    canvas_x: Option<i32>,
+    canvas_y: Option<i32>,
 ) -> Result<RdpConnectResult, String> {
     let connection = load_connection(&connection_id)?;
     let password = get_saved_password(&connection_id);
@@ -287,12 +291,44 @@ pub async fn connect_rdp(
         let width = session.width;
         let height = session.height;
         embedded_sessions.lock().unwrap().insert(session_id.clone(), session);
-        return Ok(RdpConnectResult { session_id, embedded: true, width, height });
+        return Ok(RdpConnectResult { session_id, embedded: true, native_window: false, width, height });
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        let _ = (app, embedded_sessions);
+        let w = width.unwrap_or(1280) as i32;
+        let h = height.unwrap_or(800) as i32;
+        let x = canvas_x.unwrap_or(0);
+        let y = canvas_y.unwrap_or(0);
+
+        let parent_hwnd = app
+            .get_webview_window("main")
+            .ok_or("Main window not found")?
+            .hwnd()
+            .map_err(|e| e.to_string())?;
+
+        let session = crate::rdp::windows_rdp::launch(
+            parent_hwnd,
+            &connection.host,
+            connection.port as u16,
+            &connection.username,
+            password.as_deref(),
+            x,
+            y,
+            w,
+            h,
+            connection.rdp_admin || admin_mode.unwrap_or(false),
+        )?;
+
+        let session_id = Uuid::new_v4().to_string();
+        embedded_sessions.lock().unwrap().insert(session_id.clone(), session);
+        let _ = rdp_sessions;
+        return Ok(RdpConnectResult { session_id, embedded: true, native_window: true, width: w as u16, height: h as u16 });
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (app, embedded_sessions, canvas_x, canvas_y);
         let rdp_client = crate::rdp::find_rdp_client()?;
         let mut cmd = std::process::Command::new(&rdp_client.binary);
         build_rdp_args(&mut cmd, &connection, password.as_deref(), &rdp_client.flavor);
@@ -313,14 +349,12 @@ pub async fn connect_rdp(
                     buf
                 })
                 .unwrap_or_default();
-
             let snippet = stderr
                 .lines()
                 .filter(|l| !l.trim().is_empty())
                 .take(4)
                 .collect::<Vec<_>>()
                 .join("\n");
-
             return Err(format!(
                 "El cliente RDP cerró inmediatamente (código {}).\n\
                 Verificá:\n\
@@ -330,19 +364,13 @@ pub async fn connect_rdp(
                 {}",
                 exit.code().unwrap_or(-1),
                 connection.port,
-                if !snippet.is_empty() {
-                    format!("\nDetalle:\n{}", snippet)
-                } else {
-                    String::new()
-                }
+                if !snippet.is_empty() { format!("\nDetalle:\n{}", snippet) } else { String::new() }
             ));
         }
-
         drop(child.stderr.take());
-
         let session_id = Uuid::new_v4().to_string();
         rdp_sessions.lock().unwrap().insert(session_id.clone(), child);
-        Ok(RdpConnectResult { session_id, embedded: false, width: 0, height: 0 })
+        Ok(RdpConnectResult { session_id, embedded: false, native_window: false, width: 0, height: 0 })
     }
 }
 
@@ -489,6 +517,49 @@ pub async fn rdp_resize_session(
         }
     }
     let _ = (embedded_sessions, session_id, width, height);
+    Ok(())
+}
+
+/// Move/resize the embedded mstsc window on Windows when the canvas area changes.
+#[tauri::command]
+pub async fn rdp_windows_reposition(
+    embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
+    session_id: String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let map = embedded_sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            crate::rdp::windows_rdp::reposition(session, x, y, width, height);
+        }
+    }
+    let _ = (embedded_sessions, session_id, x, y, width, height);
+    Ok(())
+}
+
+/// Show or hide the embedded mstsc window (used when switching tabs on Windows).
+#[tauri::command]
+pub async fn rdp_windows_visibility(
+    embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
+    session_id: String,
+    visible: bool,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let map = embedded_sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            if visible {
+                crate::rdp::windows_rdp::show(session);
+            } else {
+                crate::rdp::windows_rdp::hide(session);
+            }
+        }
+    }
+    let _ = (embedded_sessions, session_id, visible);
     Ok(())
 }
 
