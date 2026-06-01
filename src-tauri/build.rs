@@ -10,20 +10,21 @@ fn build_rdp_bridge() {
     // Locate freerdp3 headers and libraries via pkg-config.
     // On Ubuntu/Debian: sudo apt install libfreerdp-dev3 libfreerdp-client3-dev
     // (package names vary by distro; freerdp3 is the FreeRDP 3.x series)
+    // freerdp3 (Ubuntu 25+) → freerdp2 (Ubuntu 24) → freerdp (generic)
     let freerdp = pkg_config::probe_library("freerdp3")
+        .or_else(|_| pkg_config::probe_library("freerdp2"))
         .or_else(|_| pkg_config::probe_library("freerdp"))
-        .expect(
-            "freerdp3 not found — install with: sudo apt install \
-             libfreerdp-dev3 libfreerdp-client-dev3",
-        );
+        .expect("FreeRDP not found — install libfreerdp3-dev or freerdp2-dev");
 
     let freerdp_client = pkg_config::probe_library("freerdp-client3")
+        .or_else(|_| pkg_config::probe_library("freerdp-client2"))
         .or_else(|_| pkg_config::probe_library("freerdp-client"))
-        .expect("freerdp-client3 not found");
+        .expect("freerdp-client not found");
 
     let _winpr = pkg_config::probe_library("winpr3")
+        .or_else(|_| pkg_config::probe_library("winpr2"))
         .or_else(|_| pkg_config::probe_library("winpr"))
-        .expect("winpr3 not found");
+        .expect("winpr not found");
 
     // Collect include paths from both probes
     let mut include_paths: Vec<std::path::PathBuf> = Vec::new();
