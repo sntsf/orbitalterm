@@ -27,14 +27,20 @@ use std::{
     time::Duration,
 };
 
-fn build_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
+fn build_client(hosts_map: &HashMap<String, String>) -> reqwest::blocking::Client {
+    let mut builder = reqwest::blocking::Client::builder()
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(Duration::from_secs(30))
-        .cookie_store(true)
-        .build()
-        .unwrap_or_default()
+        .cookie_store(true);
+
+    for (hostname, ip) in hosts_map {
+        if let Ok(addr) = format!("{}:0", ip).parse::<std::net::SocketAddr>() {
+            builder = builder.resolve_to_addrs(hostname, &[addr]);
+        }
+    }
+
+    builder.build().unwrap_or_default()
 }
 
 // ── Session map ───────────────────────────────────────────────────────────────
@@ -61,8 +67,8 @@ pub struct TargetConfig {
 }
 
 impl TargetConfig {
-    pub fn new(scheme: String, host: String, port: u16) -> Self {
-        Self { scheme, host, port, client: Arc::new(build_client()) }
+    pub fn new(scheme: String, host: String, port: u16, hosts_map: HashMap<String, String>) -> Self {
+        Self { scheme, host, port, client: Arc::new(build_client(&hosts_map)) }
     }
 
     pub fn target_url(&self, path: &str) -> String {
@@ -363,4 +369,26 @@ fn skip_request_header(name: &str) -> bool {
             | "transfer-encoding"
             | "upgrade"
     )
+}
+
+// ── Hosts file parser ─────────────────────────────────────────────────────────
+
+/// Parse a hosts-file-style text (ip hostname [hostname...], # comments)
+/// into a hostname → IP map applied to the reqwest DNS resolver.
+pub fn parse_hosts(text: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for raw_line in text.lines() {
+        let line = match raw_line.find('#') {
+            Some(pos) => &raw_line[..pos],
+            None => raw_line,
+        };
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let ip = parts[0];
+            for hostname in &parts[1..] {
+                map.insert((*hostname).to_owned(), ip.to_owned());
+            }
+        }
+    }
+    map
 }
