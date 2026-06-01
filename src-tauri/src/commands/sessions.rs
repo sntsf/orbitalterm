@@ -517,6 +517,24 @@ fn build_rdp_args(
 ) {
     use crate::rdp::RdpFlavor;
 
+    if *flavor == RdpFlavor::Mstsc {
+        // Store credentials in Windows Credential Manager so mstsc picks them up
+        if let Some(p) = password {
+            let _ = std::process::Command::new("cmdkey")
+                .args([
+                    &format!("/add:{}", conn.host),
+                    &format!("/user:{}", conn.username),
+                    &format!("/pass:{p}"),
+                ])
+                .status();
+        }
+        cmd.arg(format!("/v:{}:{}", conn.host, conn.port));
+        if conn.rdp_admin {
+            cmd.arg("/admin");
+        }
+        return;
+    }
+
     if *flavor == RdpFlavor::Remmina {
         // Remmina accepts a URI: rdp://[user[:pass]@]host[:port]
         let authority = match password {
@@ -546,17 +564,6 @@ fn build_rdp_args(
     cmd.arg("/cert:ignore");
     cmd.arg("/clipboard");
 
-    #[cfg(target_os = "windows")]
-    if password.is_some() {
-        // Store credentials in Windows Credential Manager so mstsc picks them up
-        let _ = std::process::Command::new("cmdkey")
-            .args([
-                &format!("/add:{}", conn.host),
-                &format!("/user:{}", conn.username),
-                &format!("/pass:{}", password.unwrap_or("")),
-            ])
-            .status();
-    }
 }
 
 #[cfg(not(target_os = "linux"))]

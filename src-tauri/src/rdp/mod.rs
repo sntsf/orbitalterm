@@ -47,6 +47,7 @@ fn binary_exists(name: &str) -> bool {
 pub enum RdpFlavor {
     FreeRdp,
     Remmina,
+    Mstsc,
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -59,7 +60,7 @@ pub struct RdpClient {
 pub fn find_rdp_client() -> Result<RdpClient, String> {
     #[cfg(target_os = "windows")]
     {
-        Ok(RdpClient { binary: "mstsc.exe".to_string(), flavor: RdpFlavor::FreeRdp })
+        Ok(RdpClient { binary: "mstsc.exe".to_string(), flavor: RdpFlavor::Mstsc })
     }
     #[cfg(target_os = "macos")]
     {
