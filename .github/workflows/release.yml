@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -49,9 +52,9 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libfreerdp3-dev \
-            libfreerdp-client3-dev \
-            libwinpr3-dev \
+            freerdp2-dev \
+            libfreerdp-client2-dev \
+            libwinpr2-dev \
             libssl-dev \
             pkg-config
 
