@@ -9,6 +9,8 @@ import {
   rdpKeyInput,
   rdpResizeSession,
   rdpRefreshSession,
+  rdpWindowsReposition,
+  rdpWindowsVisibility,
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import { useNotifStore } from "../../store/useNotifStore";
@@ -27,6 +29,81 @@ function isMissingPassword(msg: string): boolean {
 
 interface RdpPaneProps {
   tab: Tab;
+}
+
+// ── Windows native window viewer ─────────────────────────────────────────────
+// On Windows the RDP session is an mstsc.exe window reparented inside Tauri.
+// This component is just a transparent placeholder that keeps the native window
+// positioned and sized correctly.
+
+interface WindowsViewerProps {
+  sessionId: string;
+  onSessionEnded: () => void;
+}
+
+function WindowsEmbeddedViewer({ sessionId, onSessionEnded }: WindowsViewerProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Keep the native mstsc window in sync with this placeholder's position.
+  // When the tab is hidden (display:none), getBoundingClientRect returns 0,0 —
+  // we use that signal to hide the native window, and show it again when visible.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let lastVisible = false;
+
+    const sync = () => {
+      const rect = el.getBoundingClientRect();
+      const visible = rect.width > 0 && rect.height > 0;
+      if (visible) {
+        rdpWindowsReposition(
+          sessionId,
+          Math.round(rect.left),
+          Math.round(rect.top),
+          Math.round(rect.width),
+          Math.round(rect.height),
+        ).catch(() => {});
+        if (!lastVisible) {
+          rdpWindowsVisibility(sessionId, true).catch(() => {});
+        }
+      } else if (lastVisible) {
+        rdpWindowsVisibility(sessionId, false).catch(() => {});
+      }
+      lastVisible = visible;
+    };
+
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    window.addEventListener("resize", sync);
+    sync();
+
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", sync);
+      rdpWindowsVisibility(sessionId, false).catch(() => {});
+    };
+  }, [sessionId]);
+
+  // Listen for mstsc disconnect (process exits)
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const s = await rdpStatus(sessionId);
+        if (s === "disconnected") {
+          clearInterval(interval);
+          onSessionEnded();
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [sessionId, onSessionEnded]);
+
+  return (
+    <div
+      ref={containerRef}
+      style={{ width: "100%", height: "100%", background: "transparent" }}
+    />
+  );
 }
 
 // ── Embedded canvas viewer (Linux) ────────────────────────────────────────────
@@ -189,6 +266,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
   const [status, setStatus] = useState<"connecting" | "connected" | "error">("connecting");
   const [errorMsg, setErrorMsg] = useState("");
   const [embedded, setEmbedded] = useState(false);
+  const [nativeWindow, setNativeWindow] = useState(false); // true = Windows mstsc reparented
   const [frameSize, setFrameSize] = useState({ width: 1280, height: 800 });
   const sessionIdRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -239,7 +317,8 @@ export function RdpPane({ tab }: RdpPaneProps) {
       const el = containerRef.current;
       const w = el ? Math.max(640, Math.floor(el.clientWidth)) : 1280;
       const h = el ? Math.max(480, Math.floor(el.clientHeight)) : 800;
-      const result = await connectRdp(tab.connection_id, w, h, adminMode);
+      const rect = el ? el.getBoundingClientRect() : { left: 0, top: 0 };
+      const result = await connectRdp(tab.connection_id, w, h, adminMode, Math.round(rect.left), Math.round(rect.top));
 
       if (gen !== connectGenRef.current) {
         // Superseded — discard this session so we don't leak an RDP connection.
@@ -250,10 +329,9 @@ export function RdpPane({ tab }: RdpPaneProps) {
       sessionIdRef.current = result.session_id;
       setTabSessionId(tab.id, result.session_id);
       setEmbedded(result.embedded);
-      if (result.embedded) {
+      setNativeWindow(result.native_window);
+      if (result.embedded && !result.native_window) {
         setFrameSize({ width: result.width, height: result.height });
-        // After the GDI is up, Windows may not send a full frame until something
-        // changes.  A Refresh Rect request forces it to repaint the desktop.
         setTimeout(() => {
           if (sessionIdRef.current === result.session_id) {
             rdpRefreshSession(result.session_id).catch(() => {});
@@ -333,8 +411,23 @@ export function RdpPane({ tab }: RdpPaneProps) {
     [],
   );
 
-  // Embedded canvas mode: render canvas immediately after connected
-  if (status === "connected" && embedded && sessionIdRef.current) {
+  // Windows native window: transparent placeholder that drives mstsc position
+  if (status === "connected" && embedded && nativeWindow && sessionIdRef.current) {
+    return (
+      <WindowsEmbeddedViewer
+        sessionId={sessionIdRef.current}
+        onSessionEnded={() => {
+          setEmbedded(false);
+          setNativeWindow(false);
+          setStatus("error");
+          setErrorMsg("SESSION_ENDED");
+        }}
+      />
+    );
+  }
+
+  // Linux canvas mode: receive JPEG frames via Tauri events
+  if (status === "connected" && embedded && !nativeWindow && sessionIdRef.current) {
     return (
       <EmbeddedViewer
         sessionId={sessionIdRef.current}
@@ -342,6 +435,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
         height={frameSize.height}
         onSessionError={(msg) => {
           setEmbedded(false);
+          setNativeWindow(false);
           setStatus("error");
           setErrorMsg(msg);
           if (msg !== "SESSION_ENDED") {

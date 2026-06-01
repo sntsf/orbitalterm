@@ -7,19 +7,22 @@ use std::{
 #[cfg(target_os = "linux")]
 pub mod freerdp;
 
-// embedded.rs is kept in the tree but no longer compiled — the libfreerdp
-// bridge (freerdp.rs) replaces it entirely on Linux.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+pub mod windows_rdp;
+
+// Stub for platforms that have no embedded implementation (macOS, etc.)
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub mod embedded {
     pub struct EmbeddedSession {}
 }
 
-// On Linux the active embedded session type is FreerdpSession.
-// On other platforms keep the old stub.
 #[cfg(target_os = "linux")]
 pub type EmbeddedSession = freerdp::FreerdpSession;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+pub type EmbeddedSession = windows_rdp::WindowsRdpSession;
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub type EmbeddedSession = embedded::EmbeddedSession;
 
 pub type RdpSessionMap = Arc<Mutex<HashMap<String, Child>>>;
