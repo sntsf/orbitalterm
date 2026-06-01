@@ -5,8 +5,11 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
 import { HardDrive } from "lucide-react";
-import { connectSsh, disconnectSsh, resizePty, sendInput, sftpDisconnect } from "../../lib/commands";
+import { connectSsh, disconnectSsh, resizePty, sendInput, sftpConnect, sftpDisconnect } from "../../lib/commands";
+import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import { useAppStore } from "../../store/useAppStore";
+import { usePrefsStore, TERM_THEMES } from "../../store/usePrefsStore";
+import { useNotifStore } from "../../store/useNotifStore";
 import { SftpBrowser } from "../SftpBrowser";
 import type { Tab } from "../../types";
 
@@ -18,11 +21,13 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
+  const { setTabStatus, setTabSessionId, getConnectionById, closeTab } = useAppStore();
+  const { fontSize, theme } = usePrefsStore();
 
   // SFTP panel state
   const [showSftp, setShowSftp] = useState(false);
   const [sftpSessionId, setSftpSessionId] = useState<string | null>(null);
+  const sftpSessionIdRef = useRef<string | null>(null);
   const [sftpWidth, setSftpWidth] = useState(35); // percentage
 
   // Drag handle state
@@ -57,20 +62,11 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
 
   const handleSftpConnect = useCallback((sid: string) => {
     setSftpSessionId(sid);
+    sftpSessionIdRef.current = sid;
   }, []);
 
   const toggleSftp = () => {
-    setShowSftp((v) => {
-      if (v) {
-        // Closing sftp panel — disconnect
-        if (sftpSessionId) {
-          sftpDisconnect(sftpSessionId).catch(console.error);
-          setSftpSessionId(null);
-        }
-      }
-      return !v;
-    });
-    // Re-fit after toggle
+    setShowSftp((v) => !v);
     setTimeout(() => fitAddonRef.current?.fit(), 50);
   };
 
@@ -78,22 +74,10 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
     if (!containerRef.current) return;
 
     const term = new XTerm({
-      theme: {
-        background: "#0f1117",
-        foreground: "#e6edf3",
-        cursor: "#58a6ff",
-        selectionBackground: "#388bfd44",
-        black: "#0d1117",        red: "#f85149",
-        green: "#3fb950",        yellow: "#d29922",
-        blue: "#388bfd",         magenta: "#bc8cff",
-        cyan: "#39c5cf",         white: "#b1bac4",
-        brightBlack: "#6e7681",  brightRed: "#ff7b72",
-        brightGreen: "#56d364",  brightYellow: "#e3b341",
-        brightBlue: "#79c0ff",   brightMagenta: "#d2a8ff",
-        brightCyan: "#56d4dd",   brightWhite: "#f0f6fc",
-      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      theme: TERM_THEMES[theme] as any,
       fontFamily: '"JetBrains Mono","Fira Code","Cascadia Code",monospace',
-      fontSize: 13,
+      fontSize,
       lineHeight: 1.4,
       cursorBlink: true,
       cursorStyle: "block",
@@ -118,55 +102,84 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         return;
       }
 
-      term.writeln(
-        `\x1b[2mConnecting to \x1b[0m\x1b[33m${connection.username}@${connection.host}\x1b[0m\x1b[2m...\x1b[0m`
-      );
+      let sessionId: string;
 
-      try {
-        const sessionId = await connectSsh(connection.id);
+      if (tab.session_id) {
+        // Resume a transferred session — skip the SSH handshake
+        sessionId = tab.session_id;
         sessionIdRef.current = sessionId;
-        setTabSessionId(tab.id, sessionId);
         setTabStatus(tab.id, "connected");
-
-        // Stream SSH output into xterm
-        const unlistenData = await listen<string>(`ssh-data-${sessionId}`, (e) => {
-          term.write(e.payload);
-        });
-        cleanups.push(unlistenData);
-
-        // Handle SSH process exit
-        const unlistenClosed = await listen(`ssh-closed-${sessionId}`, () => {
-          term.writeln("\r\n\x1b[2m[Connection closed]\x1b[0m");
-          setTabStatus(tab.id, "idle");
-        });
-        cleanups.push(unlistenClosed);
-
-        // Copy-on-select (like PuTTY): selecting text copies it automatically
-        term.onSelectionChange(() => {
-          const sel = term.getSelection();
-          if (sel) navigator.clipboard.writeText(sel).catch(() => {});
-        });
-
-        // Forward keystrokes to SSH
-        term.onData((data) => {
-          if (sessionIdRef.current) {
-            sendInput(sessionIdRef.current, data).catch(console.error);
-          }
-        });
-
-        // Sync terminal size with PTY on resize
-        term.onResize(({ cols, rows }) => {
-          if (sessionIdRef.current) {
-            resizePty(sessionIdRef.current, cols, rows).catch(console.error);
-          }
-        });
-
-        // Initial size sync
-        await resizePty(sessionId, term.cols, term.rows);
-      } catch (err) {
-        term.writeln(`\r\n\x1b[31m[Connection failed: ${err}]\x1b[0m`);
-        setTabStatus(tab.id, "error");
+        term.writeln("\x1b[2m[Session resumed]\x1b[0m");
+      } else {
+        term.writeln(
+          `\x1b[2mConnecting to \x1b[0m\x1b[33m${connection.username}@${connection.host}\x1b[0m\x1b[2m...\x1b[0m`
+        );
+        try {
+          sessionId = await connectSsh(connection.id);
+          sessionIdRef.current = sessionId;
+          setTabSessionId(tab.id, sessionId);
+          setTabStatus(tab.id, "connected");
+        } catch (err) {
+          const raw = String(err);
+          term.writeln(`\r\n\x1b[31m[Connection failed: ${raw}]\x1b[0m`);
+          setTabStatus(tab.id, "error");
+          useNotifStore.getState().add({
+            connName: connection.name,
+            connType: connection.type,
+            host: connection.host,
+            raw,
+          });
+          return;
+        }
       }
+
+      // Auto-open SFTP panel and connect (always reconnect SFTP — it's independent)
+      setShowSftp(true);
+      setTimeout(() => fitAddonRef.current?.fit(), 50);
+      sftpConnect(connection.id).then((sid) => {
+        setSftpSessionId(sid);
+        sftpSessionIdRef.current = sid;
+      }).catch(console.error);
+
+      // Stream SSH output into xterm
+      const unlistenData = await listen<string>(`ssh-data-${sessionId}`, (e) => {
+        term.write(e.payload);
+      });
+      cleanups.push(unlistenData);
+
+      // Handle SSH process exit — close SFTP and the tab
+      const unlistenClosed = await listen(`ssh-closed-${sessionId}`, () => {
+        term.writeln("\r\n\x1b[2m[Connection closed]\x1b[0m");
+        if (sftpSessionIdRef.current) {
+          sftpDisconnect(sftpSessionIdRef.current).catch(console.error);
+          sftpSessionIdRef.current = null;
+        }
+        setTimeout(() => closeTab(tab.id), 1500);
+      });
+      cleanups.push(unlistenClosed);
+
+      // Copy-on-select (like PuTTY): selecting text copies it automatically
+      term.onSelectionChange(() => {
+        const sel = term.getSelection();
+        if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+      });
+
+      // Forward keystrokes to SSH
+      term.onData((data) => {
+        if (sessionIdRef.current) {
+          sendInput(sessionIdRef.current, data).catch(console.error);
+        }
+      });
+
+      // Sync terminal size with PTY on resize
+      term.onResize(({ cols, rows }) => {
+        if (sessionIdRef.current) {
+          resizePty(sessionIdRef.current, cols, rows).catch(console.error);
+        }
+      });
+
+      // Initial size sync
+      await resizePty(sessionId, term.cols, term.rows);
     };
 
     init();
@@ -182,8 +195,14 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
       cleanups.forEach((fn) => fn());
       term.dispose();
       fitAddonRef.current = null;
-      if (sessionIdRef.current) {
-        disconnectSsh(sessionIdRef.current).catch(console.error);
+      const sid = sessionIdRef.current;
+      sessionIdRef.current = null;
+      if (sid) {
+        if (skipDisconnectSessions.has(sid)) {
+          skipDisconnectSessions.delete(sid);
+        } else {
+          disconnectSsh(sid).catch(console.error);
+        }
       }
     };
   }, [tab.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -224,26 +243,24 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
       </div>
 
       {/* Drag handle */}
-      {showSftp && (
-        <div
-          onMouseDown={onDividerMouseDown}
-          className="w-1 cursor-col-resize bg-[var(--color-border)] hover:bg-[var(--color-accent)] transition-colors shrink-0"
-        />
-      )}
+      <div
+        onMouseDown={onDividerMouseDown}
+        className="w-1 cursor-col-resize bg-[var(--color-border)] hover:bg-[var(--color-accent)] transition-colors shrink-0"
+        style={{ display: showSftp ? undefined : "none" }}
+      />
 
-      {/* SFTP panel */}
-      {showSftp && (
-        <div
-          className="overflow-hidden shrink-0"
-          style={{ width: `${sftpWidth}%` }}
-        >
-          <SftpBrowser
-            sessionId={sftpSessionId}
-            connectionId={connection?.id ?? tab.connection_id}
-            onConnect={handleSftpConnect}
-          />
-        </div>
-      )}
+      {/* SFTP panel — always mounted to preserve navigation state */}
+      <div
+        className="overflow-hidden shrink-0"
+        style={{ width: `${sftpWidth}%`, display: showSftp ? undefined : "none" }}
+      >
+        <SftpBrowser
+          sessionId={sftpSessionId}
+          connectionId={connection?.id ?? tab.connection_id}
+          username={connection?.username}
+          onConnect={handleSftpConnect}
+        />
+      </div>
     </div>
   );
 }

@@ -1,6 +1,11 @@
-export type ConnectionType = "ssh" | "rdp" | "vnc" | "ftp" | "sftp";
+export type ConnectionType = "ssh" | "rdp" | "vnc" | "ftp" | "sftp" | "browser";
 export type AuthType = "agent" | "password" | "key";
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "error";
+
+export interface Group {
+  id: string;
+  name: string;
+}
 
 export interface Connection {
   id: string;
@@ -15,8 +20,14 @@ export interface Connection {
   notes: string;
   description: string;
   domain: string;
+  rdp_admin: boolean;
   created_at: string;
   updated_at: string;
+  sort_order: number;
+  group_id: string;
+  icon: string;
+  url: string;
+  custom_hosts: string;
 }
 
 export interface Folder {
@@ -24,6 +35,7 @@ export interface Folder {
   name: string;
   parent_id: string | null;
   expanded: boolean;
+  group_id: string;
 }
 
 export interface Tab {
@@ -33,6 +45,7 @@ export interface Tab {
   connection_type: ConnectionType;
   status: ConnectionStatus;
   session_id?: string;
+  icon?: string;
 }
 
 export interface SftpEntry {

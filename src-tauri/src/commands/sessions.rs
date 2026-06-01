@@ -20,7 +20,8 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
     let db = db::open().map_err(|e| e.to_string())?;
     db.query_row(
         "SELECT id, name, type, host, port, username, auth_type, key_path,
-                folder_id, notes, description, domain, created_at, updated_at
+                folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
+                sort_order, group_id, icon, url, custom_hosts
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -37,8 +38,14 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 notes: row.get(9)?,
                 description: row.get(10)?,
                 domain: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                rdp_admin: row.get::<_, i64>(12).unwrap_or(0) != 0,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+                sort_order: row.get(15).unwrap_or(0),
+                group_id: row.get::<_, String>(16).unwrap_or_default(),
+                icon: row.get::<_, String>(17).unwrap_or_default(),
+                url: row.get::<_, String>(18).unwrap_or_default(),
+                custom_hosts: row.get::<_, String>(19).unwrap_or_default(),
             })
         },
     )
@@ -77,6 +84,23 @@ pub async fn delete_password(connection_id: String) -> Result<(), String> {
         "DELETE FROM passwords WHERE connection_id = ?1",
         params![connection_id],
     ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn copy_password(from_id: String, to_id: String) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    let maybe_pw: Option<String> = db.query_row(
+        "SELECT password FROM passwords WHERE connection_id = ?1",
+        params![from_id],
+        |row| row.get(0),
+    ).ok();
+    if let Some(pw) = maybe_pw {
+        db.execute(
+            "INSERT OR REPLACE INTO passwords (connection_id, password) VALUES (?1, ?2)",
+            params![to_id, pw],
+        ).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -238,6 +262,7 @@ pub async fn connect_rdp(
     connection_id: String,
     width: Option<u16>,
     height: Option<u16>,
+    admin_mode: Option<bool>,
 ) -> Result<RdpConnectResult, String> {
     let connection = load_connection(&connection_id)?;
     let password = get_saved_password(&connection_id);
@@ -247,7 +272,7 @@ pub async fn connect_rdp(
         let w = width.unwrap_or(1280).max(640);
         let h = height.unwrap_or(800).max(480);
         let session_id = Uuid::new_v4().to_string();
-        let session = crate::rdp::embedded::launch(
+        let session = crate::rdp::freerdp::launch(
             app,
             &session_id,
             &connection.host,
@@ -257,6 +282,7 @@ pub async fn connect_rdp(
             password.as_deref(),
             w,
             h,
+            connection.rdp_admin || admin_mode.unwrap_or(false),
         )?;
         let width = session.width;
         let height = session.height;
@@ -327,23 +353,18 @@ pub async fn rdp_mouse_input(
     #[allow(unused_variables)]
     session_id: String,
     #[allow(unused_variables)]
-    event_type: u8,
+    flags: u16,
     #[allow(unused_variables)]
-    button: u8,
+    x: u16,
     #[allow(unused_variables)]
-    x: i16,
-    #[allow(unused_variables)]
-    y: i16,
+    y: u16,
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let display = {
-            let map = sessions.lock().unwrap();
-            map.get(&session_id)
-                .map(|s| s.display.clone())
-                .ok_or_else(|| "Session not found".to_string())?
-        };
-        crate::rdp::embedded::mouse_event(&display, event_type, button, x, y)?;
+        let map = sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            session.send_mouse(flags, x, y);
+        }
     }
     Ok(())
 }
@@ -357,17 +378,14 @@ pub async fn rdp_key_input(
     #[allow(unused_variables)]
     pressed: bool,
     #[allow(unused_variables)]
-    key: String,
+    code: String,
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let display = {
-            let map = sessions.lock().unwrap();
-            map.get(&session_id)
-                .map(|s| s.display.clone())
-                .ok_or_else(|| "Session not found".to_string())?
-        };
-        crate::rdp::embedded::key_event(&display, pressed, &key)?;
+        let map = sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            session.send_key(pressed, &code);
+        }
     }
     Ok(())
 }
@@ -405,6 +423,57 @@ pub async fn disconnect_rdp(
     Ok(())
 }
 
+/// Read the user's real Linux clipboard (called from the canvas Ctrl+V handler).
+#[tauri::command]
+pub async fn rdp_get_linux_clipboard() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return Ok(read_linux_clipboard().unwrap_or_default());
+    }
+    #[allow(unreachable_code)]
+    Ok(String::new())
+}
+
+/// Push text to the RDP remote clipboard via the cliprdr virtual channel.
+#[tauri::command]
+pub async fn rdp_set_clipboard(
+    #[allow(unused_variables)] embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
+    #[allow(unused_variables)] session_id: String,
+    #[allow(unused_variables)] text: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let map = embedded_sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            session.set_clipboard(&text);
+        }
+    }
+    Ok(())
+}
+
+/// Read the user's real Linux clipboard (Wayland-native, falls back to X11).
+#[cfg(target_os = "linux")]
+fn read_linux_clipboard() -> Option<String> {
+    let out = std::process::Command::new("wl-paste")
+        .args(["--no-newline", "--type", "text/plain"])
+        .stderr(std::process::Stdio::null())
+        .output();
+    if let Ok(o) = out {
+        if o.status.success() {
+            if let Ok(s) = String::from_utf8(o.stdout) {
+                if !s.is_empty() { return Some(s); }
+            }
+        }
+    }
+    let display = std::env::var("DISPLAY").unwrap_or_default();
+    if display.is_empty() { return None; }
+    let out = std::process::Command::new("xclip")
+        .args(["-display", &display, "-selection", "clipboard", "-o"])
+        .stderr(std::process::Stdio::null())
+        .output().ok()?;
+    if out.status.success() { String::from_utf8(out.stdout).ok() } else { None }
+}
+
 #[tauri::command]
 pub async fn rdp_resize_session(
     embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
@@ -416,10 +485,26 @@ pub async fn rdp_resize_session(
     {
         let map = embedded_sessions.lock().unwrap();
         if let Some(session) = map.get(&session_id) {
-            crate::rdp::embedded::resize(&session.display, &session.dims, width, height)?;
+            session.resize(width, height);
         }
     }
     let _ = (embedded_sessions, session_id, width, height);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn rdp_refresh_session(
+    embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
+    session_id: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let map = embedded_sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            session.refresh();
+        }
+    }
+    let _ = (embedded_sessions, session_id);
     Ok(())
 }
 

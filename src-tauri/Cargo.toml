@@ -15,11 +15,14 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+cc = "1"
+pkg-config = "0.3"
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["unstable"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls", "cookies"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -29,12 +32,27 @@ thiserror = "2"
 dirs = "5"
 portable-pty = "0.8"
 tempfile = "3"
-ssh2 = "0.9"
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
+suppaftp = "6"
+des = "0.8"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+base64 = "0.22"
+roxmltree = "0.20"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["allow-unsafe-code", "xtest"] }
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
-base64 = "0.22"
+
+# Compile image-encoding crates at full optimization even in dev builds.
+# JPEG encoding in the `image` crate is ~20x slower in debug than release;
+# these overrides bring dev-build RDP rendering close to release performance
+# without requiring a full `cargo tauri build`.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.zune-core]
+opt-level = 3
+[profile.dev.package.base64]
+opt-level = 3
 
 [profile.release]
 panic = "abort"

@@ -6,6 +6,7 @@ interface MenuItem {
   action?: () => void;
   danger?: boolean;
   separator?: boolean;
+  disabled?: boolean;
 }
 
 interface ContextMenuProps {
@@ -34,10 +35,13 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
           ) : (
             <button
               key={i}
-              onClick={() => { item.action?.(); onClose(); }}
+              disabled={item.disabled}
+              onClick={() => { if (!item.disabled) { item.action?.(); onClose(); } }}
               className={[
                 "flex items-center gap-2.5 w-full px-3 py-1.5 text-xs text-left transition-colors",
-                item.danger
+                item.disabled
+                  ? "opacity-40 cursor-not-allowed"
+                  : item.danger
                   ? "text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10"
                   : "text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
               ].join(" ")}

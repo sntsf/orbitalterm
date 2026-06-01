@@ -1,48 +1,49 @@
 import { Terminal, Monitor, Download } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
+import { useT } from "../../store/useI18nStore";
 
 export function Welcome() {
   const { startNewConnection } = useAppStore();
+  const t = useT();
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8 bg-[var(--color-bg-base)] h-full">
-      <div>
-        <div className="flex items-center justify-center gap-2 mb-2">
-          <Terminal size={32} className="text-[var(--color-accent)]" />
-          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">
-            OrbitalTerm
-          </h1>
-        </div>
+      <div className="flex flex-col items-center gap-3">
+        <img
+          src="/logo.png"
+          alt="OrbitalTerm"
+          className="h-28 w-auto object-contain select-none"
+          draggable={false}
+        />
         <p className="text-[var(--color-text-muted)] text-sm">
-          Lightweight remote connection manager for sysadmins
+          {t("welcomeSubtitle")}
         </p>
       </div>
 
       <div className="grid grid-cols-3 gap-3 max-w-lg">
         <ActionCard
           icon={<Terminal size={18} />}
-          title="New SSH"
-          desc="Connect to a Linux / Unix server"
+          title={t("welcomeNewSsh")}
+          desc={t("welcomeNewSshDesc")}
           onClick={startNewConnection}
           accent
         />
         <ActionCard
           icon={<Monitor size={18} />}
-          title="New RDP"
-          desc="Connect to a Windows server"
+          title={t("welcomeNewRdp")}
+          desc={t("welcomeNewRdpDesc")}
           onClick={startNewConnection}
         />
         <ActionCard
           icon={<Download size={18} />}
-          title="Import"
-          desc="Import from JSON or mRemoteNG"
+          title={t("welcomeImport")}
+          desc={t("welcomeImportDesc")}
           onClick={() => {}}
         />
       </div>
 
       <p className="text-xs text-[var(--color-text-muted)] max-w-xs">
-        Double-click any connection in the sidebar to open a session tab.
-        All data is stored locally on your machine.
+        {t("welcomeHint")}
       </p>
     </div>
   );
