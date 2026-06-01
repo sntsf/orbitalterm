@@ -53,7 +53,6 @@ jobs:
             librsvg2-dev \
             patchelf \
             freerdp2-dev \
-            libfreerdp-client2-dev \
             libwinpr2-dev \
             libssl-dev \
             pkg-config
