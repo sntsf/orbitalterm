@@ -22,7 +22,6 @@ use std::{
 fn build_client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(Duration::from_secs(30))
         .build()
