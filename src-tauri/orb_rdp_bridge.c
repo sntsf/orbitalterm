@@ -27,6 +27,20 @@
 /* Clipboard channel */
 #include <freerdp/client/cliprdr.h>
 #include <freerdp/channels/cliprdr.h>
+#include <freerdp/version.h>
+
+/* FreeRDP 2/3 compatibility.
+ * FreeRDP 3 moved the common message header fields (msgType, msgFlags,
+ * dataLen) into a nested `.common` sub-struct on clipboard message structs.
+ * FreeRDP 2 has those fields directly on the struct itself.
+ * CLIP_HDR(r) resolves to either (r).common or (r) so the same code
+ * compiles against both versions. */
+#if FREERDP_VERSION_MAJOR >= 3
+#  define CLIP_HDR(r) (r).common
+#else
+#  include <freerdp/client.h>   /* freerdp_client_load_addins on FreeRDP 2 */
+#  define CLIP_HDR(r) (r)
+#endif
 
 /* winpr threading */
 #include <winpr/synch.h>
@@ -208,7 +222,7 @@ static UINT orb_cliprdr_format_list(CliprdrClientContext *cliprdr,
     (void)list;
     /* Acknowledge remote format advertisement */
     CLIPRDR_FORMAT_LIST_RESPONSE resp = { 0 };
-    resp.common.msgFlags = CB_RESPONSE_OK;
+    CLIP_HDR(resp).msgFlags = CB_RESPONSE_OK;
     cliprdr->ClientFormatListResponse(cliprdr, &resp);
     return CHANNEL_RC_OK;
 }
@@ -220,7 +234,7 @@ static UINT orb_cliprdr_format_data_request(CliprdrClientContext *cliprdr,
 
     if (req->requestedFormatId != CF_UNICODETEXT) {
         CLIPRDR_FORMAT_DATA_RESPONSE resp = { 0 };
-        resp.common.msgFlags = CB_RESPONSE_FAIL;
+        CLIP_HDR(resp).msgFlags = CB_RESPONSE_FAIL;
         cliprdr->ClientFormatDataResponse(cliprdr, &resp);
         return CHANNEL_RC_OK;
     }
@@ -231,7 +245,7 @@ static UINT orb_cliprdr_format_data_request(CliprdrClientContext *cliprdr,
 
     if (!text) {
         CLIPRDR_FORMAT_DATA_RESPONSE resp = { 0 };
-        resp.common.msgFlags = CB_RESPONSE_FAIL;
+        CLIP_HDR(resp).msgFlags = CB_RESPONSE_FAIL;
         cliprdr->ClientFormatDataResponse(cliprdr, &resp);
         return CHANNEL_RC_OK;
     }
@@ -248,8 +262,8 @@ static UINT orb_cliprdr_format_data_request(CliprdrClientContext *cliprdr,
         *dst = 0; /* NUL-terminate */
 
         CLIPRDR_FORMAT_DATA_RESPONSE resp = { 0 };
-        resp.common.msgFlags    = CB_RESPONSE_OK;
-        resp.common.dataLen     = (UINT32)((n + 1) * 2);
+        CLIP_HDR(resp).msgFlags    = CB_RESPONSE_OK;
+        CLIP_HDR(resp).dataLen     = (UINT32)((n + 1) * 2);
         resp.requestedFormatData = utf16;
         cliprdr->ClientFormatDataResponse(cliprdr, &resp);
         free(utf16);
