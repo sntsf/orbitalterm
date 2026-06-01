@@ -8,8 +8,9 @@
 //! frontend.  This gives a fully embedded experience identical to mRemoteNG.
 
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::BOOL;
 
 // ── Session ───────────────────────────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ impl Drop for WindowsRdpSession {
             // Hide before reparenting back to avoid flicker on close
             let _ = ShowWindow(hwnd, SW_HIDE);
             // Detach from Tauri parent so mstsc can clean up its own HWND
-            let _ = SetParent(hwnd, HWND(std::ptr::null_mut()));
+            let _ = SetParent(hwnd, None);
         }
         let _ = self.child.kill();
     }
@@ -52,7 +53,6 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     if !IsWindowVisible(hwnd).as_bool() {
         return BOOL(1);
     }
-    // Look for the mstsc shell container window class
     let mut buf = [0u16; 256];
     let len = GetClassNameW(hwnd, &mut buf);
     if len > 0 {
@@ -143,13 +143,13 @@ pub fn launch(
         SetWindowLongW(mstsc_hwnd, GWL_EXSTYLE, ex_style & !(WS_EX_APPWINDOW.0 as i32));
 
         // Reparent into the Tauri window
-        SetParent(mstsc_hwnd, parent_hwnd)
+        SetParent(mstsc_hwnd, Some(parent_hwnd))
             .map_err(|e| format!("SetParent failed: {e}"))?;
 
         // Position above the WebView2 child, flush chrome changes
         let _ = SetWindowPos(
             mstsc_hwnd,
-            HWND_TOP,
+            Some(HWND_TOP),
             x,
             y,
             width,
@@ -168,15 +168,7 @@ pub fn launch(
 pub fn reposition(session: &WindowsRdpSession, x: i32, y: i32, width: i32, height: i32) {
     unsafe {
         let hwnd = HWND(session.mstsc_hwnd as *mut _);
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOP,
-            x,
-            y,
-            width,
-            height,
-            SWP_SHOWWINDOW,
-        );
+        let _ = SetWindowPos(hwnd, Some(HWND_TOP), x, y, width, height, SWP_SHOWWINDOW);
     }
 }
 
@@ -184,7 +176,7 @@ pub fn show(session: &WindowsRdpSession) {
     unsafe {
         let hwnd = HWND(session.mstsc_hwnd as *mut _);
         let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     }
 }
 
