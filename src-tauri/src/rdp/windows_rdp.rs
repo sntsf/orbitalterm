@@ -16,10 +16,9 @@ use windows::core::BOOL;
 
 pub struct WindowsRdpSession {
     pub child: std::process::Child,
-    pub mstsc_hwnd: isize, // HWND stored as isize for Send/Sync
+    pub mstsc_hwnd: isize,
 }
 
-// SAFETY: we only access mstsc_hwnd from the Tauri command thread under Mutex
 unsafe impl Send for WindowsRdpSession {}
 unsafe impl Sync for WindowsRdpSession {}
 
@@ -27,9 +26,7 @@ impl Drop for WindowsRdpSession {
     fn drop(&mut self) {
         unsafe {
             let hwnd = HWND(self.mstsc_hwnd as *mut _);
-            // Hide before reparenting back to avoid flicker on close
             let _ = ShowWindow(hwnd, SW_HIDE);
-            // Detach from Tauri parent so mstsc can clean up its own HWND
             let _ = SetParent(hwnd, None);
         }
         let _ = self.child.kill();
@@ -40,7 +37,9 @@ impl Drop for WindowsRdpSession {
 
 struct FindData {
     target_pid: u32,
-    result: Option<HWND>,
+    // Best match (TscShellContainerClass) and any-match fallback
+    best: Option<HWND>,
+    fallback: Option<HWND>,
 }
 
 unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -50,45 +49,51 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     if pid != data.target_pid {
         return BOOL(1);
     }
-    if !IsWindowVisible(hwnd).as_bool() {
-        return BOOL(1);
-    }
+
+    // Enumerate top-level windows (EnumWindows skips child windows).
     let mut buf = [0u16; 256];
     let len = GetClassNameW(hwnd, &mut buf);
-    if len > 0 {
-        let class = String::from_utf16_lossy(&buf[..len as usize]);
-        if class == "TscShellContainerClass" {
-            data.result = Some(hwnd);
-            return BOOL(0); // stop enumeration
-        }
+    if len == 0 {
+        return BOOL(1);
     }
+    let class = String::from_utf16_lossy(&buf[..len as usize]);
+
+    // TscShellContainerClass = definitive mstsc main window (connecting + session)
+    if class == "TscShellContainerClass" {
+        data.best = Some(hwnd);
+        return BOOL(0); // stop
+    }
+
+    // Accept any other visible window from this process as a fallback
+    // (covers credential dialogs or alternative mstsc window classes)
+    if data.fallback.is_none() && IsWindowVisible(hwnd).as_bool() {
+        data.fallback = Some(hwnd);
+    }
+
     BOOL(1)
 }
 
-/// Poll until mstsc's main window appears or `timeout_ms` elapses.
+/// Poll until a usable mstsc window appears.
+/// Prefers TscShellContainerClass; falls back to any visible window from the process.
 fn find_mstsc_hwnd(pid: u32, timeout_ms: u64) -> Option<HWND> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
-        let mut data = FindData { target_pid: pid, result: None };
+        let mut data = FindData { target_pid: pid, best: None, fallback: None };
         unsafe {
             let _ = EnumWindows(Some(enum_windows_cb), LPARAM(&mut data as *mut _ as isize));
         }
-        if let Some(h) = data.result {
+        if let Some(h) = data.best.or(data.fallback) {
             return Some(h);
         }
         if Instant::now() >= deadline {
             return None;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(150));
     }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Launch mstsc.exe and embed its window inside `parent_hwnd`.
-///
-/// `x`, `y` are window-relative coordinates of the top-left corner of the RDP
-/// canvas area reported by the frontend.  `width`/`height` match the canvas.
 pub fn launch(
     parent_hwnd: HWND,
     host: &str,
@@ -101,7 +106,6 @@ pub fn launch(
     height: i32,
     admin_mode: bool,
 ) -> Result<WindowsRdpSession, String> {
-    // Pre-store credentials so mstsc auto-connects without a password dialog
     if let Some(p) = password {
         let _ = std::process::Command::new("cmdkey")
             .args([
@@ -123,11 +127,15 @@ pub fn launch(
     let child = cmd.spawn().map_err(|e| format!("Failed to launch mstsc: {e}"))?;
     let pid = child.id();
 
-    let mstsc_hwnd = find_mstsc_hwnd(pid, 10_000)
-        .ok_or_else(|| "Timeout: mstsc window did not appear within 10 s".to_string())?;
+    let mstsc_hwnd = find_mstsc_hwnd(pid, 15_000)
+        .ok_or_else(|| {
+            "No se pudo encontrar la ventana de mstsc.\n\
+             Verifica que RDP esté habilitado en el servidor y que el puerto sea correcto."
+                .to_string()
+        })?;
 
     unsafe {
-        // Strip decorations and add WS_CHILD
+        // Strip decorations, add WS_CHILD so it clips to parent
         let style = GetWindowLongW(mstsc_hwnd, GWL_STYLE);
         let new_style = (style
             & !(WS_CAPTION.0 as i32
@@ -138,15 +146,12 @@ pub fn launch(
             | WS_CHILD.0 as i32;
         SetWindowLongW(mstsc_hwnd, GWL_STYLE, new_style);
 
-        // Remove WS_EX_APPWINDOW so it disappears from the taskbar
         let ex_style = GetWindowLongW(mstsc_hwnd, GWL_EXSTYLE);
         SetWindowLongW(mstsc_hwnd, GWL_EXSTYLE, ex_style & !(WS_EX_APPWINDOW.0 as i32));
 
-        // Reparent into the Tauri window
         SetParent(mstsc_hwnd, Some(parent_hwnd))
             .map_err(|e| format!("SetParent failed: {e}"))?;
 
-        // Position above the WebView2 child, flush chrome changes
         let _ = SetWindowPos(
             mstsc_hwnd,
             Some(HWND_TOP),
@@ -164,7 +169,6 @@ pub fn launch(
     })
 }
 
-/// Move and resize the embedded mstsc window (called on canvas resize / tab switch).
 pub fn reposition(session: &WindowsRdpSession, x: i32, y: i32, width: i32, height: i32) {
     unsafe {
         let hwnd = HWND(session.mstsc_hwnd as *mut _);
