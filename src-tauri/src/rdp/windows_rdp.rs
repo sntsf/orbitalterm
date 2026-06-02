@@ -14,9 +14,14 @@ use windows::Win32::System::Variant::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, Ref, PCWSTR};
 
-const CLSID_MSTSC: GUID = GUID::from_values(
+// MsRdpClient10 (Windows 10+); MsRdpClient9 used as fallback
+const CLSID_MSTSC_10: GUID = GUID::from_values(
     0xC0EFA91A, 0xEEB7, 0x41C7,
     [0x97, 0xFA, 0xF0, 0xED, 0x64, 0x5E, 0xFB, 0x24],
+);
+const CLSID_MSTSC_9: GUID = GUID::from_values(
+    0x8B918B82, 0x7985, 0x4C24,
+    [0x89, 0xDF, 0xC3, 0x3A, 0xD2, 0xBB, 0xFB, 0xCD],
 );
 
 // ── Command channel ───────────────────────────────────────────────────────────
@@ -45,13 +50,14 @@ impl Drop for WindowsRdpSession {
 
 // ── OLE Frame ─────────────────────────────────────────────────────────────────
 //
-// mstscax requires a valid IOleInPlaceFrame from GetWindowContext to create
-// its rendering surface.  Without it DoVerb(-5) silently fails and the
-// control connects over TCP but never draws anything (black screen).
+// IOleInPlaceFrame represents the outermost application window.
+// Its GetWindow() MUST return the top-level frame (Tauri main window), NOT the
+// container child window — mstscax uses this to know the app boundary.
+// If we return the wrong HWND here, DoVerb(-5) silently fails → black screen.
 
 #[implement(IOleInPlaceFrame)]
 struct RdpFrame {
-    hwnd: HWND,
+    hwnd: HWND, // top-level application window (Tauri main window)
 }
 
 impl IOleWindow_Impl for RdpFrame_Impl {
@@ -61,10 +67,14 @@ impl IOleWindow_Impl for RdpFrame_Impl {
 
 impl IOleInPlaceUIWindow_Impl for RdpFrame_Impl {
     fn GetBorder(&self) -> windows::core::Result<RECT> { Err(E_NOTIMPL.into()) }
-    // BORDERWIDTHS is a typedef for RECT in the Win32 SDK; windows 0.61 exposes it as RECT
+    // BORDERWIDTHS is a typedef for RECT in the Win32 SDK
     fn RequestBorderSpace(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
     fn SetBorderSpace(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
-    fn SetActiveObject(&self, _: Ref<'_, IOleInPlaceActiveObject>, _: &PCWSTR) -> windows::core::Result<()> { Ok(()) }
+    fn SetActiveObject(
+        &self,
+        _: Ref<'_, IOleInPlaceActiveObject>,
+        _: &PCWSTR,
+    ) -> windows::core::Result<()> { Ok(()) }
 }
 
 impl IOleInPlaceFrame_Impl for RdpFrame_Impl {
@@ -74,20 +84,23 @@ impl IOleInPlaceFrame_Impl for RdpFrame_Impl {
     fn SetStatusText(&self, _: &PCWSTR) -> windows::core::Result<()> { Ok(()) }
     fn EnableModeless(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
     fn TranslateAccelerator(&self, _: *const MSG, _: u16) -> windows::core::Result<()> {
-        // S_FALSE = "not handled by container" → let the control process it
+        // S_FALSE tells the control the container didn't handle it → control processes it
         Err(windows::Win32::Foundation::S_FALSE.into())
     }
 }
 
 // ── OLE Site ──────────────────────────────────────────────────────────────────
+//
+// IOleClientSite + IOleInPlaceSite represent the immediate container window
+// (host_hwnd).  GetWindow() here returns host_hwnd (the child window we own).
 
 #[implement(IOleClientSite, IOleInPlaceSite)]
 struct RdpSite {
-    hwnd: HWND,
-    frame: IOleInPlaceFrame,
+    hwnd: HWND,              // container child window (host_hwnd)
+    frame: IOleInPlaceFrame, // top-level frame (kept alive for GetWindowContext)
 }
 
-// SAFETY: used only on the STA COM thread
+// SAFETY: used exclusively on the dedicated STA COM thread
 unsafe impl Send for RdpSite {}
 
 impl IOleClientSite_Impl for RdpSite_Impl {
@@ -119,7 +132,9 @@ impl IOleInPlaceSite_Impl for RdpSite_Impl {
         lpframeinfo: *mut OLEINPLACEFRAMEINFO,
     ) -> windows::core::Result<()> {
         unsafe {
+            // ppframe → top-level app frame (critical — must be non-null)
             ppframe.write(Some(self.frame.clone()));
+            // ppdoc → null for SDI (no separate document window)
             ppdoc.write(None);
             let mut rc = RECT::default();
             GetClientRect(self.hwnd, &mut rc).ok();
@@ -161,6 +176,7 @@ struct VarRaw { vt: u16, _r: [u16; 3], data: VarData }
 
 fn put_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core::Result<()> {
     let id = get_dispid(disp, name)?;
+    // ManuallyDrop prevents double-free: VariantClear will SysFreeString the ptr.
     let bval = std::mem::ManuallyDrop::new(BSTR::from(value));
     unsafe {
         let mut var: VARIANT = std::mem::zeroed();
@@ -260,6 +276,7 @@ struct LaunchParams {
     y: i32,
     width: i32,
     height: i32,
+    admin_mode: bool,
 }
 
 fn sta_thread(
@@ -275,12 +292,14 @@ fn sta_thread(
         register_host_class();
 
         let hmod = GetModuleHandleW(None).unwrap_or_default();
+        // parent = Tauri main window (top-level application frame)
         let parent = HWND(params.parent_hwnd as *mut _);
         let w = params.width.max(640);
         let h = params.height.max(480);
 
+        // WS_EX_NOACTIVATE: don't steal focus from WebView2 / the UI
         let host_hwnd = match CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+            WS_EX_NOACTIVATE,
             HOST_CLASS, w!(""),
             WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
             params.x, params.y, w, h,
@@ -294,11 +313,14 @@ fn sta_thread(
             }
         };
 
-        // Bring above WebView2 before the control activates
+        // Show above WebView2 before the control activates
         SetWindowPos(host_hwnd, Some(HWND_TOP), params.x, params.y, w, h,
             SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
 
-        let rdp_unk: IUnknown = match CoCreateInstance(&CLSID_MSTSC, None, CLSCTX_INPROC_SERVER) {
+        // Try MsRdpClient10 first, fall back to MsRdpClient9 for older Windows
+        let rdp_unk: IUnknown = match CoCreateInstance(&CLSID_MSTSC_10, None, CLSCTX_INPROC_SERVER)
+            .or_else(|_| CoCreateInstance(&CLSID_MSTSC_9, None, CLSCTX_INPROC_SERVER))
+        {
             Ok(u) => u,
             Err(e) => {
                 let _ = result_tx.send(Err(format!(
@@ -320,8 +342,11 @@ fn sta_thread(
             }
         };
 
-        // Build site + frame — frame must be non-null for DoVerb to succeed
-        let frame: IOleInPlaceFrame = RdpFrame { hwnd: host_hwnd }.into();
+        // frame → top-level application window (Tauri main window).
+        // This is CRITICAL: IOleInPlaceFrame::GetWindow must return the top-level
+        // frame, not the container child. mstscax validates this to create its
+        // rendering surface — wrong HWND here = black screen.
+        let frame: IOleInPlaceFrame = RdpFrame { hwnd: parent }.into();
         let site: IOleClientSite = RdpSite { hwnd: host_hwnd, frame: frame.clone() }.into();
 
         if let Err(e) = ole_obj.SetClientSite(Some(&site)) {
@@ -331,19 +356,24 @@ fn sta_thread(
             return;
         }
 
-        let mut rc = RECT::default();
-        GetClientRect(host_hwnd, &mut rc).ok();
+        // Mark as embedded (contained) object — affects OLE lifecycle
+        let _ = OleSetContainedObject(&rdp_unk, true);
 
-        // OLEIVERB_INPLACEACTIVATE = -5: creates the rendering surface inside host_hwnd
+        // Identify the container application to the control
+        let _ = ole_obj.SetHostNames(w!("OrbitalTerm"), w!(""));
+
+        let mut rc = RECT { left: 0, top: 0, right: w, bottom: h };
+
+        // OLEIVERB_INPLACEACTIVATE (-5): creates the rendering surface inside host_hwnd.
+        // With a valid IOleInPlaceFrame this should succeed; fall back to SHOW (-1) if not.
         let dv_result = ole_obj.DoVerb(-5i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
         if dv_result.is_err() {
-            // Fall back to OLEIVERB_SHOW = -1 if in-place activation fails
             let _ = ole_obj.DoVerb(-1i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
         }
 
-        // Tell the control its exact rendering rectangle
+        // Sync the OLE rendering rectangle to the actual window size
         if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
-            let _ = ipo.SetObjectRects(&rc as *const RECT, &rc as *const RECT);
+            let _ = ipo.SetObjectRects(&rc, &rc);
         }
 
         let disp: IDispatch = match rdp_unk.cast() {
@@ -356,6 +386,7 @@ fn sta_thread(
             }
         };
 
+        // ── RDP properties ────────────────────────────────────────────────────
         let _ = put_bstr(&disp, "Server", &params.host);
         let _ = put_i4(&disp, "RDPPort", params.port as i32);
         let _ = put_bstr(&disp, "UserName", &params.username);
@@ -363,15 +394,23 @@ fn sta_thread(
         let _ = put_i4(&disp, "DesktopHeight", h);
         let _ = put_bool_prop(&disp, "FullScreen", false);
 
+        // AdvancedSettings: password + security layer
         let adv = get_dispatch_sub(&disp, "AdvancedSettings9")
             .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings7"))
             .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings2"));
-        if let Ok(adv) = adv {
+        if let Ok(ref adv) = adv {
             if let Some(ref pw) = params.password {
-                let _ = put_bstr(&adv, "ClearTextPassword", pw);
+                let _ = put_bstr(adv, "ClearTextPassword", pw);
             }
-            let _ = put_i4(&adv, "RDPPort", params.port as i32);
-            let _ = put_bool_prop(&adv, "EnableCredSspSupport", true);
+            let _ = put_i4(adv, "RDPPort", params.port as i32);
+            // Enable NLA (CredSSP) for modern servers; some old servers need it off
+            let _ = put_bool_prop(adv, "EnableCredSspSupport", true);
+            // SmartSizing: scale to window
+            let _ = put_bool_prop(adv, "SmartSizing", true);
+            if params.admin_mode {
+                // Connect to admin/console session
+                let _ = put_i4(adv, "ConnectToAdministerServer", 1);
+            }
         }
 
         if let Err(e) = call_no_args(&disp, "Connect") {
@@ -384,14 +423,15 @@ fn sta_thread(
         let (tx, rx) = mpsc::sync_channel::<ComCmd>(16);
         let _ = result_tx.send(Ok(tx));
 
+        // ── Message / command loop ─────────────────────────────────────────────
         let mut msg = MSG::default();
         'outer: loop {
+            // Drain the command channel
             loop {
                 match rx.try_recv() {
                     Ok(ComCmd::Reposition { x, y, width, height }) => {
                         SetWindowPos(host_hwnd, Some(HWND_TOP), x, y, width, height,
                             SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
-                        // Keep the OLE in-place object sized to match
                         if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
                             let r = RECT { left: 0, top: 0, right: width, bottom: height };
                             let _ = ipo.SetObjectRects(&r, &r);
@@ -411,6 +451,7 @@ fn sta_thread(
                     Err(mpsc::TryRecvError::Empty) => break,
                 }
             }
+            // Pump the COM STA message queue
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT { break 'outer; }
                 TranslateMessage(&msg);
@@ -419,6 +460,7 @@ fn sta_thread(
             std::thread::sleep(Duration::from_millis(16));
         }
 
+        let _ = ole_obj.SetClientSite(None);
         DestroyWindow(host_hwnd).ok();
         drop(disp);
         drop(ole_obj);
@@ -440,14 +482,16 @@ pub fn launch(
     y: i32,
     width: i32,
     height: i32,
-    _admin_mode: bool,
+    admin_mode: bool,
 ) -> Result<WindowsRdpSession, String> {
     let params = LaunchParams {
         parent_hwnd: parent_hwnd.0 as isize,
-        host: host.to_string(), port,
+        host: host.to_string(),
+        port,
         username: username.to_string(),
         password: password.map(str::to_string),
         x, y, width, height,
+        admin_mode,
     };
     let (result_tx, result_rx) = mpsc::sync_channel::<Result<mpsc::SyncSender<ComCmd>, String>>(1);
     std::thread::spawn(move || sta_thread(params, result_tx));

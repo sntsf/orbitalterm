@@ -7,28 +7,60 @@ use uuid::Uuid;
 
 use crate::{commands::sessions::load_connection, sftp::{SftpConn, SftpSessionMap}};
 
-/// Set broad algorithm preferences so libssh2 can negotiate with modern servers.
-/// method_pref rejects lists containing unsupported algorithms, so we try
-/// progressively shorter lists until one is accepted.
+/// Configure libssh2 algorithm preferences for maximum compatibility.
+///
+/// method_pref() validates each name against libssh2's compiled-in list and
+/// returns Err if any name is unknown, so we try progressively shorter lists
+/// until one is accepted.  We go from modern → legacy to support both new
+/// servers (curve25519, chacha20) and old ones (group1-sha1, 3des-cbc).
 fn configure_algorithms(session: &Session) {
+    // Key exchange — include legacy group1 and group-exchange for old servers
     for kex in &[
-        "curve25519-sha256,curve25519-sha256@libssh2.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha256",
-        "ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group14-sha256,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha256",
-        "ecdh-sha2-nistp256,diffie-hellman-group14-sha256,diffie-hellman-group14-sha1",
-        "diffie-hellman-group14-sha256,diffie-hellman-group14-sha1",
+        "curve25519-sha256,curve25519-sha256@libssh2.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha256,diffie-hellman-group-exchange-sha1,diffie-hellman-group1-sha1",
+        "ecdh-sha2-nistp256,diffie-hellman-group14-sha256,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha256,diffie-hellman-group-exchange-sha1,diffie-hellman-group1-sha1",
+        "diffie-hellman-group14-sha256,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1,diffie-hellman-group1-sha1",
+        "diffie-hellman-group14-sha1,diffie-hellman-group1-sha1",
+        "diffie-hellman-group14-sha1",
     ] {
         if session.method_pref(MethodType::Kex, kex).is_ok() {
             break;
         }
     }
+
+    // Host key types — include ssh-dss for old servers
     for hostkey in &[
-        "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-256,rsa-sha2-512,ssh-rsa",
-        "ecdsa-sha2-nistp256,rsa-sha2-256,rsa-sha2-512,ssh-rsa",
+        "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-256,rsa-sha2-512,ssh-rsa,ssh-dss",
+        "ecdsa-sha2-nistp256,rsa-sha2-256,rsa-sha2-512,ssh-rsa,ssh-dss",
+        "ssh-rsa,ssh-dss",
         "ssh-rsa",
     ] {
         if session.method_pref(MethodType::HostKey, hostkey).is_ok() {
             break;
         }
+    }
+
+    // Ciphers — include legacy CBC and 3DES for old embedded/appliance servers
+    for crypt in &[
+        "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr,aes256-cbc,aes192-cbc,aes128-cbc,3des-cbc,blowfish-cbc",
+        "aes256-ctr,aes192-ctr,aes128-ctr,aes256-cbc,aes128-cbc,3des-cbc",
+        "aes128-ctr,aes128-cbc,3des-cbc",
+        "aes128-cbc,3des-cbc",
+    ] {
+        let cs_ok = session.method_pref(MethodType::CryptCs, crypt).is_ok();
+        let sc_ok = session.method_pref(MethodType::CryptSc, crypt).is_ok();
+        if cs_ok && sc_ok { break; }
+    }
+
+    // MACs — include old hmac-sha1 and hmac-md5
+    for mac in &[
+        "hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha2-256,hmac-sha2-512,hmac-sha1,hmac-sha1-96,hmac-md5",
+        "hmac-sha2-256,hmac-sha2-512,hmac-sha1,hmac-md5",
+        "hmac-sha1,hmac-md5",
+        "hmac-sha1",
+    ] {
+        let cs_ok = session.method_pref(MethodType::MacCs, mac).is_ok();
+        let sc_ok = session.method_pref(MethodType::MacSc, mac).is_ok();
+        if cs_ok && sc_ok { break; }
     }
 }
 
