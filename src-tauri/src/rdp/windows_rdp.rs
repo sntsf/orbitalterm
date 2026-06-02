@@ -12,7 +12,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::Variant::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, PCWSTR, PWSTR};
+use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, PCWSTR};
 
 // ── CLSID ─────────────────────────────────────────────────────────────────────
 
@@ -111,10 +111,10 @@ impl IOleInPlaceSite_Impl for RdpSite_Impl {
 // ── IDispatch helpers ─────────────────────────────────────────────────────────
 
 fn get_dispid(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
-    let mut wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut pwstr = PWSTR(wide.as_mut_ptr());
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let pcwstr = PCWSTR(wide.as_ptr());
     let mut id = 0i32;
-    unsafe { disp.GetIDsOfNames(&GUID::zeroed(), &mut pwstr, 1, 0x0409, &mut id)?; }
+    unsafe { disp.GetIDsOfNames(&GUID::zeroed(), &pcwstr, 1, 0x0409, &mut id)?; }
     Ok(id)
 }
 
@@ -127,13 +127,14 @@ struct VarRaw { vt: u16, _r: [u16; 3], data: VarData }
 
 fn put_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core::Result<()> {
     let id = get_dispid(disp, name)?;
-    let bval = BSTR::from(value);
+    // ManuallyDrop prevents double-free: VariantClear will SysFreeString the ptr.
+    let bval = std::mem::ManuallyDrop::new(BSTR::from(value));
     unsafe {
         let mut var: VARIANT = std::mem::zeroed();
         {
             let r = &mut var as *mut VARIANT as *mut VarRaw;
             (*r).vt = 8; // VT_BSTR
-            (*r).data.bstrVal = windows::Win32::System::Ole::SysAllocString(PCWSTR(bval.as_ptr()));
+            (*r).data.bstrVal = bval.as_ptr() as *mut u16;
         }
         let mut named = DISPID_PROPERTYPUT;
         let res = disp.Invoke(
@@ -141,7 +142,7 @@ fn put_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core::Result<
             &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
             None, None, None,
         );
-        VariantClear(&mut var).ok();
+        VariantClear(&mut var).ok(); // frees the BSTR via SysFreeString
         res
     }
 }
