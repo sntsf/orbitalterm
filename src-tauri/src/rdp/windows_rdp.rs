@@ -12,9 +12,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::Variant::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, PCWSTR};
-
-// ── CLSID ─────────────────────────────────────────────────────────────────────
+use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, Ref, PCWSTR};
 
 const CLSID_MSTSC: GUID = GUID::from_values(
     0xC0EFA91A, 0xEEB7, 0x41C7,
@@ -45,15 +43,52 @@ impl Drop for WindowsRdpSession {
     }
 }
 
-// ── OLE site ──────────────────────────────────────────────────────────────────
+// ── OLE Frame ─────────────────────────────────────────────────────────────────
 //
-// We only need IOleClientSite + IOleInPlaceSite for mstscax to render.
-// IOleInPlaceFrame (menu merging, status bar) is not required for embedding.
+// mstscax requires a valid IOleInPlaceFrame from GetWindowContext to create
+// its rendering surface.  Without it DoVerb(-5) silently fails and the
+// control connects over TCP but never draws anything (black screen).
+
+#[implement(IOleInPlaceFrame)]
+struct RdpFrame {
+    hwnd: HWND,
+}
+
+impl IOleWindow_Impl for RdpFrame_Impl {
+    fn GetWindow(&self) -> windows::core::Result<HWND> { Ok(self.hwnd) }
+    fn ContextSensitiveHelp(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
+}
+
+impl IOleInPlaceUIWindow_Impl for RdpFrame_Impl {
+    fn GetBorder(&self) -> windows::core::Result<RECT> { Err(E_NOTIMPL.into()) }
+    // BORDERWIDTHS is a typedef for RECT in the Win32 SDK; windows 0.61 exposes it as RECT
+    fn RequestBorderSpace(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
+    fn SetBorderSpace(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
+    fn SetActiveObject(&self, _: Ref<'_, IOleInPlaceActiveObject>, _: &PCWSTR) -> windows::core::Result<()> { Ok(()) }
+}
+
+impl IOleInPlaceFrame_Impl for RdpFrame_Impl {
+    fn InsertMenus(&self, _: HMENU, _: *mut OLEMENUGROUPWIDTHS) -> windows::core::Result<()> { Ok(()) }
+    fn SetMenu(&self, _: HMENU, _: isize, _: HWND) -> windows::core::Result<()> { Ok(()) }
+    fn RemoveMenus(&self, _: HMENU) -> windows::core::Result<()> { Ok(()) }
+    fn SetStatusText(&self, _: &PCWSTR) -> windows::core::Result<()> { Ok(()) }
+    fn EnableModeless(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
+    fn TranslateAccelerator(&self, _: *const MSG, _: u16) -> windows::core::Result<()> {
+        // S_FALSE = "not handled by container" → let the control process it
+        Err(windows::Win32::Foundation::S_FALSE.into())
+    }
+}
+
+// ── OLE Site ──────────────────────────────────────────────────────────────────
 
 #[implement(IOleClientSite, IOleInPlaceSite)]
 struct RdpSite {
     hwnd: HWND,
+    frame: IOleInPlaceFrame,
 }
+
+// SAFETY: used only on the STA COM thread
+unsafe impl Send for RdpSite {}
 
 impl IOleClientSite_Impl for RdpSite_Impl {
     fn SaveObject(&self) -> windows::core::Result<()> { Err(E_NOTIMPL.into()) }
@@ -84,7 +119,7 @@ impl IOleInPlaceSite_Impl for RdpSite_Impl {
         lpframeinfo: *mut OLEINPLACEFRAMEINFO,
     ) -> windows::core::Result<()> {
         unsafe {
-            ppframe.write(None);
+            ppframe.write(Some(self.frame.clone()));
             ppdoc.write(None);
             let mut rc = RECT::default();
             GetClientRect(self.hwnd, &mut rc).ok();
@@ -118,8 +153,7 @@ fn get_dispid(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
     Ok(id)
 }
 
-// Build a VT_BSTR VARIANT using repr-C layout to avoid windows 0.61 API changes.
-// VARIANT on Win64: u16 vt + u16[3] reserved + 8-byte data union = 16 bytes.
+// VARIANT on Win64: u16 vt + u16[3] reserved + 8-byte data = 16 bytes total.
 #[repr(C)]
 union VarData { bstrVal: *mut u16, lVal: i32, boolVal: i16, pdispVal: *mut core::ffi::c_void }
 #[repr(C)]
@@ -127,22 +161,15 @@ struct VarRaw { vt: u16, _r: [u16; 3], data: VarData }
 
 fn put_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core::Result<()> {
     let id = get_dispid(disp, name)?;
-    // ManuallyDrop prevents double-free: VariantClear will SysFreeString the ptr.
     let bval = std::mem::ManuallyDrop::new(BSTR::from(value));
     unsafe {
         let mut var: VARIANT = std::mem::zeroed();
-        {
-            let r = &mut var as *mut VARIANT as *mut VarRaw;
-            (*r).vt = 8; // VT_BSTR
-            (*r).data.bstrVal = bval.as_ptr() as *mut u16;
-        }
+        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 8; (*r).data.bstrVal = bval.as_ptr() as *mut u16; }
         let mut named = DISPID_PROPERTYPUT;
-        let res = disp.Invoke(
-            id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
+        let res = disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
             &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
-            None, None, None,
-        );
-        VariantClear(&mut var).ok(); // frees the BSTR via SysFreeString
+            None, None, None);
+        VariantClear(&mut var).ok();
         res
     }
 }
@@ -151,13 +178,11 @@ fn put_i4(disp: &IDispatch, name: &str, value: i32) -> windows::core::Result<()>
     let id = get_dispid(disp, name)?;
     unsafe {
         let mut var: VARIANT = std::mem::zeroed();
-        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 3; (*r).data.lVal = value; } // VT_I4
+        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 3; (*r).data.lVal = value; }
         let mut named = DISPID_PROPERTYPUT;
-        disp.Invoke(
-            id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
+        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
             &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
-            None, None, None,
-        )
+            None, None, None)
     }
 }
 
@@ -165,17 +190,11 @@ fn put_bool_prop(disp: &IDispatch, name: &str, value: bool) -> windows::core::Re
     let id = get_dispid(disp, name)?;
     unsafe {
         let mut var: VARIANT = std::mem::zeroed();
-        {
-            let r = &mut var as *mut VARIANT as *mut VarRaw;
-            (*r).vt = 11; // VT_BOOL
-            (*r).data.boolVal = if value { -1i16 } else { 0i16 }; // VARIANT_BOOL
-        }
+        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 11; (*r).data.boolVal = if value { -1i16 } else { 0i16 }; }
         let mut named = DISPID_PROPERTYPUT;
-        disp.Invoke(
-            id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
+        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
             &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
-            None, None, None,
-        )
+            None, None, None)
     }
 }
 
@@ -183,19 +202,15 @@ fn get_dispatch_sub(disp: &IDispatch, name: &str) -> windows::core::Result<IDisp
     let id = get_dispid(disp, name)?;
     unsafe {
         let mut result: VARIANT = std::mem::zeroed();
-        disp.Invoke(
-            id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYGET,
+        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYGET,
             &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
-            Some(&mut result), None, None,
-        )?;
+            Some(&mut result), None, None)?;
         let r = &result as *const VARIANT as *const VarRaw;
-        if (*r).vt == 9 { // VT_DISPATCH
+        if (*r).vt == 9 {
             let raw = (*r).data.pdispVal;
             if !raw.is_null() {
-                // Zero vt so VariantClear won't Release the pointer we're taking
-                (*(r as *mut VarRaw)).vt = 0;
-                let iface = IDispatch::from_raw(raw);
-                return Ok(iface);
+                (*(r as *mut VarRaw)).vt = 0; // zero vt so VariantClear won't Release
+                return Ok(IDispatch::from_raw(raw));
             }
         }
         VariantClear(&mut result).ok();
@@ -206,15 +221,13 @@ fn get_dispatch_sub(disp: &IDispatch, name: &str) -> windows::core::Result<IDisp
 fn call_no_args(disp: &IDispatch, name: &str) -> windows::core::Result<()> {
     let id = get_dispid(disp, name)?;
     unsafe {
-        disp.Invoke(
-            id, &GUID::zeroed(), 0x0409, DISPATCH_METHOD,
+        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_METHOD,
             &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
-            None, None, None,
-        )
+            None, None, None)
     }
 }
 
-// ── Host window ───────────────────────────────────────────────────────────────
+// ── Host window class ─────────────────────────────────────────────────────────
 
 const HOST_CLASS: PCWSTR = w!("OrbRdpHostWnd");
 
@@ -269,23 +282,27 @@ fn sta_thread(
         let host_hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             HOST_CLASS, w!(""),
-            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+            WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
             params.x, params.y, w, h,
             Some(parent), None, Some(hmod.into()), None,
         ) {
             Ok(hwnd) => hwnd,
             Err(e) => {
-                let _ = result_tx.send(Err(format!("CreateWindowExW failed: {e}")));
+                let _ = result_tx.send(Err(format!("CreateWindowExW: {e}")));
                 CoUninitialize();
                 return;
             }
         };
 
+        // Bring above WebView2 before the control activates
+        SetWindowPos(host_hwnd, Some(HWND_TOP), params.x, params.y, w, h,
+            SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
+
         let rdp_unk: IUnknown = match CoCreateInstance(&CLSID_MSTSC, None, CLSCTX_INPROC_SERVER) {
             Ok(u) => u,
             Err(e) => {
                 let _ = result_tx.send(Err(format!(
-                    "mstscax.dll no encontrado ({e})\nInstala Remote Desktop Connection en Windows."
+                    "mstscax.dll no encontrado ({e})\nInstala Remote Desktop Connection."
                 )));
                 DestroyWindow(host_hwnd).ok();
                 CoUninitialize();
@@ -303,7 +320,9 @@ fn sta_thread(
             }
         };
 
-        let site: IOleClientSite = RdpSite { hwnd: host_hwnd }.into();
+        // Build site + frame — frame must be non-null for DoVerb to succeed
+        let frame: IOleInPlaceFrame = RdpFrame { hwnd: host_hwnd }.into();
+        let site: IOleClientSite = RdpSite { hwnd: host_hwnd, frame: frame.clone() }.into();
 
         if let Err(e) = ole_obj.SetClientSite(Some(&site)) {
             let _ = result_tx.send(Err(format!("SetClientSite: {e}")));
@@ -314,8 +333,18 @@ fn sta_thread(
 
         let mut rc = RECT::default();
         GetClientRect(host_hwnd, &mut rc).ok();
-        // OLEIVERB_INPLACEACTIVATE = -5
-        let _ = ole_obj.DoVerb(-5i32, std::ptr::null(), &site, 0, host_hwnd, &rc as *const RECT);
+
+        // OLEIVERB_INPLACEACTIVATE = -5: creates the rendering surface inside host_hwnd
+        let dv_result = ole_obj.DoVerb(-5i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
+        if dv_result.is_err() {
+            // Fall back to OLEIVERB_SHOW = -1 if in-place activation fails
+            let _ = ole_obj.DoVerb(-1i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
+        }
+
+        // Tell the control its exact rendering rectangle
+        if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
+            let _ = ipo.SetObjectRects(&rc as *const RECT, &rc as *const RECT);
+        }
 
         let disp: IDispatch = match rdp_unk.cast() {
             Ok(d) => d,
@@ -362,6 +391,11 @@ fn sta_thread(
                     Ok(ComCmd::Reposition { x, y, width, height }) => {
                         SetWindowPos(host_hwnd, Some(HWND_TOP), x, y, width, height,
                             SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
+                        // Keep the OLE in-place object sized to match
+                        if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
+                            let r = RECT { left: 0, top: 0, right: width, bottom: height };
+                            let _ = ipo.SetObjectRects(&r, &r);
+                        }
                     }
                     Ok(ComCmd::Show) => {
                         ShowWindow(host_hwnd, SW_SHOW);
@@ -389,6 +423,7 @@ fn sta_thread(
         drop(disp);
         drop(ole_obj);
         drop(site);
+        drop(frame);
         CoUninitialize();
     }
 }
@@ -409,8 +444,7 @@ pub fn launch(
 ) -> Result<WindowsRdpSession, String> {
     let params = LaunchParams {
         parent_hwnd: parent_hwnd.0 as isize,
-        host: host.to_string(),
-        port,
+        host: host.to_string(), port,
         username: username.to_string(),
         password: password.map(str::to_string),
         x, y, width, height,
