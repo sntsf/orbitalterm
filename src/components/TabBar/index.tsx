@@ -29,10 +29,17 @@ export function TabBar() {
 
   const closeMenu = () => setMenu(null);
 
+  // Windows native RDP sessions use a Win32 child window bound to the original
+  // parent HWND — it cannot be transferred to a new Tauri window.  Skip the
+  // session store so the old session disconnects cleanly and the new window
+  // starts a fresh connection instead of trying to reparent the Win32 window.
+  const isWindows = /Windows/i.test(navigator.userAgent);
+
   async function tearOut(tab: Tab) {
     try {
       const label = `detached-${tab.connection_id}`;
-      if (tab.session_id) {
+      const isNativeRdp = tab.connection_type === "rdp" && isWindows;
+      if (tab.session_id && !isNativeRdp) {
         skipDisconnectSessions.add(tab.session_id);
         await storeDetachedSession(label, tab.session_id);
       }
