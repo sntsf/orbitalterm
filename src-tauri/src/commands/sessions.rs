@@ -312,6 +312,7 @@ pub async fn connect_rdp(
             &connection.host,
             connection.port as u16,
             &connection.username,
+            &connection.domain,
             password.as_deref(),
             x,
             y,

@@ -271,6 +271,7 @@ struct LaunchParams {
     host: String,
     port: u16,
     username: String,
+    domain: String,
     password: Option<String>,
     x: i32,
     y: i32,
@@ -386,13 +387,45 @@ fn sta_thread(
             }
         };
 
+        // ── Store credentials in Windows Credential Manager ───────────────────
+        // NLA/CredSSP reads from Credential Manager — this suppresses the
+        // "Escribir las credenciales" prompt that appears when mstscax can't
+        // find credentials for the target server.
+        if let Some(ref pw) = params.password {
+            let target = format!("TERMSRV/{}", params.host);
+            let user = if params.domain.is_empty() {
+                params.username.clone()
+            } else {
+                format!("{}\\{}", params.domain, params.username)
+            };
+            // CREATE_NO_WINDOW = 0x08000000 — don't flash a console
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("cmdkey")
+                    .creation_flags(0x08000000)
+                    .args([
+                        &format!("/add:{}", target),
+                        &format!("/user:{}", user),
+                        &format!("/pass:{}", pw),
+                    ])
+                    .status();
+            }
+        }
+
         // ── RDP properties ────────────────────────────────────────────────────
         let _ = put_bstr(&disp, "Server", &params.host);
         let _ = put_i4(&disp, "RDPPort", params.port as i32);
         let _ = put_bstr(&disp, "UserName", &params.username);
+        if !params.domain.is_empty() {
+            let _ = put_bstr(&disp, "Domain", &params.domain);
+        }
         let _ = put_i4(&disp, "DesktopWidth", w);
         let _ = put_i4(&disp, "DesktopHeight", h);
         let _ = put_bool_prop(&disp, "FullScreen", false);
+        // 0 = always connect even if cert doesn't match → suppresses the
+        // "Precaución: conexión remota desconocida" security warning dialog
+        let _ = put_i4(&disp, "AuthenticationLevel", 0);
 
         // AdvancedSettings: password + security layer
         let adv = get_dispatch_sub(&disp, "AdvancedSettings9")
@@ -403,12 +436,9 @@ fn sta_thread(
                 let _ = put_bstr(adv, "ClearTextPassword", pw);
             }
             let _ = put_i4(adv, "RDPPort", params.port as i32);
-            // Enable NLA (CredSSP) for modern servers; some old servers need it off
             let _ = put_bool_prop(adv, "EnableCredSspSupport", true);
-            // SmartSizing: scale to window
             let _ = put_bool_prop(adv, "SmartSizing", true);
             if params.admin_mode {
-                // Connect to admin/console session
                 let _ = put_i4(adv, "ConnectToAdministerServer", 1);
             }
         }
@@ -477,6 +507,7 @@ pub fn launch(
     host: &str,
     port: u16,
     username: &str,
+    domain: &str,
     password: Option<&str>,
     x: i32,
     y: i32,
@@ -489,6 +520,7 @@ pub fn launch(
         host: host.to_string(),
         port,
         username: username.to_string(),
+        domain: domain.to_string(),
         password: password.map(str::to_string),
         x, y, width, height,
         admin_mode,
