@@ -2,11 +2,18 @@
 
 //! Embedded RDP on Windows via COM in-process hosting of mstscax.dll.
 //! No mstsc.exe process is launched — identical to mRemoteNG's approach.
+//!
+//! ## Z-order and WebView2
+//! WebView2 renders via DirectComposition (DComp). Traditional WS_CHILD windows
+//! exist in the Win32 z-order which lies BELOW the DComp layer — they appear
+//! as black rectangles regardless of HWND_TOP. The fix is to use a WS_POPUP
+//! window (not WS_CHILD) with an owner relationship (GWLP_HWNDPARENT) so it
+//! sits above the DComp layer while still minimizing/restoring with Tauri.
 
 use std::sync::mpsc;
 use std::time::Duration;
 
-use windows::Win32::Foundation::{E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{E_NOTIMPL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::*;
@@ -67,7 +74,6 @@ impl IOleWindow_Impl for RdpFrame_Impl {
 
 impl IOleInPlaceUIWindow_Impl for RdpFrame_Impl {
     fn GetBorder(&self) -> windows::core::Result<RECT> { Err(E_NOTIMPL.into()) }
-    // BORDERWIDTHS is a typedef for RECT in the Win32 SDK
     fn RequestBorderSpace(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
     fn SetBorderSpace(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
     fn SetActiveObject(
@@ -92,11 +98,11 @@ impl IOleInPlaceFrame_Impl for RdpFrame_Impl {
 // ── OLE Site ──────────────────────────────────────────────────────────────────
 //
 // IOleClientSite + IOleInPlaceSite represent the immediate container window
-// (host_hwnd).  GetWindow() here returns host_hwnd (the child window we own).
+// (host_hwnd). GetWindow() here returns host_hwnd (the popup we own).
 
 #[implement(IOleClientSite, IOleInPlaceSite)]
 struct RdpSite {
-    hwnd: HWND,              // container child window (host_hwnd)
+    hwnd: HWND,              // container popup window (host_hwnd)
     frame: IOleInPlaceFrame, // top-level frame (kept alive for GetWindowContext)
 }
 
@@ -176,7 +182,6 @@ struct VarRaw { vt: u16, _r: [u16; 3], data: VarData }
 
 fn put_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core::Result<()> {
     let id = get_dispid(disp, name)?;
-    // ManuallyDrop prevents double-free: VariantClear will SysFreeString the ptr.
     let bval = std::mem::ManuallyDrop::new(BSTR::from(value));
     unsafe {
         let mut var: VARIANT = std::mem::zeroed();
@@ -225,7 +230,7 @@ fn get_dispatch_sub(disp: &IDispatch, name: &str) -> windows::core::Result<IDisp
         if (*r).vt == 9 {
             let raw = (*r).data.pdispVal;
             if !raw.is_null() {
-                (*(r as *mut VarRaw)).vt = 0; // zero vt so VariantClear won't Release
+                (*(r as *mut VarRaw)).vt = 0;
                 return Ok(IDispatch::from_raw(raw));
             }
         }
@@ -298,13 +303,20 @@ fn sta_thread(
         let w = params.width.max(640);
         let h = params.height.max(480);
 
-        // WS_EX_NOACTIVATE: don't steal focus from WebView2 / the UI
+        // Convert canvas-relative coords to screen coords.
+        // The params x/y are relative to the Tauri window's client area.
+        let mut screen_origin = POINT { x: params.x, y: params.y };
+        ClientToScreen(parent, &mut screen_origin);
+
+        // WS_POPUP (not WS_CHILD): floats above WebView2's DirectComposition layer.
+        // WS_CHILD windows sit below DComp and appear black regardless of z-order.
+        // WS_EX_TOOLWINDOW: suppress taskbar entry for this auxiliary window.
         let host_hwnd = match CreateWindowExW(
-            WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW,
             HOST_CLASS, w!(""),
-            WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-            params.x, params.y, w, h,
-            Some(parent), None, Some(hmod.into()), None,
+            WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+            screen_origin.x, screen_origin.y, w, h,
+            None, None, Some(hmod.into()), None,
         ) {
             Ok(hwnd) => hwnd,
             Err(e) => {
@@ -314,8 +326,11 @@ fn sta_thread(
             }
         };
 
-        // Show above WebView2 before the control activates
-        SetWindowPos(host_hwnd, Some(HWND_TOP), params.x, params.y, w, h,
+        // Owner relationship: popup minimizes/restores/always-on-top with Tauri.
+        // This is the GWLP_HWNDPARENT trick — not the same as WS_CHILD parent.
+        SetWindowLongPtrW(host_hwnd, GWLP_HWNDPARENT, parent.0 as isize);
+
+        SetWindowPos(host_hwnd, Some(HWND_TOP), screen_origin.x, screen_origin.y, w, h,
             SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
 
         // Try MsRdpClient10 first, fall back to MsRdpClient9 for older Windows
@@ -344,9 +359,8 @@ fn sta_thread(
         };
 
         // frame → top-level application window (Tauri main window).
-        // This is CRITICAL: IOleInPlaceFrame::GetWindow must return the top-level
-        // frame, not the container child. mstscax validates this to create its
-        // rendering surface — wrong HWND here = black screen.
+        // IOleInPlaceFrame::GetWindow MUST return the top-level frame, not the
+        // container. mstscax validates this to create its rendering surface.
         let frame: IOleInPlaceFrame = RdpFrame { hwnd: parent }.into();
         let site: IOleClientSite = RdpSite { hwnd: host_hwnd, frame: frame.clone() }.into();
 
@@ -357,22 +371,16 @@ fn sta_thread(
             return;
         }
 
-        // Mark as embedded (contained) object — affects OLE lifecycle
         let _ = OleSetContainedObject(&rdp_unk, true);
-
-        // Identify the container application to the control
         let _ = ole_obj.SetHostNames(w!("OrbitalTerm"), w!(""));
 
         let mut rc = RECT { left: 0, top: 0, right: w, bottom: h };
 
-        // OLEIVERB_INPLACEACTIVATE (-5): creates the rendering surface inside host_hwnd.
-        // With a valid IOleInPlaceFrame this should succeed; fall back to SHOW (-1) if not.
         let dv_result = ole_obj.DoVerb(-5i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
         if dv_result.is_err() {
             let _ = ole_obj.DoVerb(-1i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
         }
 
-        // Sync the OLE rendering rectangle to the actual window size
         if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
             let _ = ipo.SetObjectRects(&rc, &rc);
         }
@@ -388,9 +396,8 @@ fn sta_thread(
         };
 
         // ── Store credentials in Windows Credential Manager ───────────────────
-        // NLA/CredSSP reads from Credential Manager — this suppresses the
-        // "Escribir las credenciales" prompt that appears when mstscax can't
-        // find credentials for the target server.
+        // NLA/CredSSP reads from Credential Manager to suppress the credential
+        // prompt even when ClearTextPassword is also set.
         if let Some(ref pw) = params.password {
             let target = format!("TERMSRV/{}", params.host);
             let user = if params.domain.is_empty() {
@@ -398,12 +405,11 @@ fn sta_thread(
             } else {
                 format!("{}\\{}", params.domain, params.username)
             };
-            // CREATE_NO_WINDOW = 0x08000000 — don't flash a console
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
                 let _ = std::process::Command::new("cmdkey")
-                    .creation_flags(0x08000000)
+                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
                     .args([
                         &format!("/add:{}", target),
                         &format!("/user:{}", user),
@@ -423,13 +429,13 @@ fn sta_thread(
         let _ = put_i4(&disp, "DesktopWidth", w);
         let _ = put_i4(&disp, "DesktopHeight", h);
         let _ = put_bool_prop(&disp, "FullScreen", false);
-        // 0 = always connect even if cert doesn't match → suppresses the
-        // "Precaución: conexión remota desconocida" security warning dialog
-        let _ = put_i4(&disp, "AuthenticationLevel", 0);
 
-        // AdvancedSettings: password + security layer
+        // AdvancedSettings: password, security layer, and AuthenticationLevel.
+        // AuthenticationLevel MUST be set on AdvancedSettings (not the main
+        // client object) to actually suppress the "unknown certificate" warning.
         let adv = get_dispatch_sub(&disp, "AdvancedSettings9")
             .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings7"))
+            .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings5"))
             .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings2"));
         if let Ok(ref adv) = adv {
             if let Some(ref pw) = params.password {
@@ -438,6 +444,8 @@ fn sta_thread(
             let _ = put_i4(adv, "RDPPort", params.port as i32);
             let _ = put_bool_prop(adv, "EnableCredSspSupport", true);
             let _ = put_bool_prop(adv, "SmartSizing", true);
+            // 0 = always connect even if cert doesn't match → suppresses warning dialog
+            let _ = put_i4(adv, "AuthenticationLevel", 0);
             if params.admin_mode {
                 let _ = put_i4(adv, "ConnectToAdministerServer", 1);
             }
@@ -453,14 +461,26 @@ fn sta_thread(
         let (tx, rx) = mpsc::sync_channel::<ComCmd>(16);
         let _ = result_tx.send(Ok(tx));
 
+        // Track canvas-relative position so we can re-apply ClientToScreen
+        // when the parent moves (e.g. window drag).
+        let mut rel_x = params.x;
+        let mut rel_y = params.y;
+        let mut last_parent_rect = RECT::default();
+        GetWindowRect(parent, &mut last_parent_rect).ok();
+
         // ── Message / command loop ─────────────────────────────────────────────
         let mut msg = MSG::default();
+        let mut tick = 0u32;
         'outer: loop {
             // Drain the command channel
             loop {
                 match rx.try_recv() {
                     Ok(ComCmd::Reposition { x, y, width, height }) => {
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), x, y, width, height,
+                        rel_x = x;
+                        rel_y = y;
+                        let mut pt = POINT { x, y };
+                        ClientToScreen(parent, &mut pt);
+                        SetWindowPos(host_hwnd, Some(HWND_TOP), pt.x, pt.y, width, height,
                             SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
                         if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
                             let r = RECT { left: 0, top: 0, right: width, bottom: height };
@@ -481,12 +501,33 @@ fn sta_thread(
                     Err(mpsc::TryRecvError::Empty) => break,
                 }
             }
+
             // Pump the COM STA message queue
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT { break 'outer; }
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+
+            // Every ~100ms reposition the popup if the parent window moved.
+            // Required because WS_POPUP doesn't automatically follow its owner.
+            tick += 1;
+            if tick % 6 == 0 {
+                let mut cur = RECT::default();
+                GetWindowRect(parent, &mut cur).ok();
+                if cur.left != last_parent_rect.left || cur.top != last_parent_rect.top {
+                    let mut pt = POINT { x: rel_x, y: rel_y };
+                    ClientToScreen(parent, &mut pt);
+                    let mut host_rect = RECT::default();
+                    GetWindowRect(host_hwnd, &mut host_rect).ok();
+                    let hw = host_rect.right - host_rect.left;
+                    let hh = host_rect.bottom - host_rect.top;
+                    SetWindowPos(host_hwnd, None, pt.x, pt.y, hw, hh,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE).ok();
+                    last_parent_rect = cur;
+                }
+            }
+
             std::thread::sleep(Duration::from_millis(16));
         }
 

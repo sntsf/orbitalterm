@@ -1,68 +1,10 @@
 use serde::Serialize;
-use ssh2::{MethodType, Session};
-use std::net::TcpStream;
 use std::path::Path;
+use std::sync::Arc;
 use tauri::{Emitter, State};
 use uuid::Uuid;
 
-use crate::{commands::sessions::load_connection, sftp::{SftpConn, SftpSessionMap}};
-
-/// Configure libssh2 algorithm preferences for maximum compatibility.
-///
-/// method_pref() validates each name against libssh2's compiled-in list and
-/// returns Err if any name is unknown, so we try progressively shorter lists
-/// until one is accepted.  We go from modern → legacy to support both new
-/// servers (curve25519, chacha20) and old ones (group1-sha1, 3des-cbc).
-fn configure_algorithms(session: &Session) {
-    // Key exchange — include legacy group1 and group-exchange for old servers
-    for kex in &[
-        "curve25519-sha256,curve25519-sha256@libssh2.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha256,diffie-hellman-group-exchange-sha1,diffie-hellman-group1-sha1",
-        "ecdh-sha2-nistp256,diffie-hellman-group14-sha256,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha256,diffie-hellman-group-exchange-sha1,diffie-hellman-group1-sha1",
-        "diffie-hellman-group14-sha256,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1,diffie-hellman-group1-sha1",
-        "diffie-hellman-group14-sha1,diffie-hellman-group1-sha1",
-        "diffie-hellman-group14-sha1",
-    ] {
-        if session.method_pref(MethodType::Kex, kex).is_ok() {
-            break;
-        }
-    }
-
-    // Host key types — include ssh-dss for old servers
-    for hostkey in &[
-        "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-256,rsa-sha2-512,ssh-rsa,ssh-dss",
-        "ecdsa-sha2-nistp256,rsa-sha2-256,rsa-sha2-512,ssh-rsa,ssh-dss",
-        "ssh-rsa,ssh-dss",
-        "ssh-rsa",
-    ] {
-        if session.method_pref(MethodType::HostKey, hostkey).is_ok() {
-            break;
-        }
-    }
-
-    // Ciphers — include legacy CBC and 3DES for old embedded/appliance servers
-    for crypt in &[
-        "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr,aes256-cbc,aes192-cbc,aes128-cbc,3des-cbc,blowfish-cbc",
-        "aes256-ctr,aes192-ctr,aes128-ctr,aes256-cbc,aes128-cbc,3des-cbc",
-        "aes128-ctr,aes128-cbc,3des-cbc",
-        "aes128-cbc,3des-cbc",
-    ] {
-        let cs_ok = session.method_pref(MethodType::CryptCs, crypt).is_ok();
-        let sc_ok = session.method_pref(MethodType::CryptSc, crypt).is_ok();
-        if cs_ok && sc_ok { break; }
-    }
-
-    // MACs — include old hmac-sha1 and hmac-md5
-    for mac in &[
-        "hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha2-256,hmac-sha2-512,hmac-sha1,hmac-sha1-96,hmac-md5",
-        "hmac-sha2-256,hmac-sha2-512,hmac-sha1,hmac-md5",
-        "hmac-sha1,hmac-md5",
-        "hmac-sha1",
-    ] {
-        let cs_ok = session.method_pref(MethodType::MacCs, mac).is_ok();
-        let sc_ok = session.method_pref(MethodType::MacSc, mac).is_ok();
-        if cs_ok && sc_ok { break; }
-    }
-}
+use crate::{commands::sessions::load_connection, sftp::{SftpConn, SftpSessionMap, SshHandler}};
 
 #[derive(Serialize, Clone)]
 pub struct SftpEntry {
@@ -79,6 +21,18 @@ struct SftpProgress {
     total: u64,
 }
 
+// Clone Arc from map and release lock before any await — avoids holding
+// std::sync::Mutex across an await point.
+macro_rules! get_conn {
+    ($map:expr, $id:expr) => {{
+        let map = $map.lock().unwrap();
+        match map.get(&$id) {
+            Some(c) => c.clone(),
+            None => return Err("SFTP session not found".to_string()),
+        }
+    }};
+}
+
 #[tauri::command]
 pub async fn sftp_connect(
     sftp_sessions: State<'_, SftpSessionMap>,
@@ -86,54 +40,93 @@ pub async fn sftp_connect(
 ) -> Result<String, String> {
     let connection = load_connection(&connection_id)?;
 
-    let addr = format!("{}:{}", connection.host, connection.port);
-    let tcp = TcpStream::connect(&addr)
-        .map_err(|e| format!("TCP connect failed: {e}"))?;
+    let config = Arc::new(russh::client::Config {
+        inactivity_timeout: Some(std::time::Duration::from_secs(30)),
+        ..Default::default()
+    });
 
-    let mut session = Session::new().map_err(|e| format!("SSH session error: {e}"))?;
-    session.set_tcp_stream(tcp);
-    session.set_timeout(30_000);
-    configure_algorithms(&session);
-    session.handshake().map_err(|e| format!("SSH handshake failed: {e}"))?;
+    let addr = (connection.host.as_str(), connection.port as u16);
+    let mut sh = russh::client::connect(config, addr, SshHandler)
+        .await
+        .map_err(|e| format!("SSH connect failed: {e}"))?;
 
-    let username = &connection.username;
+    let username = connection.username.clone();
 
     match connection.auth_type.as_str() {
-        "agent" => {
-            session
-                .userauth_agent(username)
-                .map_err(|e| format!("Agent auth failed: {e}"))?;
+        "password" => {
+            let password = crate::commands::sessions::get_saved_password_pub(&connection_id)
+                .ok_or("No saved password found")?;
+            let ok = sh
+                .authenticate_password(&username, password)
+                .await
+                .map_err(|e| format!("Password auth failed: {e}"))?;
+            if !ok {
+                return Err("Password authentication rejected by server".to_string());
+            }
         }
         "key" => {
             if connection.key_path.is_empty() {
                 return Err("Key path is empty".to_string());
             }
-            let key_path = Path::new(&connection.key_path);
-            session
-                .userauth_pubkey_file(username, None, key_path, None)
+            let key = russh_keys::load_secret_key(Path::new(&connection.key_path), None)
+                .map_err(|e| format!("Failed to load private key: {e}"))?;
+            let ok = sh
+                .authenticate_publickey(&username, Arc::new(key))
+                .await
                 .map_err(|e| format!("Key auth failed: {e}"))?;
+            if !ok {
+                return Err("Key authentication rejected by server".to_string());
+            }
         }
-        "password" => {
-            let password = crate::commands::sessions::get_saved_password_pub(&connection_id)
-                .ok_or("No saved password found")?;
-            session
-                .userauth_password(username, &password)
-                .map_err(|e| format!("Password auth failed: {e}"))?;
+        "agent" => {
+            // authenticate_future returns (AgentClient, Result<bool>) — the agent is
+            // moved in and returned so we can try multiple identities in a loop.
+            let mut agent = russh_keys::agent::client::AgentClient::connect_env()
+                .await
+                .map_err(|e| format!("SSH agent not available (SSH_AUTH_SOCK): {e}"))?;
+            let identities = agent
+                .request_identities()
+                .await
+                .map_err(|e| format!("Agent identities request failed: {e}"))?;
+            if identities.is_empty() {
+                return Err("SSH agent has no loaded identities".to_string());
+            }
+            let mut authenticated = false;
+            for key in identities {
+                let (returned_agent, result) = sh
+                    .authenticate_future(&username, key, agent)
+                    .await;
+                agent = returned_agent;
+                match result {
+                    Ok(true) => { authenticated = true; break; }
+                    Ok(false) => {}
+                    Err(e) => return Err(format!("Agent auth attempt failed: {e}")),
+                }
+            }
+            if !authenticated {
+                return Err("SSH agent authentication rejected by server".to_string());
+            }
         }
-        _ => {
-            return Err(format!("Unknown auth type: {}", connection.auth_type));
-        }
+        other => return Err(format!("Unknown auth type: {other}")),
     }
 
-    if !session.authenticated() {
-        return Err("Authentication failed".to_string());
-    }
+    let channel = sh
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("Channel open failed: {e}"))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| format!("SFTP subsystem request failed: {e}"))?;
+    let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| format!("SFTP session init failed: {e}"))?;
 
     let session_id = Uuid::new_v4().to_string();
     sftp_sessions
         .lock()
         .unwrap()
-        .insert(session_id.clone(), SftpConn { session });
+        .insert(session_id.clone(), Arc::new(SftpConn { sftp, _session: sh }));
 
     Ok(session_id)
 }
@@ -144,36 +137,31 @@ pub async fn sftp_list_dir(
     session_id: String,
     path: String,
 ) -> Result<Vec<SftpEntry>, String> {
-    let map = sftp_sessions.lock().unwrap();
-    let conn = map.get(&session_id).ok_or("SFTP session not found")?;
+    let conn = get_conn!(sftp_sessions, session_id);
 
-    let sftp = conn.session.sftp().map_err(|e| format!("SFTP subsystem error: {e}"))?;
-    let dir_path = std::path::Path::new(&path);
-
-    let entries = sftp
-        .readdir(dir_path)
+    // read_dir returns ReadDir which is a sync Iterator (already filters "." / "..")
+    let read_dir = conn
+        .sftp
+        .read_dir(&path)
+        .await
         .map_err(|e| format!("readdir error: {e}"))?;
 
-    let mut result: Vec<SftpEntry> = entries
-        .into_iter()
-        .filter_map(|(pb, stat)| {
-            let name = pb.file_name()?.to_string_lossy().to_string();
-            if name == "." || name == ".." {
-                return None;
-            }
-            let is_dir = stat.is_dir();
-            let size = stat.size.unwrap_or(0);
-            let modified = stat.mtime.unwrap_or(0) as i64;
+    let mut result: Vec<SftpEntry> = read_dir
+        .map(|entry| {
+            let name = entry.file_name();
+            let meta = entry.metadata();
+            let is_dir = meta.is_dir();
+            let size = meta.size.unwrap_or(0);
+            let modified = meta.mtime.map(|t| t as i64).unwrap_or(0);
             let entry_path = if path.ends_with('/') {
                 format!("{}{}", path, name)
             } else {
                 format!("{}/{}", path, name)
             };
-            Some(SftpEntry { name, path: entry_path, is_dir, size, modified })
+            SftpEntry { name, path: entry_path, is_dir, size, modified }
         })
         .collect();
 
-    // Sort: directories first, then files, both alphabetically
     result.sort_by(|a, b| {
         b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
@@ -193,21 +181,25 @@ pub async fn sftp_upload(
         .map_err(|e| format!("Failed to read local file: {e}"))?;
     let total = data.len() as u64;
 
-    let map = sftp_sessions.lock().unwrap();
-    let conn = map.get(&session_id).ok_or("SFTP session not found")?;
-    let sftp = conn.session.sftp().map_err(|e| format!("SFTP subsystem error: {e}"))?;
-    let mut file = sftp
-        .create(std::path::Path::new(&remote_path))
+    let conn = get_conn!(sftp_sessions, session_id);
+
+    let mut file = conn
+        .sftp
+        .create(&remote_path)
+        .await
         .map_err(|e| format!("Failed to create remote file: {e}"))?;
 
-    use std::io::Write;
-    let chunk_size: usize = 32 * 1024;
-    let mut written: u64 = 0;
+    use tokio::io::AsyncWriteExt;
+    let chunk_size = 32 * 1024usize;
+    let mut written = 0u64;
     for chunk in data.chunks(chunk_size) {
-        file.write_all(chunk).map_err(|e| format!("Failed to write remote file: {e}"))?;
+        file.write_all(chunk)
+            .await
+            .map_err(|e| format!("Write error: {e}"))?;
         written += chunk.len() as u64;
         app.emit("sftp-upload-progress", SftpProgress { transferred: written, total }).ok();
     }
+    file.flush().await.map_err(|e| format!("Flush error: {e}"))?;
 
     Ok(())
 }
@@ -218,14 +210,11 @@ pub async fn sftp_mkdir(
     session_id: String,
     path: String,
 ) -> Result<(), String> {
-    let map = sftp_sessions.lock().unwrap();
-    let conn = map.get(&session_id).ok_or("SFTP session not found")?;
-
-    let sftp = conn.session.sftp().map_err(|e| format!("SFTP subsystem error: {e}"))?;
-    sftp.mkdir(std::path::Path::new(&path), 0o755)
-        .map_err(|e| format!("mkdir error: {e}"))?;
-
-    Ok(())
+    let conn = get_conn!(sftp_sessions, session_id);
+    conn.sftp
+        .create_dir(&path)
+        .await
+        .map_err(|e| format!("mkdir error: {e}"))
 }
 
 #[tauri::command]
@@ -235,19 +224,18 @@ pub async fn sftp_delete(
     path: String,
     is_dir: bool,
 ) -> Result<(), String> {
-    let map = sftp_sessions.lock().unwrap();
-    let conn = map.get(&session_id).ok_or("SFTP session not found")?;
-
-    let sftp = conn.session.sftp().map_err(|e| format!("SFTP subsystem error: {e}"))?;
-    let p = std::path::Path::new(&path);
-
+    let conn = get_conn!(sftp_sessions, session_id);
     if is_dir {
-        sftp.rmdir(p).map_err(|e| format!("rmdir error: {e}"))?;
+        conn.sftp
+            .remove_dir(&path)
+            .await
+            .map_err(|e| format!("rmdir error: {e}"))
     } else {
-        sftp.unlink(p).map_err(|e| format!("unlink error: {e}"))?;
+        conn.sftp
+            .remove_file(&path)
+            .await
+            .map_err(|e| format!("unlink error: {e}"))
     }
-
-    Ok(())
 }
 
 #[tauri::command]
@@ -258,26 +246,34 @@ pub async fn sftp_download(
     remote_path: String,
     local_path: String,
 ) -> Result<(), String> {
-    use std::io::Read;
-    let map = sftp_sessions.lock().unwrap();
-    let conn = map.get(&session_id).ok_or("SFTP session not found")?;
-    let sftp = conn.session.sftp().map_err(|e| format!("SFTP subsystem error: {e}"))?;
+    let conn = get_conn!(sftp_sessions, session_id);
 
-    let stat = sftp.stat(std::path::Path::new(&remote_path))
+    let stat = conn
+        .sftp
+        .metadata(&remote_path)
+        .await
         .map_err(|e| format!("Failed to stat remote file: {e}"))?;
     let total = stat.size.unwrap_or(0);
 
-    let mut remote_file = sftp
-        .open(std::path::Path::new(&remote_path))
+    let mut remote_file = conn
+        .sftp
+        .open(&remote_path)
+        .await
         .map_err(|e| format!("Failed to open remote file: {e}"))?;
 
-    let chunk_size: usize = 32 * 1024;
+    use tokio::io::AsyncReadExt;
+    let chunk_size = 32 * 1024usize;
     let mut data = Vec::with_capacity(total as usize);
     let mut buf = vec![0u8; chunk_size];
-    let mut transferred: u64 = 0;
+    let mut transferred = 0u64;
     loop {
-        let n = remote_file.read(&mut buf).map_err(|e| format!("Read error: {e}"))?;
-        if n == 0 { break; }
+        let n = remote_file
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("Read error: {e}"))?;
+        if n == 0 {
+            break;
+        }
         data.extend_from_slice(&buf[..n]);
         transferred += n as u64;
         app.emit("sftp-download-progress", SftpProgress { transferred, total }).ok();
@@ -295,16 +291,11 @@ pub async fn sftp_rename(
     old_path: String,
     new_path: String,
 ) -> Result<(), String> {
-    let map = sftp_sessions.lock().unwrap();
-    let conn = map.get(&session_id).ok_or("SFTP session not found")?;
-    let sftp = conn.session.sftp().map_err(|e| format!("SFTP subsystem error: {e}"))?;
-    sftp.rename(
-        std::path::Path::new(&old_path),
-        std::path::Path::new(&new_path),
-        None,
-    )
-    .map_err(|e| format!("rename error: {e}"))?;
-    Ok(())
+    let conn = get_conn!(sftp_sessions, session_id);
+    conn.sftp
+        .rename(&old_path, &new_path)
+        .await
+        .map_err(|e| format!("rename error: {e}"))
 }
 
 #[tauri::command]
@@ -313,10 +304,10 @@ pub async fn sftp_create_file(
     session_id: String,
     path: String,
 ) -> Result<(), String> {
-    let map = sftp_sessions.lock().unwrap();
-    let conn = map.get(&session_id).ok_or("SFTP session not found")?;
-    let sftp = conn.session.sftp().map_err(|e| format!("SFTP subsystem error: {e}"))?;
-    sftp.create(std::path::Path::new(&path))
+    let conn = get_conn!(sftp_sessions, session_id);
+    conn.sftp
+        .create(&path)
+        .await
         .map_err(|e| format!("Failed to create file: {e}"))?;
     Ok(())
 }
