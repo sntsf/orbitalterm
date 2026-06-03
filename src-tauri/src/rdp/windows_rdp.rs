@@ -544,7 +544,7 @@ fn sta_thread(
                 // If the owner window (Tauri) was destroyed (e.g. detached window
                 // closed without going through disconnect_rdp), clean up and exit
                 // so the WS_POPUP doesn't orphan on the screen.
-                if !IsWindow(parent).as_bool() {
+                if !IsWindow(Some(parent)).as_bool() {
                     let _ = call_no_args(&disp, "Disconnect");
                     PostQuitMessage(0);
                     break 'outer;
