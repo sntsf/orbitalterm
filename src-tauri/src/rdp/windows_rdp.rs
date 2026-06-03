@@ -13,7 +13,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use windows::Win32::Foundation::{E_NOTIMPL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::*;
@@ -248,6 +248,32 @@ fn call_no_args(disp: &IDispatch, name: &str) -> windows::core::Result<()> {
     }
 }
 
+// ── Coordinate helpers ────────────────────────────────────────────────────────
+
+/// Map a point in `hwnd`'s client coordinates to screen coordinates.
+///
+/// `ClientToScreen` is not exposed by the `windows` crate bindings, so we
+/// derive the same result from `GetWindowRect` (outer position) and
+/// `GetClientRect` (client size).  For standard Win32 windows:
+///   left_border == right_border == bottom_border  (symmetric frame)
+///   top_border = outer_height - client_height - left_border
+///
+/// This is exact for Tauri windows because WebView2 fills the whole client area
+/// and there is no custom client-area padding.
+unsafe fn canvas_to_screen(hwnd: HWND, cx: i32, cy: i32) -> (i32, i32) {
+    let mut outer = RECT::default();
+    let mut inner = RECT::default();
+    GetWindowRect(hwnd, &mut outer).ok();
+    GetClientRect(hwnd, &mut inner).ok();
+    let outer_w = outer.right - outer.left;
+    let outer_h = outer.bottom - outer.top;
+    let client_w = inner.right;  // GetClientRect top-left is always (0,0)
+    let client_h = inner.bottom;
+    let bx = (outer_w - client_w) / 2;  // left/right frame
+    let by = outer_h - client_h - bx;   // top = title bar + top frame
+    (outer.left + bx + cx, outer.top + by + cy)
+}
+
 // ── Host window class ─────────────────────────────────────────────────────────
 
 const HOST_CLASS: PCWSTR = w!("OrbRdpHostWnd");
@@ -305,8 +331,7 @@ fn sta_thread(
 
         // Convert canvas-relative coords to screen coords.
         // The params x/y are relative to the Tauri window's client area.
-        let mut screen_origin = POINT { x: params.x, y: params.y };
-        ClientToScreen(parent, &mut screen_origin);
+        let (sx, sy) = canvas_to_screen(parent, params.x, params.y);
 
         // WS_POPUP (not WS_CHILD): floats above WebView2's DirectComposition layer.
         // WS_CHILD windows sit below DComp and appear black regardless of z-order.
@@ -315,7 +340,7 @@ fn sta_thread(
             WS_EX_TOOLWINDOW,
             HOST_CLASS, w!(""),
             WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-            screen_origin.x, screen_origin.y, w, h,
+            sx, sy, w, h,
             None, None, Some(hmod.into()), None,
         ) {
             Ok(hwnd) => hwnd,
@@ -330,7 +355,7 @@ fn sta_thread(
         // This is the GWLP_HWNDPARENT trick — not the same as WS_CHILD parent.
         SetWindowLongPtrW(host_hwnd, GWLP_HWNDPARENT, parent.0 as isize);
 
-        SetWindowPos(host_hwnd, Some(HWND_TOP), screen_origin.x, screen_origin.y, w, h,
+        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, w, h,
             SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
 
         // Try MsRdpClient10 first, fall back to MsRdpClient9 for older Windows
@@ -478,9 +503,8 @@ fn sta_thread(
                     Ok(ComCmd::Reposition { x, y, width, height }) => {
                         rel_x = x;
                         rel_y = y;
-                        let mut pt = POINT { x, y };
-                        ClientToScreen(parent, &mut pt);
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), pt.x, pt.y, width, height,
+                        let (sx, sy) = canvas_to_screen(parent, x, y);
+                        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, width, height,
                             SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
                         if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
                             let r = RECT { left: 0, top: 0, right: width, bottom: height };
@@ -516,13 +540,8 @@ fn sta_thread(
                 let mut cur = RECT::default();
                 GetWindowRect(parent, &mut cur).ok();
                 if cur.left != last_parent_rect.left || cur.top != last_parent_rect.top {
-                    let mut pt = POINT { x: rel_x, y: rel_y };
-                    ClientToScreen(parent, &mut pt);
-                    let mut host_rect = RECT::default();
-                    GetWindowRect(host_hwnd, &mut host_rect).ok();
-                    let hw = host_rect.right - host_rect.left;
-                    let hh = host_rect.bottom - host_rect.top;
-                    SetWindowPos(host_hwnd, None, pt.x, pt.y, hw, hh,
+                    let (sx, sy) = canvas_to_screen(parent, rel_x, rel_y);
+                    SetWindowPos(host_hwnd, None, sx, sy, 0, 0,
                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE).ok();
                     last_parent_rect = cur;
                 }
