@@ -258,6 +258,7 @@ pub struct RdpConnectResult {
 #[tauri::command]
 pub async fn connect_rdp(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     #[allow(unused_variables)] rdp_sessions: State<'_, RdpSessionMap>,
     embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
     connection_id: String,
@@ -291,6 +292,7 @@ pub async fn connect_rdp(
         let width = session.width;
         let height = session.height;
         embedded_sessions.lock().unwrap().insert(session_id.clone(), session);
+        let _ = window;
         return Ok(RdpConnectResult { session_id, embedded: true, native_window: false, width, height });
     }
 
@@ -301,11 +303,10 @@ pub async fn connect_rdp(
         let x = canvas_x.unwrap_or(0);
         let y = canvas_y.unwrap_or(0);
 
-        let parent_hwnd = app
-            .get_webview_window("main")
-            .ok_or("Main window not found")?
-            .hwnd()
-            .map_err(|e| e.to_string())?;
+        // Use the window that issued the IPC call — could be "main" or a
+        // detached window. Hardcoding "main" would place the WS_POPUP over
+        // the wrong window when RDP is opened in a torn-out window.
+        let parent_hwnd = window.hwnd().map_err(|e| e.to_string())?;
 
         let session = crate::rdp::windows_rdp::launch(
             parent_hwnd,
@@ -323,13 +324,13 @@ pub async fn connect_rdp(
 
         let session_id = Uuid::new_v4().to_string();
         embedded_sessions.lock().unwrap().insert(session_id.clone(), session);
-        let _ = rdp_sessions;
+        let _ = (rdp_sessions, app, window);
         return Ok(RdpConnectResult { session_id, embedded: true, native_window: true, width: w as u16, height: h as u16 });
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
-        let _ = (app, embedded_sessions, canvas_x, canvas_y);
+        let _ = (app, window, embedded_sessions, canvas_x, canvas_y);
         let rdp_client = crate::rdp::find_rdp_client()?;
         let mut cmd = std::process::Command::new(&rdp_client.binary);
         build_rdp_args(&mut cmd, &connection, password.as_deref(), &rdp_client.flavor);
