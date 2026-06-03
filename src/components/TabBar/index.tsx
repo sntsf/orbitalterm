@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { X, RefreshCw, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
-import { dockBack, openDetachedWindow, storeDetachedSession } from "../../lib/commands";
+import { dockBack, openDetachedWindow, rdpWindowsVisibility, storeDetachedSession } from "../../lib/commands";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import type { Tab } from "../../types";
 
@@ -39,6 +39,13 @@ export function TabBar() {
     try {
       const label = `detached-${tab.connection_id}`;
       const isNativeRdp = tab.connection_type === "rdp" && isWindows;
+
+      if (isNativeRdp && tab.session_id) {
+        // Hide the WS_POPUP immediately so it doesn't appear duplicated while
+        // the new detached window is opening its own fresh RDP session.
+        await rdpWindowsVisibility(tab.session_id, false).catch(() => {});
+      }
+
       if (tab.session_id && !isNativeRdp) {
         skipDisconnectSessions.add(tab.session_id);
         await storeDetachedSession(label, tab.session_id);

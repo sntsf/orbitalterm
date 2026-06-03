@@ -454,6 +454,10 @@ fn sta_thread(
         let _ = put_i4(&disp, "DesktopWidth", w);
         let _ = put_i4(&disp, "DesktopHeight", h);
         let _ = put_bool_prop(&disp, "FullScreen", false);
+        // IMsRdpClient5::AuthenticationLevel = 0 → connect without certificate warning.
+        // Setting it here on the main client AND on AdvancedSettings ensures both
+        // interfaces suppress the "Precaución: conexión remota desconocida" dialog.
+        let _ = put_i4(&disp, "AuthenticationLevel", 0);
 
         // AdvancedSettings: password, security layer, and AuthenticationLevel.
         // AuthenticationLevel MUST be set on AdvancedSettings (not the main
@@ -533,10 +537,19 @@ fn sta_thread(
                 DispatchMessageW(&msg);
             }
 
-            // Every ~100ms reposition the popup if the parent window moved.
+            // Every ~100ms: check parent liveness and reposition if it moved.
             // Required because WS_POPUP doesn't automatically follow its owner.
             tick += 1;
             if tick % 6 == 0 {
+                // If the owner window (Tauri) was destroyed (e.g. detached window
+                // closed without going through disconnect_rdp), clean up and exit
+                // so the WS_POPUP doesn't orphan on the screen.
+                if !IsWindow(parent).as_bool() {
+                    let _ = call_no_args(&disp, "Disconnect");
+                    PostQuitMessage(0);
+                    break 'outer;
+                }
+
                 let mut cur = RECT::default();
                 GetWindowRect(parent, &mut cur).ok();
                 if cur.left != last_parent_rect.left || cur.top != last_parent_rect.top {
