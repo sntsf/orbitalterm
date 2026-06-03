@@ -11,6 +11,7 @@ import {
   rdpRefreshSession,
   rdpWindowsReposition,
   rdpWindowsVisibility,
+  rdpWindowsReparent,
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import { useNotifStore } from "../../store/useNotifStore";
@@ -38,10 +39,11 @@ interface RdpPaneProps {
 
 interface WindowsViewerProps {
   sessionId: string;
+  transferred?: boolean;
   onSessionEnded: () => void;
 }
 
-function WindowsEmbeddedViewer({ sessionId, onSessionEnded }: WindowsViewerProps) {
+function WindowsEmbeddedViewer({ sessionId, transferred, onSessionEnded }: WindowsViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Keep the native mstsc window in sync with this placeholder's position.
@@ -56,15 +58,27 @@ function WindowsEmbeddedViewer({ sessionId, onSessionEnded }: WindowsViewerProps
       const rect = el.getBoundingClientRect();
       const visible = rect.width > 0 && rect.height > 0;
       if (visible) {
-        rdpWindowsReposition(
-          sessionId,
-          Math.round(rect.left),
-          Math.round(rect.top),
-          Math.round(rect.width),
-          Math.round(rect.height),
-        ).catch(() => {});
-        if (!lastVisible) {
-          rdpWindowsVisibility(sessionId, true).catch(() => {});
+        if (!lastVisible && transferred) {
+          // First sync of a transferred session — reparent WS_POPUP to this window.
+          // This changes the owner HWND and repositions in one atomic COM command.
+          rdpWindowsReparent(
+            sessionId,
+            Math.round(rect.left),
+            Math.round(rect.top),
+            Math.round(rect.width),
+            Math.round(rect.height),
+          ).catch(() => {});
+        } else {
+          rdpWindowsReposition(
+            sessionId,
+            Math.round(rect.left),
+            Math.round(rect.top),
+            Math.round(rect.width),
+            Math.round(rect.height),
+          ).catch(() => {});
+          if (!lastVisible) {
+            rdpWindowsVisibility(sessionId, true).catch(() => {});
+          }
         }
       } else if (lastVisible) {
         rdpWindowsVisibility(sessionId, false).catch(() => {});
@@ -277,6 +291,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
   // two simultaneous RDP connections to the same server.
   const connectGenRef = useRef(0);
   const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
+  const isWindows = /Windows/i.test(navigator.userAgent);
 
   const connect = async (isRetry = false, adminMode = false) => {
     const gen = ++connectGenRef.current;
@@ -362,14 +377,20 @@ export function RdpPane({ tab }: RdpPaneProps) {
 
   useEffect(() => {
     if (tab.session_id) {
-      // Resume a transferred session — skip connect, show canvas immediately
       sessionIdRef.current = tab.session_id;
       setTabSessionId(tab.id, tab.session_id);
       setEmbedded(true);
+      if (isWindows) {
+        // Native RDP transfer: mark as native window so WindowsEmbeddedViewer renders.
+        // The viewer will call rdpWindowsReparent on first sync to move the WS_POPUP
+        // from the old owner (main window) to this window.
+        setNativeWindow(true);
+      }
       setStatus("connected");
       setTabStatus(tab.id, "connected");
-      // Force a full repaint so the canvas shows the current desktop
-      rdpRefreshSession(tab.session_id).catch(() => {});
+      if (!isWindows) {
+        rdpRefreshSession(tab.session_id).catch(() => {});
+      }
     } else {
       connect();
     }
@@ -416,6 +437,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
     return (
       <WindowsEmbeddedViewer
         sessionId={sessionIdRef.current}
+        transferred={!!tab.session_id}
         onSessionEnded={() => {
           setEmbedded(false);
           setNativeWindow(false);

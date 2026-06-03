@@ -565,6 +565,33 @@ pub async fn rdp_windows_visibility(
     Ok(())
 }
 
+/// Transfer a live COM/mstscax RDP session to a new owner window by updating GWLP_HWNDPARENT.
+#[tauri::command]
+pub async fn rdp_windows_reparent(
+    window: tauri::WebviewWindow,
+    embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
+    session_id: String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let parent_hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        let map = embedded_sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            crate::rdp::windows_rdp::reparent(session, parent_hwnd, x, y, width, height);
+        }
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, embedded_sessions, session_id, x, y, width, height);
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub async fn rdp_refresh_session(
     embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
