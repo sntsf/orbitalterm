@@ -282,17 +282,36 @@ unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
         0x17A5E535, 0x4072, 0x4FA4,
         [0xAF, 0x11, 0x26, 0xBE, 0x74, 0xED, 0x31, 0x40],
     );
+    // windows-rs does not expose QueryInterface as a callable method on &IUnknown,
+    // so we call it through the raw vtable (index 0) directly.
+    type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
+    type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
+    type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+
+    let raw = rdp_unk.as_raw();
+    let unk_vtbl: *const usize = *(raw as *const *const usize);
+    let qi: QIFn = core::mem::transmute(*unk_vtbl.add(0));
+
     let mut obj: *mut core::ffi::c_void = core::ptr::null_mut();
-    if rdp_unk.QueryInterface(&IID_NS2, &mut obj).is_err() || obj.is_null() {
+    let hr = qi(raw, &IID_NS2, &mut obj);
+    if hr < 0 || obj.is_null() {
         return; // older mstscax — skip, dialogs may still appear
     }
     // VARIANT_BOOL FALSE = 0 (i16). Functions take (this, VARIANT_BOOL) → HRESULT.
-    type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
-    type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
-    let vtbl: *const usize = *(obj as *const *const usize);
-    let put_show_warn:    PutBool = core::mem::transmute(*vtbl.add(8));
-    let put_prompt_creds: PutBool = core::mem::transmute(*vtbl.add(10));
-    let release:          RelFn   = core::mem::transmute(*vtbl.add(2));
+    // Vtable layout (flat, including IUnknown + NS1 inheritance):
+    //   [0-2]  IUnknown (QI, AddRef, Release)
+    //   [3]    NotifyRedirectDeviceChange  (NS1)
+    //   [4]    SendKeys                    (NS1)
+    //   [5]    get_UIParentWindowHandle    (NS2)
+    //   [6]    put_UIParentWindowHandle    (NS2)
+    //   [7]    get_ShowRedirectionWarningDialog  (NS2)
+    //   [8]    put_ShowRedirectionWarningDialog  (NS2) ← clipboard warning
+    //   [9]    get_PromptForCredentials    (NS2)
+    //   [10]   put_PromptForCredentials    (NS2) ← credential re-prompt
+    let ns2_vtbl: *const usize = *(obj as *const *const usize);
+    let put_show_warn:    PutBool = core::mem::transmute(*ns2_vtbl.add(8));
+    let put_prompt_creds: PutBool = core::mem::transmute(*ns2_vtbl.add(10));
+    let release:          RelFn   = core::mem::transmute(*ns2_vtbl.add(2));
     put_show_warn(obj, 0i16);    // ShowRedirectionWarningDialog = FALSE
     put_prompt_creds(obj, 0i16); // PromptForCredentials = FALSE
     release(obj);
