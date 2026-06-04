@@ -260,6 +260,44 @@ fn get_i4(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
     }
 }
 
+// Suppress two persistent dialogs that appear on every RDP connection:
+//   1. "Precaución: conexión remota desconocida" (clipboard/redirect warning)
+//   2. "Seguridad de Windows - Escribir credenciales" (credential re-prompt)
+//
+// Both are controlled by IMsRdpClientNonScriptable2 which is not exposed via
+// IDispatch. We QueryInterface for it and poke the vtable directly.
+//
+// Vtable layout (flat, including IUnknown + NS1 inheritance):
+//   [0-2]  IUnknown (QI, AddRef, Release)
+//   [3]    NotifyRedirectDeviceChange  (NS1)
+//   [4]    SendKeys                    (NS1)
+//   [5]    get_UIParentWindowHandle    (NS2)
+//   [6]    put_UIParentWindowHandle    (NS2)
+//   [7]    get_ShowRedirectionWarningDialog  (NS2)
+//   [8]    put_ShowRedirectionWarningDialog  (NS2) ← clipboard warning
+//   [9]    get_PromptForCredentials    (NS2)
+//   [10]   put_PromptForCredentials    (NS2) ← credential re-prompt
+unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
+    const IID_NS2: GUID = GUID::from_values(
+        0x17A5E535, 0x4072, 0x4FA4,
+        [0xAF, 0x11, 0x26, 0xBE, 0x74, 0xED, 0x31, 0x40],
+    );
+    let mut obj: *mut core::ffi::c_void = core::ptr::null_mut();
+    if rdp_unk.QueryInterface(&IID_NS2, &mut obj).is_err() || obj.is_null() {
+        return; // older mstscax — skip, dialogs may still appear
+    }
+    // VARIANT_BOOL FALSE = 0 (i16). Functions take (this, VARIANT_BOOL) → HRESULT.
+    type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
+    type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+    let vtbl: *const usize = *(obj as *const *const usize);
+    let put_show_warn:    PutBool = core::mem::transmute(*vtbl.add(8));
+    let put_prompt_creds: PutBool = core::mem::transmute(*vtbl.add(10));
+    let release:          RelFn   = core::mem::transmute(*vtbl.add(2));
+    put_show_warn(obj, 0i16);    // ShowRedirectionWarningDialog = FALSE
+    put_prompt_creds(obj, 0i16); // PromptForCredentials = FALSE
+    release(obj);
+}
+
 fn call_no_args(disp: &IDispatch, name: &str) -> windows::core::Result<()> {
     let id = get_dispid(disp, name)?;
     unsafe {
@@ -506,6 +544,8 @@ fn sta_thread(
                 let _ = put_i4(adv, "ConnectToAdministerServer", 1);
             }
         }
+
+        suppress_rdp_dialogs(&rdp_unk);
 
         if let Err(e) = call_no_args(&disp, "Connect") {
             let _ = result_tx.send(Err(format!("RDP Connect(): {e}")));
