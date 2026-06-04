@@ -265,7 +265,8 @@ fn get_i4(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
 // quoting issues). NLA/CredSSP picks these up automatically during Connect().
 fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, password: &str) {
     use windows::Win32::Security::Credentials::{
-        CredWriteW, CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_DOMAIN_PASSWORD,
+        CredWriteW, CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE,
+        CRED_TYPE_DOMAIN_PASSWORD, CRED_TYPE_GENERIC,
     };
     use windows::core::PWSTR;
 
@@ -275,14 +276,16 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
         format!("{}\\{}", domain, username)
     };
 
-    // CredSSP looks up TERMSRV/<host> (port 3389) or TERMSRV/<host>:<port>.
+    // CredSSP looks up TERMSRV/<host> (or TERMSRV/<host>:<port> for custom ports).
+    // mstsc.exe stores RDP credentials as CRED_TYPE_GENERIC; CredSSP also checks
+    // CRED_TYPE_DOMAIN_PASSWORD. Store both to cover all lookup paths.
     let mut targets = vec![format!("TERMSRV/{}", host)];
     if port != 3389 {
         targets.push(format!("TERMSRV/{}:{}", host, port));
     }
 
     let mut user_wide: Vec<u16> = user_str.encode_utf16().chain(Some(0)).collect();
-    // Credential blob is the password encoded as UTF-16 LE (no null terminator).
+    // Credential blob is the password as UTF-16 LE with no null terminator.
     let pw_blob: Vec<u8> = password
         .encode_utf16()
         .flat_map(|c| c.to_le_bytes())
@@ -290,22 +293,24 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
 
     for target in &targets {
         let mut target_wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
-        let cred = CREDENTIALW {
-            Flags: CRED_FLAGS(0),
-            Type: CRED_TYPE_DOMAIN_PASSWORD,
-            TargetName: PWSTR(target_wide.as_mut_ptr()),
-            Comment: PWSTR::null(),
-            LastWritten: unsafe { std::mem::zeroed() },
-            CredentialBlobSize: pw_blob.len() as u32,
-            CredentialBlob: pw_blob.as_ptr() as *mut u8,
-            Persist: CRED_PERSIST_LOCAL_MACHINE,
-            AttributeCount: 0,
-            Attributes: std::ptr::null_mut(),
-            TargetAlias: PWSTR::null(),
-            UserName: PWSTR(user_wide.as_mut_ptr()),
-        };
-        let ok = unsafe { CredWriteW(&cred, 0).is_ok() };
-        eprintln!("[rdp] CredWriteW {} ok={ok}", target);
+        for cred_type in [CRED_TYPE_GENERIC, CRED_TYPE_DOMAIN_PASSWORD] {
+            let cred = CREDENTIALW {
+                Flags: CRED_FLAGS(0),
+                Type: cred_type,
+                TargetName: PWSTR(target_wide.as_mut_ptr()),
+                Comment: PWSTR::null(),
+                LastWritten: unsafe { std::mem::zeroed() },
+                CredentialBlobSize: pw_blob.len() as u32,
+                CredentialBlob: pw_blob.as_ptr() as *mut u8,
+                Persist: CRED_PERSIST_LOCAL_MACHINE,
+                AttributeCount: 0,
+                Attributes: std::ptr::null_mut(),
+                TargetAlias: PWSTR::null(),
+                UserName: PWSTR(user_wide.as_mut_ptr()),
+            };
+            let ok = unsafe { CredWriteW(&cred, 0).is_ok() };
+            eprintln!("[rdp] CredWriteW {target} type={} ok={ok}", cred_type.0);
+        }
     }
 }
 
@@ -549,6 +554,12 @@ fn sta_thread(
         let _ = OleSetContainedObject(&rdp_unk, true);
         let _ = ole_obj.SetHostNames(w!("OrbitalTerm"), w!(""));
 
+        // Set NonScriptable properties BEFORE DoVerb (in-place activation).
+        // MSDN: WarnAboutClipboardRedirection and related properties must be
+        // set before the control is activated — calling them after DoVerb
+        // returns E_INVALIDARG.
+        suppress_rdp_dialogs(&rdp_unk);
+
         let mut rc = RECT { left: 0, top: 0, right: w, bottom: h };
 
         let dv_result = ole_obj.DoVerb(-5i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
@@ -612,8 +623,6 @@ fn sta_thread(
                 let _ = put_i4(adv, "ConnectToAdministerServer", 1);
             }
         }
-
-        suppress_rdp_dialogs(&rdp_unk);
 
         if let Err(e) = call_no_args(&disp, "Connect") {
             let _ = result_tx.send(Err(format!("RDP Connect(): {e}")));
