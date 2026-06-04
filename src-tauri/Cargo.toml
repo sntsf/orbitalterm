@@ -58,6 +58,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Ole",
     "Win32_System_Variant",
     "Win32_Security_Credentials",
+    "Win32_System_Registry",
 ] }
 
 # Compile image-encoding crates at full optimization even in dev builds.

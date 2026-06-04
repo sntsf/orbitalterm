@@ -328,25 +328,43 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
     }
 }
 
+// Write HKCU\...\Terminal Services\Client\RedirectionWarningDialogVersion=1.
+// The April-2026 security update (KB5057577) introduced a new per-connection
+// redirection warning dialog that overrides the old WarnAbout* COM properties.
+// Setting this registry value (documented for IT admins) reverts the dialog
+// behavior to the pre-update version where WarnAbout*=FALSE is honored.
+// HKCU requires no elevation; Windows reads both HKCU and HKLM for this key.
+fn set_rdp_warning_dialog_version() {
+    use windows::Win32::System::Registry::{
+        RegCreateKeyExW, RegSetValueExW, RegCloseKey,
+        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
+        REG_OPTION_NON_VOLATILE, REG_DWORD,
+    };
+    let subkey: Vec<u16> = "Software\\Policies\\Microsoft\\Windows NT\\Terminal Services\\Client"
+        .encode_utf16().chain(Some(0)).collect();
+    let vname: Vec<u16> = "RedirectionWarningDialogVersion"
+        .encode_utf16().chain(Some(0)).collect();
+    let mut hkey = HKEY::default();
+    unsafe {
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), 0, PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut hkey, None,
+        ).is_ok() {
+            let v: u32 = 1;
+            let ok = RegSetValueExW(hkey, PCWSTR(vname.as_ptr()), 0, REG_DWORD,
+                Some(&v.to_ne_bytes())).is_ok();
+            eprintln!("[rdp] HKCU RedirectionWarningDialogVersion=1 ok={ok}");
+            RegCloseKey(hkey);
+        }
+    }
+}
+
 // Suppress the two dialogs that appear on every RDP connection:
-//   1. Clipboard/redirect security warning
+//   1. Clipboard/redirect security warning (reverted by registry key above)
 //   2. "Windows Security – enter credentials" credential prompt
-//
-// The April-2026 Windows security update replaced the old WarnAbout* dialog
-// system with a new per-connection redirection warning dialog. The new system
-// ignores WarnAbout* (they return E_INVALIDARG). The fix is to QI for
-// IMsRdpExtendedSettings and set RedirectionWarningDialogVersion=1, which
-// reverts to the pre-update dialog behavior where WarnAbout*=FALSE is honored.
-// Reference: https://support.microsoft.com/kb/5057577 (developer section)
 unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
-    // IIDs
-    // IMsRdpExtendedSettings 302D8188-0052-4807-806A-362B628F9AC5 (property bag)
-    // NS3                    B3378D90-0728-45C7-8ED7-B6159FB92219 (QI confirmed)
-    // NS5                    4EB5335B-6429-477D-B922-D06B48F2D364 (E_NOINTERFACE)
-    const IID_EXT: GUID = GUID::from_values(
-        0x302D8188, 0x0052, 0x4807,
-        [0x80, 0x6A, 0x36, 0x2B, 0x62, 0x8F, 0x9A, 0xC5],
-    );
+    // NS3 B3378D90-0728-45C7-8ED7-B6159FB92219 (QI confirmed working)
+    // NS5 4EB5335B-6429-477D-B922-D06B48F2D364 (QI returns E_NOINTERFACE)
     const IID_NS3: GUID = GUID::from_values(
         0xB3378D90, 0x0728, 0x45C7,
         [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19],
@@ -356,39 +374,13 @@ unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
         [0xB9, 0x22, 0xD0, 0x6B, 0x48, 0xF2, 0xD3, 0x64],
     );
 
-    type QIFn       = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
-    type PutBool    = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
-    type PutPropFn  = unsafe extern "system" fn(*mut core::ffi::c_void, *mut u16, *mut VARIANT) -> i32;
-    type RelFn      = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+    type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
+    type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
+    type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
 
     let raw = rdp_unk.as_raw() as *mut core::ffi::c_void;
     let unk_vtbl: *const usize = *(raw as *const *const usize);
     let qi: QIFn = core::mem::transmute(*unk_vtbl.add(0));
-
-    // ── IMsRdpExtendedSettings: revert April-2026 redirection dialog ──────────
-    // Vtable: [0-2] IUnknown, [3] put_Property, [4] get_Property
-    // Must be called AFTER DoVerb — before activation the interface pointer is
-    // uninitialised and Release() on it crashes (STATUS_ACCESS_VIOLATION).
-    //
-    // Safety notes:
-    //  • IUnknown::from_raw takes ownership of the QI'd pointer and calls
-    //    Release through windows-rs's type-safe mechanism when dropped.
-    //  • ManuallyDrop<BSTR> prevents a double-free if the callee incorrectly
-    //    releases the [in] BSTR parameter (non-standard but observed behaviour).
-    let mut ext_raw: *mut core::ffi::c_void = core::ptr::null_mut();
-    let hr_ext = qi(raw, &IID_EXT, &mut ext_raw);
-    eprintln!("[rdp] QI IMsRdpExtendedSettings hr=0x{:08X}", hr_ext as u32);
-    if hr_ext >= 0 && !ext_raw.is_null() {
-        let ext_unk = IUnknown::from_raw(ext_raw as *mut _); // owns the ref; Release on drop
-        let ev: *const usize = *(ext_unk.as_raw() as *const *const usize);
-        let put_prop: PutPropFn = core::mem::transmute(*ev.add(3));
-        let prop = core::mem::ManuallyDrop::new(BSTR::from("RedirectionWarningDialogVersion"));
-        let mut val: VARIANT = core::mem::zeroed();
-        { let r = &mut val as *mut VARIANT as *mut VarRaw; (*r).vt = 3; (*r).data.lVal = 1; }
-        let h = put_prop(ext_unk.as_raw() as *mut _, prop.as_ptr() as *mut u16, &mut val);
-        eprintln!("[rdp] ExtSettings RedirectionWarningDialogVersion=1 hr=0x{:08X}", h as u32);
-        // ext_unk dropped here → Release via windows-rs (safe even if put_prop failed)
-    }
 
     // ── NS3: WarnAboutClipboardRedirection + WarnAboutSendingCredentials ──────
     // Flat vtable offsets (NS3 pointer):
@@ -708,9 +700,11 @@ fn sta_thread(
             }
         }
 
-        // WarnAbout* suppression must happen AFTER clipboard redirect is enabled
-        // (AdvancedSettings above). Calling before DoVerb or before
-        // RedirectClipboard=TRUE causes E_INVALIDARG on these properties.
+        // Write the registry key that reverts the April-2026 redirection warning
+        // dialog to pre-update behavior (HKCU, no elevation required).
+        set_rdp_warning_dialog_version();
+
+        // WarnAbout* suppression — called after clipboard redirect is enabled.
         suppress_rdp_dialogs(&rdp_unk);
 
         if let Err(e) = call_no_args(&disp, "Connect") {
