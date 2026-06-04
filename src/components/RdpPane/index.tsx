@@ -290,7 +290,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
   // created. This prevents React 18 StrictMode's double-invoke from opening
   // two simultaneous RDP connections to the same server.
   const connectGenRef = useRef(0);
-  const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
+  const { setTabStatus, setTabSessionId, getConnectionById, closeTab } = useAppStore();
   const isWindows = /Windows/i.test(navigator.userAgent);
 
   const connect = async (isRetry = false, adminMode = false) => {
@@ -439,18 +439,15 @@ export function RdpPane({ tab }: RdpPaneProps) {
         sessionId={sessionIdRef.current}
         transferred={!!tab.session_id}
         onSessionEnded={() => {
-          // Explicitly disconnect so the STA thread destroys the WS_POPUP.
-          // Without this, the blank HWND_TOPMOST window stays on screen covering
-          // other apps until the user closes the tab.
+          // Disconnect the STA thread so the WS_POPUP is destroyed, then
+          // close the tab — the useEffect cleanup skips disconnectRdp because
+          // we already called it here and cleared sessionIdRef.
           const sid = sessionIdRef.current;
           if (sid) {
             disconnectRdp(sid).catch(() => {});
             sessionIdRef.current = null;
           }
-          setEmbedded(false);
-          setNativeWindow(false);
-          setStatus("error");
-          setErrorMsg("SESSION_ENDED");
+          closeTab(tab.id);
         }}
       />
     );
