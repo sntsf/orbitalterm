@@ -16,6 +16,7 @@ import {
   ftpConnect, ftpDisconnect, getConnections, getFolders, getGroups, getWindowLabel,
   popDetachedSession,
 } from "./lib/commands";
+import { skipDisconnectSessions } from "./lib/sessionTransfer";
 import type { Tab } from "./types";
 
 // ── Standalone FTP pane ────────────────────────────────────────────────────────
@@ -105,6 +106,9 @@ function DetachedApp({ connectionId, windowLabel }: { connectionId: string; wind
       .then((sessionId) => {
         console.log("[DetachedApp] popDetachedSession:", sessionId, "label:", windowLabel);
         if (sessionId) {
+          // Protect from React StrictMode's double-invoke cleanup: the first
+          // cleanup fires before reparent and would call disconnectRdp without this.
+          skipDisconnectSessions.add(sessionId);
           openTabConnected(conn, sessionId);
         } else {
           openTab(conn);
@@ -148,6 +152,7 @@ function MainApp() {
         const conn = getConnectionById(ev.payload.connectionId);
         if (!conn) return;
         if (ev.payload.sessionId) {
+          skipDisconnectSessions.add(ev.payload.sessionId);
           openTabConnected(conn, ev.payload.sessionId);
         } else {
           openTab(conn);
