@@ -278,42 +278,60 @@ fn get_i4(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
 //   [9]    get_PromptForCredentials    (NS2)
 //   [10]   put_PromptForCredentials    (NS2) ← credential re-prompt
 unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
+    // Try NS2 first (has the properties we need), fall back through NS3.
+    // IIDs for IMsRdpClientNonScriptable2 and IMsRdpClientNonScriptable3.
     const IID_NS2: GUID = GUID::from_values(
         0x17A5E535, 0x4072, 0x4FA4,
         [0xAF, 0x11, 0x26, 0xBE, 0x74, 0xED, 0x31, 0x40],
     );
-    // windows-rs does not expose QueryInterface as a callable method on &IUnknown,
-    // so we call it through the raw vtable (index 0) directly.
+    const IID_NS3: GUID = GUID::from_values(
+        0xB3378D90, 0x0728, 0x45C7,
+        [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19],
+    );
+
+    // windows-rs does not expose QueryInterface as a callable Rust method on
+    // &IUnknown, so call it through vtable index 0 directly.
     type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
     type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
     type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
 
-    let raw = rdp_unk.as_raw();
+    let raw = rdp_unk.as_raw() as *mut core::ffi::c_void;
     let unk_vtbl: *const usize = *(raw as *const *const usize);
     let qi: QIFn = core::mem::transmute(*unk_vtbl.add(0));
 
+    // Try NS2 first, then NS3 (NS3 inherits NS2 so same offsets work)
     let mut obj: *mut core::ffi::c_void = core::ptr::null_mut();
-    let hr = qi(raw, &IID_NS2, &mut obj);
+    let mut hr = qi(raw, &IID_NS2, &mut obj);
+    eprintln!("[rdp] QI NS2 hr=0x{:08X} obj={obj:?}", hr as u32);
     if hr < 0 || obj.is_null() {
-        return; // older mstscax — skip, dialogs may still appear
+        hr = qi(raw, &IID_NS3, &mut obj);
+        eprintln!("[rdp] QI NS3 hr=0x{:08X} obj={obj:?}", hr as u32);
     }
-    // VARIANT_BOOL FALSE = 0 (i16). Functions take (this, VARIANT_BOOL) → HRESULT.
-    // Vtable layout (flat, including IUnknown + NS1 inheritance):
-    //   [0-2]  IUnknown (QI, AddRef, Release)
-    //   [3]    NotifyRedirectDeviceChange  (NS1)
-    //   [4]    SendKeys                    (NS1)
-    //   [5]    get_UIParentWindowHandle    (NS2)
-    //   [6]    put_UIParentWindowHandle    (NS2)
-    //   [7]    get_ShowRedirectionWarningDialog  (NS2)
-    //   [8]    put_ShowRedirectionWarningDialog  (NS2) ← clipboard warning
-    //   [9]    get_PromptForCredentials    (NS2)
-    //   [10]   put_PromptForCredentials    (NS2) ← credential re-prompt
-    let ns2_vtbl: *const usize = *(obj as *const *const usize);
-    let put_show_warn:    PutBool = core::mem::transmute(*ns2_vtbl.add(8));
-    let put_prompt_creds: PutBool = core::mem::transmute(*ns2_vtbl.add(10));
-    let release:          RelFn   = core::mem::transmute(*ns2_vtbl.add(2));
-    put_show_warn(obj, 0i16);    // ShowRedirectionWarningDialog = FALSE
-    put_prompt_creds(obj, 0i16); // PromptForCredentials = FALSE
+    if hr < 0 || obj.is_null() {
+        eprintln!("[rdp] IMsRdpClientNonScriptable2/3 QI failed — dialogs may still appear");
+        return;
+    }
+
+    // Vtable layout (flat, IUnknown[0-2] + NS1[3-4] + NS2[5-16]):
+    //   [7]  get_ShowRedirectionWarningDialog  ← clipboard/redirection warning
+    //   [8]  put_ShowRedirectionWarningDialog
+    //   [9]  get_PromptForCredentials          ← Windows Security credential dialog
+    //   [10] put_PromptForCredentials
+    //   [11] get_NegotiateSecurityLayer
+    //   [12] put_NegotiateSecurityLayer
+    let vtbl: *const usize = *(obj as *const *const usize);
+    let put_show_warn:     PutBool = core::mem::transmute(*vtbl.add(8));
+    let put_prompt_creds:  PutBool = core::mem::transmute(*vtbl.add(10));
+    let put_neg_sec_layer: PutBool = core::mem::transmute(*vtbl.add(12));
+    let release:           RelFn   = core::mem::transmute(*vtbl.add(2));
+
+    // VARIANT_BOOL: FALSE = 0, TRUE = -1 (0xFFFF as i16)
+    let hr1 = put_show_warn(obj, 0i16);     // ShowRedirectionWarningDialog = FALSE
+    let hr2 = put_prompt_creds(obj, 0i16);  // PromptForCredentials = FALSE
+    let hr3 = put_neg_sec_layer(obj, -1i16); // NegotiateSecurityLayer = TRUE
+    eprintln!("[rdp] put_ShowRedirectionWarningDialog hr=0x{:08X}", hr1 as u32);
+    eprintln!("[rdp] put_PromptForCredentials         hr=0x{:08X}", hr2 as u32);
+    eprintln!("[rdp] put_NegotiateSecurityLayer       hr=0x{:08X}", hr3 as u32);
     release(obj);
 }
 
