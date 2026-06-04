@@ -7,8 +7,8 @@
 //! WebView2 renders via DirectComposition (DComp). Traditional WS_CHILD windows
 //! exist in the Win32 z-order which lies BELOW the DComp layer — they appear
 //! as black rectangles regardless of HWND_TOP. The fix is to use a WS_POPUP
-//! window (not WS_CHILD) with HWND_TOPMOST so it always floats above the DComp
-//! layer regardless of which Tauri window is the logical parent.
+//! window (not WS_CHILD) owned by the Tauri window so it floats above the DComp
+//! layer while still allowing other applications to be brought to the foreground.
 //!
 //! ## Reparenting and deadlocks
 //! SetWindowLongPtrW(GWLP_HWNDPARENT) sends a synchronous cross-thread Win32
@@ -357,12 +357,17 @@ fn sta_thread(
         // WS_POPUP (not WS_CHILD): floats above WebView2's DirectComposition layer.
         // WS_CHILD windows sit below DComp and appear black regardless of z-order.
         // WS_EX_TOOLWINDOW: suppress taskbar entry for this auxiliary window.
+        // Passing `parent` as hWndParent sets the Win32 owner at creation time —
+        // owned popups stay above their owner in z-order but are NOT topmost,
+        // so other applications can be brought to the foreground normally.
+        // Never change the owner at runtime via SetWindowLongPtrW(GWLP_HWNDPARENT):
+        // that sends a synchronous cross-thread Win32 message which deadlocks.
         let host_hwnd = match CreateWindowExW(
             WS_EX_TOOLWINDOW,
             HOST_CLASS, w!(""),
             WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
             sx, sy, w, h,
-            None, None, Some(hmod.into()), None,
+            Some(parent), None, Some(hmod.into()), None,
         ) {
             Ok(hwnd) => hwnd,
             Err(e) => {
@@ -372,12 +377,12 @@ fn sta_thread(
             }
         };
 
-        // HWND_TOPMOST: WS_POPUP must sit above WebView2's DirectComposition layer.
-        // Do NOT set GWLP_HWNDPARENT here — changing it later via SetWindowLongPtrW
-        // sends a cross-thread synchronous message that deadlocks the STA thread.
-        // Start hidden: the frontend shows the window via rdpWindowsVisibility once
-        // it has computed the correct position (avoids a white flash during connect).
-        SetWindowPos(host_hwnd, Some(HWND_TOPMOST), sx, sy, w, h,
+        // HWND_TOP: owned popup (owner set in CreateWindowExW) stays above its
+        // owner (Tauri) in z-order but is NOT always-on-top, so other applications
+        // can be brought to the foreground normally.
+        // Start hidden: shown by the tick once ConnectionState == 2, so no white
+        // flash appears during NLA/cert authentication dialogs.
+        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, w, h,
             SWP_NOACTIVATE).ok();
 
         // Try MsRdpClient10 first, fall back to MsRdpClient9 for older Windows
@@ -539,7 +544,7 @@ fn sta_thread(
                         let (sx, sy) = canvas_to_screen(parent, x, y);
                         // No SWP_SHOWWINDOW: never reveal during auth dialogs.
                         // Visibility is controlled exclusively by Show/Hide and tick.
-                        SetWindowPos(host_hwnd, Some(HWND_TOPMOST), sx, sy, width, height,
+                        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, width, height,
                             SWP_NOACTIVATE).ok();
                         if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
                             let r = RECT { left: 0, top: 0, right: width, bottom: height };
@@ -549,7 +554,7 @@ fn sta_thread(
                     Ok(ComCmd::Show) => {
                         if rdp_connected {
                             let _ = ShowWindow(host_hwnd, SW_SHOW);
-                            SetWindowPos(host_hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0,
+                            SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
                         } else {
                             show_pending = true;
@@ -564,13 +569,13 @@ fn sta_thread(
                         // Update the tracked parent for canvas_to_screen calculations.
                         // Do NOT call SetWindowLongPtrW(GWLP_HWNDPARENT) — it sends a
                         // synchronous cross-thread Win32 message that deadlocks this STA thread.
-                        // HWND_TOPMOST keeps the WS_POPUP above the new window's DComp layer.
+                        // HWND_TOP keeps the WS_POPUP above the new window's DComp layer.
                         parent = new_hwnd;
                         GetWindowRect(parent, &mut last_parent_rect).ok();
                         rel_x = new_rel_x;
                         rel_y = new_rel_y;
                         let (sx, sy) = canvas_to_screen(parent, rel_x, rel_y);
-                        SetWindowPos(host_hwnd, Some(HWND_TOPMOST), sx, sy, width, height,
+                        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, width, height,
                             SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
                         if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
                             let r = RECT { left: 0, top: 0, right: width, bottom: height };
@@ -616,7 +621,7 @@ fn sta_thread(
                             if show_pending {
                                 show_pending = false;
                                 let _ = ShowWindow(host_hwnd, SW_SHOW);
-                                SetWindowPos(host_hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0,
+                                SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
                                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
                             }
                         }
