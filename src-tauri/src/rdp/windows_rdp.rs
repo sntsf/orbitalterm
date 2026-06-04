@@ -598,11 +598,9 @@ fn sta_thread(
         let _ = OleSetContainedObject(&rdp_unk, true);
         let _ = ole_obj.SetHostNames(w!("OrbitalTerm"), w!(""));
 
-        // Set NegotiateSecurityLayer and dialog-suppression properties before
-        // DoVerb via the NS3 vtable. IMsRdpExtendedSettings is NOT called here
-        // because it requires the control to be fully activated (after DoVerb);
-        // calling it before activation returns an uninitialised pointer that
-        // crashes on Release. It is called in suppress_rdp_dialogs instead.
+        // NegotiateSecurityLayer must be set before DoVerb (vtable[12] on NS3).
+        // All other NS3/NS5 dialog-suppression calls happen after DoVerb in
+        // suppress_rdp_dialogs — calling them before activation crashes (AV).
         {
             const IID_NS3: GUID = GUID::from_values(0xB3378D90, 0x0728, 0x45C7, [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19]);
             type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
@@ -613,22 +611,10 @@ fn sta_thread(
             let mut ns3: *mut core::ffi::c_void = core::ptr::null_mut();
             if qi(raw, &IID_NS3, &mut ns3) >= 0 && !ns3.is_null() {
                 let v: *const usize = *(ns3 as *const *const usize);
-                let put_show_redir:   PutBool = core::mem::transmute(*v.add(8));
-                let put_prompt_creds: PutBool = core::mem::transmute(*v.add(10));
-                let put_neg_sec:      PutBool = core::mem::transmute(*v.add(12));
-                let put_warn_creds:   PutBool = core::mem::transmute(*v.add(18));
-                let put_warn_clip:    PutBool = core::mem::transmute(*v.add(20));
-                let release: RelFn            = core::mem::transmute(*v.add(2));
-                let h1 = put_show_redir(ns3, 0i16);
-                let h2 = put_prompt_creds(ns3, 0i16);
-                let h3 = put_neg_sec(ns3, -1i16);
-                let h4 = put_warn_creds(ns3, 0i16);
-                let h5 = put_warn_clip(ns3, 0i16);
-                eprintln!("[rdp] pre-DoVerb ShowRedirectionWarningDialog=0  hr=0x{:08X}", h1 as u32);
-                eprintln!("[rdp] pre-DoVerb PromptForCredentials=0          hr=0x{:08X}", h2 as u32);
-                eprintln!("[rdp] pre-DoVerb NegotiateSecurityLayer=1         hr=0x{:08X}", h3 as u32);
-                eprintln!("[rdp] pre-DoVerb WarnAboutSendingCredentials=0   hr=0x{:08X}", h4 as u32);
-                eprintln!("[rdp] pre-DoVerb WarnAboutClipboardRedirection=0  hr=0x{:08X}", h5 as u32);
+                let put_neg_sec: PutBool = core::mem::transmute(*v.add(12));
+                let release: RelFn       = core::mem::transmute(*v.add(2));
+                let h = put_neg_sec(ns3, -1i16);
+                eprintln!("[rdp] pre-DoVerb NegotiateSecurityLayer=1 hr=0x{:08X}", h as u32);
                 release(ns3);
             }
         }
