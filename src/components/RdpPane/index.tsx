@@ -60,14 +60,14 @@ function WindowsEmbeddedViewer({ sessionId, transferred, onSessionEnded }: Windo
       if (visible) {
         if (!lastVisible && transferred) {
           // First sync of a transferred session — reparent WS_POPUP to this window.
-          // This changes the owner HWND and repositions in one atomic COM command.
+          console.log("[WinViewer] reparenting session", sessionId, rect.left, rect.top, rect.width, rect.height);
           rdpWindowsReparent(
             sessionId,
             Math.round(rect.left),
             Math.round(rect.top),
             Math.round(rect.width),
             Math.round(rect.height),
-          ).catch(() => {});
+          ).catch((e) => console.error("[WinViewer] reparent failed:", e));
         } else {
           rdpWindowsReposition(
             sessionId,

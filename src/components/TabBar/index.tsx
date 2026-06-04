@@ -40,17 +40,23 @@ export function TabBar() {
       const label = `detached-${tab.connection_id}`;
       const isNativeRdp = tab.connection_type === "rdp" && isWindows;
 
+      // Always grab the freshest tab from the store — drag captures stale closure
+      const freshTab = useAppStore.getState().tabs.find(t => t.id === tab.id) ?? tab;
+      console.log("[tearOut] isNativeRdp:", isNativeRdp, "session_id:", freshTab.session_id, "tab_id:", freshTab.id);
+
       if (isNativeRdp) {
-        if (tab.session_id) {
-          await rdpWindowsVisibility(tab.session_id, false).catch(() => {});
+        if (freshTab.session_id) {
+          await rdpWindowsVisibility(freshTab.session_id, false).catch(() => {});
           // Preserve the COM session (don't disconnect on closeTab cleanup)
-          skipDisconnectSessions.add(tab.session_id);
+          skipDisconnectSessions.add(freshTab.session_id);
           // Store session_id so the detached window can retrieve it
-          const label = `detached-${tab.connection_id}`;
-          await storeDetachedSession(label, tab.session_id).catch(() => {});
+          await storeDetachedSession(label, freshTab.session_id).catch((e) => console.error("[tearOut] storeDetachedSession failed:", e));
+          console.log("[tearOut] stored session", freshTab.session_id, "for label", label);
+        } else {
+          console.warn("[tearOut] no session_id — detached window will open fresh connection");
         }
-        closeTab(tab.id);
-        await openDetachedWindow(tab.connection_id, tab.connection_name);
+        closeTab(freshTab.id);
+        await openDetachedWindow(freshTab.connection_id, freshTab.connection_name);
         return;
       }
 

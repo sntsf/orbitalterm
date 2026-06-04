@@ -103,13 +103,14 @@ function DetachedApp({ connectionId, windowLabel }: { connectionId: string; wind
     if (!conn) return;
     popDetachedSession(windowLabel)
       .then((sessionId) => {
+        console.log("[DetachedApp] popDetachedSession:", sessionId, "label:", windowLabel);
         if (sessionId) {
           openTabConnected(conn, sessionId);
         } else {
           openTab(conn);
         }
       })
-      .catch(() => openTab(conn));
+      .catch((e) => { console.error("[DetachedApp] popDetachedSession error:", e); openTab(conn); });
   }, [connections, connectionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
