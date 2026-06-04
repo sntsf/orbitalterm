@@ -439,6 +439,14 @@ export function RdpPane({ tab }: RdpPaneProps) {
         sessionId={sessionIdRef.current}
         transferred={!!tab.session_id}
         onSessionEnded={() => {
+          // Explicitly disconnect so the STA thread destroys the WS_POPUP.
+          // Without this, the blank HWND_TOPMOST window stays on screen covering
+          // other apps until the user closes the tab.
+          const sid = sessionIdRef.current;
+          if (sid) {
+            disconnectRdp(sid).catch(() => {});
+            sessionIdRef.current = null;
+          }
           setEmbedded(false);
           setNativeWindow(false);
           setStatus("error");
