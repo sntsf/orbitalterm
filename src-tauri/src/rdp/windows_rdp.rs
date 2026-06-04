@@ -347,11 +347,11 @@ fn set_rdp_warning_dialog_version() {
     let mut hkey = HKEY::default();
     unsafe {
         if RegCreateKeyExW(
-            HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), 0, PCWSTR::null(),
+            HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), Some(0), PCWSTR::null(),
             REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut hkey, None,
         ).is_ok() {
             let v: u32 = 1;
-            let ok = RegSetValueExW(hkey, PCWSTR(vname.as_ptr()), 0, REG_DWORD,
+            let ok = RegSetValueExW(hkey, PCWSTR(vname.as_ptr()), Some(0), REG_DWORD,
                 Some(&v.to_ne_bytes())).is_ok();
             eprintln!("[rdp] HKCU RedirectionWarningDialogVersion=1 ok={ok}");
             RegCloseKey(hkey);
