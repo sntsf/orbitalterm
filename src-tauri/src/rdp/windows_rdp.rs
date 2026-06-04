@@ -332,15 +332,21 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
 //   1. Clipboard/redirect security warning
 //   2. "Windows Security – enter credentials" credential prompt
 //
-// Strategy: call both the inherited NS2 slots (ShowRedirectionWarningDialog,
-// PromptForCredentials) and the NS3-native slots (WarnAbout*) via the NS3
-// vtable. NS2 QI returns E_NOINTERFACE on Win10/11 but the NS3 vtable still
-// contains the NS2 implementations at their inherited offsets — they can be
-// called directly through a valid NS3 pointer. NS3-native WarnAbout* slots
-// return E_INVALIDARG on this Windows version (likely Group Policy enforcement).
+// The April-2026 Windows security update replaced the old WarnAbout* dialog
+// system with a new per-connection redirection warning dialog. The new system
+// ignores WarnAbout* (they return E_INVALIDARG). The fix is to QI for
+// IMsRdpExtendedSettings and set RedirectionWarningDialogVersion=1, which
+// reverts to the pre-update dialog behavior where WarnAbout*=FALSE is honored.
+// Reference: https://support.microsoft.com/kb/5057577 (developer section)
 unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
-    // NS3 IID B3378D90-0728-45C7-8ED7-B6159FB92219  (QI confirmed working)
-    // NS5 IID 4EB5335B-6429-477D-B922-D06B48F2D364  (QI returns E_NOINTERFACE)
+    // IIDs
+    // IMsRdpExtendedSettings 302D8188-0052-4807-806A-362B628F9AC5 (property bag)
+    // NS3                    B3378D90-0728-45C7-8ED7-B6159FB92219 (QI confirmed)
+    // NS5                    4EB5335B-6429-477D-B922-D06B48F2D364 (E_NOINTERFACE)
+    const IID_EXT: GUID = GUID::from_values(
+        0x302D8188, 0x0052, 0x4807,
+        [0x80, 0x6A, 0x36, 0x2B, 0x62, 0x8F, 0x9A, 0xC5],
+    );
     const IID_NS3: GUID = GUID::from_values(
         0xB3378D90, 0x0728, 0x45C7,
         [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19],
@@ -350,65 +356,80 @@ unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
         [0xB9, 0x22, 0xD0, 0x6B, 0x48, 0xF2, 0xD3, 0x64],
     );
 
-    type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
-    type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
-    type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+    type QIFn       = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
+    type PutBool    = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
+    type PutPropFn  = unsafe extern "system" fn(*mut core::ffi::c_void, *mut u16, *mut VARIANT) -> i32;
+    type RelFn      = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
 
     let raw = rdp_unk.as_raw() as *mut core::ffi::c_void;
     let unk_vtbl: *const usize = *(raw as *const *const usize);
     let qi: QIFn = core::mem::transmute(*unk_vtbl.add(0));
 
+    // ── IMsRdpExtendedSettings: revert April-2026 redirection dialog ──────────
+    // Vtable: [0-2] IUnknown, [3] put_Property, [4] get_Property
+    // Setting RedirectionWarningDialogVersion=1 re-enables the pre-update dialog
+    // behavior so that WarnAboutClipboardRedirection=FALSE below is respected.
+    let mut ext: *mut core::ffi::c_void = core::ptr::null_mut();
+    let hr_ext = qi(raw, &IID_EXT, &mut ext);
+    eprintln!("[rdp] QI IMsRdpExtendedSettings hr=0x{:08X}", hr_ext as u32);
+    if hr_ext >= 0 && !ext.is_null() {
+        let ev: *const usize = *(ext as *const *const usize);
+        let put_prop: PutPropFn = core::mem::transmute(*ev.add(3));
+        let rel_ext: RelFn      = core::mem::transmute(*ev.add(2));
+        let prop = BSTR::from("RedirectionWarningDialogVersion");
+        let mut val: VARIANT = core::mem::zeroed();
+        { let r = &mut val as *mut VARIANT as *mut VarRaw; (*r).vt = 3; (*r).data.lVal = 1; }
+        let h = put_prop(ext, prop.as_ptr() as *mut u16, &mut val);
+        VariantClear(&mut val).ok();
+        eprintln!("[rdp] ExtSettings RedirectionWarningDialogVersion=1 hr=0x{:08X}", h as u32);
+        rel_ext(ext);
+    }
+
     // ── NS3: WarnAboutClipboardRedirection + WarnAboutSendingCredentials ──────
-    // Flat vtable offsets:
+    // Flat vtable offsets (NS3 pointer):
     //   [0-2]  IUnknown
     //   [3-4]  NS1: NotifyRedirectDeviceChange, SendKeys
-    //   [5-16] NS2: UIParentWindowHandle(2), ShowRedirectionWarningDialog(2),
+    //   [5-16] NS2 (inherited): UIParentWindowHandle(2), ShowRedirectionWarningDialog(2),
     //               PromptForCredentials(2), NegotiateSecurityLayer(2),
     //               EnableCredSspSupport(2), AuthenticationServiceClass(2)
     //   [17] get_WarnAboutSendingCredentials
-    //   [18] put_WarnAboutSendingCredentials   ← suppress credential-send warning
+    //   [18] put_WarnAboutSendingCredentials
     //   [19] get_WarnAboutClipboardRedirection
-    //   [20] put_WarnAboutClipboardRedirection ← suppress clipboard redirect warning
+    //   [20] put_WarnAboutClipboardRedirection
     //   [21] get_ConnectionBarText
     //   [22] put_ConnectionBarText
     let mut ns3: *mut core::ffi::c_void = core::ptr::null_mut();
     if qi(raw, &IID_NS3, &mut ns3) >= 0 && !ns3.is_null() {
         let v: *const usize = *(ns3 as *const *const usize);
-        // Inherited NS2 slots (may work even though QI for NS2 returns E_NOINTERFACE):
-        let put_show_redir:   PutBool = core::mem::transmute(*v.add(8));  // ShowRedirectionWarningDialog
-        let put_prompt_creds: PutBool = core::mem::transmute(*v.add(10)); // PromptForCredentials
-        let put_neg_sec:      PutBool = core::mem::transmute(*v.add(12)); // NegotiateSecurityLayer
-        // NS3-native slots (returning E_INVALIDARG on this Windows version):
-        let put_warn_creds: PutBool = core::mem::transmute(*v.add(18)); // WarnAboutSendingCredentials
-        let put_warn_clip:  PutBool = core::mem::transmute(*v.add(20)); // WarnAboutClipboardRedirection
-        let release: RelFn          = core::mem::transmute(*v.add(2));
+        let put_show_redir:   PutBool = core::mem::transmute(*v.add(8));  // ShowRedirectionWarningDialog (NS2)
+        let put_prompt_creds: PutBool = core::mem::transmute(*v.add(10)); // PromptForCredentials (NS2)
+        let put_neg_sec:      PutBool = core::mem::transmute(*v.add(12)); // NegotiateSecurityLayer (NS2)
+        let put_warn_creds:   PutBool = core::mem::transmute(*v.add(18)); // WarnAboutSendingCredentials (NS3)
+        let put_warn_clip:    PutBool = core::mem::transmute(*v.add(20)); // WarnAboutClipboardRedirection (NS3)
+        let release: RelFn            = core::mem::transmute(*v.add(2));
         let h1 = put_show_redir(ns3, 0i16);
         let h2 = put_prompt_creds(ns3, 0i16);
         let h3 = put_neg_sec(ns3, -1i16);
         let h4 = put_warn_creds(ns3, 0i16);
         let h5 = put_warn_clip(ns3, 0i16);
-        eprintln!("[rdp] NS2 ShowRedirectionWarningDialog=0 hr=0x{:08X}", h1 as u32);
-        eprintln!("[rdp] NS2 PromptForCredentials=0         hr=0x{:08X}", h2 as u32);
-        eprintln!("[rdp] NS2 NegotiateSecurityLayer=1        hr=0x{:08X}", h3 as u32);
-        eprintln!("[rdp] NS3 WarnAboutSendingCredentials=0  hr=0x{:08X}", h4 as u32);
-        eprintln!("[rdp] NS3 WarnAboutClipboardRedirection=0 hr=0x{:08X}", h5 as u32);
+        eprintln!("[rdp] NS2 ShowRedirectionWarningDialog=0  hr=0x{:08X}", h1 as u32);
+        eprintln!("[rdp] NS2 PromptForCredentials=0          hr=0x{:08X}", h2 as u32);
+        eprintln!("[rdp] NS2 NegotiateSecurityLayer=1         hr=0x{:08X}", h3 as u32);
+        eprintln!("[rdp] NS3 WarnAboutSendingCredentials=0   hr=0x{:08X}", h4 as u32);
+        eprintln!("[rdp] NS3 WarnAboutClipboardRedirection=0  hr=0x{:08X}", h5 as u32);
         release(ns3);
     }
 
     // ── NS5: AllowPromptingForCredentials ────────────────────────────────────
-    // NS5 vtable extends NS3 [0-22] with:
-    //   NS4 [23-28]: MarkRdpSettingsSecure(2), PasswordContainsSmartCardPin(2),
-    //                RedirectionWarningType(2)  → 6 methods
-    //   NS5 [29] get_AllowPromptingForCredentials
-    //       [30] put_AllowPromptingForCredentials ← suppress credential-prompt UI
+    // NS5 vtable [30] put_AllowPromptingForCredentials (E_NOINTERFACE on this Windows)
     let mut ns5: *mut core::ffi::c_void = core::ptr::null_mut();
     let hr5 = qi(raw, &IID_NS5, &mut ns5);
-    eprintln!("[rdp] QI NS5 hr=0x{:08X} obj={ns5:?}", hr5 as u32);
+    eprintln!("[rdp] QI NS5 hr=0x{:08X}", hr5 as u32);
     if hr5 >= 0 && !ns5.is_null() {
         let v: *const usize = *(ns5 as *const *const usize);
         let put_allow: PutBool = core::mem::transmute(*v.add(30));
-        let release: RelFn = core::mem::transmute(*v.add(2));
-        let h = put_allow(ns5, 0i16); // AllowPromptingForCredentials = FALSE
+        let release: RelFn     = core::mem::transmute(*v.add(2));
+        let h = put_allow(ns5, 0i16);
         eprintln!("[rdp] NS5 AllowPromptingForCredentials=0 hr=0x{:08X}", h as u32);
         release(ns5);
     }
@@ -580,32 +601,52 @@ fn sta_thread(
         let _ = OleSetContainedObject(&rdp_unk, true);
         let _ = ole_obj.SetHostNames(w!("OrbitalTerm"), w!(""));
 
-        // Set dialog-suppression and security properties before DoVerb so the
-        // control has them before it performs any authentication or rendering.
-        // NS3 inherits NS2 vtable slots — [8] ShowRedirectionWarningDialog and
-        // [10] PromptForCredentials live at those inherited offsets and may work
-        // even though QI for NS2 directly returns E_NOINTERFACE on Win10/11.
+        // Set all dialog-suppression properties before DoVerb.
         {
+            const IID_EXT: GUID = GUID::from_values(0x302D8188, 0x0052, 0x4807, [0x80, 0x6A, 0x36, 0x2B, 0x62, 0x8F, 0x9A, 0xC5]);
             const IID_NS3: GUID = GUID::from_values(0xB3378D90, 0x0728, 0x45C7, [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19]);
-            type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
-            type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
-            type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+            type QIFn      = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
+            type PutBool   = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
+            type PutPropFn = unsafe extern "system" fn(*mut core::ffi::c_void, *mut u16, *mut VARIANT) -> i32;
+            type RelFn     = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
             let raw = rdp_unk.as_raw() as *mut core::ffi::c_void;
             let qi: QIFn = core::mem::transmute(*(*(raw as *const *const usize)).add(0));
+
+            // IMsRdpExtendedSettings: revert April-2026 dialog to pre-update behavior.
+            let mut ext: *mut core::ffi::c_void = core::ptr::null_mut();
+            if qi(raw, &IID_EXT, &mut ext) >= 0 && !ext.is_null() {
+                let ev: *const usize = *(ext as *const *const usize);
+                let put_prop: PutPropFn = core::mem::transmute(*ev.add(3));
+                let rel_ext: RelFn      = core::mem::transmute(*ev.add(2));
+                let prop = BSTR::from("RedirectionWarningDialogVersion");
+                let mut val: VARIANT = core::mem::zeroed();
+                { let r = &mut val as *mut VARIANT as *mut VarRaw; (*r).vt = 3; (*r).data.lVal = 1; }
+                let h = put_prop(ext, prop.as_ptr() as *mut u16, &mut val);
+                VariantClear(&mut val).ok();
+                eprintln!("[rdp] pre-DoVerb RedirectionWarningDialogVersion=1 hr=0x{:08X}", h as u32);
+                rel_ext(ext);
+            }
+
+            // NS3 inherited NS2 slots + NegotiateSecurityLayer.
             let mut ns3: *mut core::ffi::c_void = core::ptr::null_mut();
             if qi(raw, &IID_NS3, &mut ns3) >= 0 && !ns3.is_null() {
                 let v: *const usize = *(ns3 as *const *const usize);
-                // Inherited NS2 slots:
-                let put_show_redir:   PutBool = core::mem::transmute(*v.add(8));  // ShowRedirectionWarningDialog
-                let put_prompt_creds: PutBool = core::mem::transmute(*v.add(10)); // PromptForCredentials
-                let put_neg_sec:      PutBool = core::mem::transmute(*v.add(12)); // NegotiateSecurityLayer
+                let put_show_redir:   PutBool = core::mem::transmute(*v.add(8));
+                let put_prompt_creds: PutBool = core::mem::transmute(*v.add(10));
+                let put_neg_sec:      PutBool = core::mem::transmute(*v.add(12));
+                let put_warn_creds:   PutBool = core::mem::transmute(*v.add(18));
+                let put_warn_clip:    PutBool = core::mem::transmute(*v.add(20));
                 let release: RelFn            = core::mem::transmute(*v.add(2));
-                let h1 = put_show_redir(ns3, 0i16);   // ShowRedirectionWarningDialog = FALSE
-                let h2 = put_prompt_creds(ns3, 0i16); // PromptForCredentials = FALSE
-                let h3 = put_neg_sec(ns3, -1i16);     // NegotiateSecurityLayer = TRUE
-                eprintln!("[rdp] pre-DoVerb ShowRedirectionWarningDialog=0 hr=0x{:08X}", h1 as u32);
-                eprintln!("[rdp] pre-DoVerb PromptForCredentials=0         hr=0x{:08X}", h2 as u32);
-                eprintln!("[rdp] pre-DoVerb NegotiateSecurityLayer=1        hr=0x{:08X}", h3 as u32);
+                let h1 = put_show_redir(ns3, 0i16);
+                let h2 = put_prompt_creds(ns3, 0i16);
+                let h3 = put_neg_sec(ns3, -1i16);
+                let h4 = put_warn_creds(ns3, 0i16);
+                let h5 = put_warn_clip(ns3, 0i16);
+                eprintln!("[rdp] pre-DoVerb ShowRedirectionWarningDialog=0  hr=0x{:08X}", h1 as u32);
+                eprintln!("[rdp] pre-DoVerb PromptForCredentials=0          hr=0x{:08X}", h2 as u32);
+                eprintln!("[rdp] pre-DoVerb NegotiateSecurityLayer=1         hr=0x{:08X}", h3 as u32);
+                eprintln!("[rdp] pre-DoVerb WarnAboutSendingCredentials=0   hr=0x{:08X}", h4 as u32);
+                eprintln!("[rdp] pre-DoVerb WarnAboutClipboardRedirection=0  hr=0x{:08X}", h5 as u32);
                 release(ns3);
             }
         }
