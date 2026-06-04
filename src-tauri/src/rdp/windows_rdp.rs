@@ -518,8 +518,13 @@ fn sta_thread(
         let mut rel_y = params.y;
         let mut last_parent_rect = RECT::default();
         GetWindowRect(parent, &mut last_parent_rect).ok();
-        // ConnectionState: 0=disconnected 1=connecting 2=connected 3=disconnecting
-        let mut was_connected = false;
+        // Gate visibility on ConnectionState==2 so the blank host window never
+        // appears during authentication dialogs (NLA credential prompt, cert
+        // warning, etc.).  The frontend may call Show before mstscax has
+        // finished authenticating; we hold it here and flush once connected.
+        let mut rdp_connected = false; // true once ConnectionState reaches 2
+        let mut was_connected  = false; // latches true, used for disconnect detect
+        let mut show_pending   = false; // Show arrived before rdp_connected
 
         // ── Message / command loop ─────────────────────────────────────────────
         let mut msg = MSG::default();
@@ -532,19 +537,28 @@ fn sta_thread(
                         rel_x = x;
                         rel_y = y;
                         let (sx, sy) = canvas_to_screen(parent, x, y);
+                        // No SWP_SHOWWINDOW: never reveal during auth dialogs.
+                        // Visibility is controlled exclusively by Show/Hide and tick.
                         SetWindowPos(host_hwnd, Some(HWND_TOPMOST), sx, sy, width, height,
-                            SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
+                            SWP_NOACTIVATE).ok();
                         if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
                             let r = RECT { left: 0, top: 0, right: width, bottom: height };
                             let _ = ipo.SetObjectRects(&r, &r);
                         }
                     }
                     Ok(ComCmd::Show) => {
-                        ShowWindow(host_hwnd, SW_SHOW);
-                        SetWindowPos(host_hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
+                        if rdp_connected {
+                            let _ = ShowWindow(host_hwnd, SW_SHOW);
+                            SetWindowPos(host_hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
+                        } else {
+                            show_pending = true;
+                        }
                     }
-                    Ok(ComCmd::Hide) => { ShowWindow(host_hwnd, SW_HIDE); }
+                    Ok(ComCmd::Hide) => {
+                        show_pending = false;
+                        let _ = ShowWindow(host_hwnd, SW_HIDE);
+                    }
                     Ok(ComCmd::Reparent { new_parent, rel_x: new_rel_x, rel_y: new_rel_y, width, height }) => {
                         let new_hwnd = HWND(new_parent as *mut _);
                         // Update the tracked parent for canvas_to_screen calculations.
@@ -591,15 +605,27 @@ fn sta_thread(
                     break 'outer;
                 }
 
-                // Hide the WS_POPUP the moment mstscax disconnects (e.g. user
-                // logs out of the remote Windows session). Without this the blank
-                // HWND_TOPMOST window stays on top of everything until the tab is
-                // closed. ConnectionState: 0=disconnected, 2=connected.
+                // Gate visibility on ConnectionState so the blank host window
+                // never appears during NLA/cert auth dialogs, and hides
+                // immediately when the remote session ends.
                 if let Ok(state) = get_i4(&disp, "ConnectionState") {
-                    if state == 2 {
-                        was_connected = true;
-                    } else if state == 0 && was_connected {
-                        let _ = ShowWindow(host_hwnd, SW_HIDE);
+                    match state {
+                        2 if !rdp_connected => {
+                            rdp_connected = true;
+                            was_connected = true;
+                            if show_pending {
+                                show_pending = false;
+                                let _ = ShowWindow(host_hwnd, SW_SHOW);
+                                SetWindowPos(host_hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0,
+                                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
+                            }
+                        }
+                        0 if was_connected => {
+                            rdp_connected = false;
+                            show_pending  = false;
+                            let _ = ShowWindow(host_hwnd, SW_HIDE);
+                        }
+                        _ => {}
                     }
                 }
 
