@@ -260,6 +260,55 @@ fn get_i4(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
     }
 }
 
+// Write credentials directly into Windows Credential Manager via CredWriteW.
+// More reliable than spawning cmdkey.exe (no process creation, no UAC, no
+// quoting issues). NLA/CredSSP picks these up automatically during Connect().
+fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, password: &str) {
+    use windows::Win32::Security::Credentials::{
+        CredWriteW, CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_DOMAIN_PASSWORD,
+    };
+    use windows::core::PWSTR;
+
+    let user_str = if domain.is_empty() {
+        username.to_owned()
+    } else {
+        format!("{}\\{}", domain, username)
+    };
+
+    // CredSSP looks up TERMSRV/<host> (port 3389) or TERMSRV/<host>:<port>.
+    let mut targets = vec![format!("TERMSRV/{}", host)];
+    if port != 3389 {
+        targets.push(format!("TERMSRV/{}:{}", host, port));
+    }
+
+    let mut user_wide: Vec<u16> = user_str.encode_utf16().chain(Some(0)).collect();
+    // Credential blob is the password encoded as UTF-16 LE (no null terminator).
+    let pw_blob: Vec<u8> = password
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
+
+    for target in &targets {
+        let mut target_wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+        let cred = CREDENTIALW {
+            Flags: CRED_FLAGS(0),
+            Type: CRED_TYPE_DOMAIN_PASSWORD,
+            TargetName: PWSTR(target_wide.as_mut_ptr()),
+            Comment: PWSTR::null(),
+            LastWritten: unsafe { std::mem::zeroed() },
+            CredentialBlobSize: pw_blob.len() as u32,
+            CredentialBlob: pw_blob.as_ptr() as *mut u8,
+            Persist: CRED_PERSIST_LOCAL_MACHINE,
+            AttributeCount: 0,
+            Attributes: std::ptr::null_mut(),
+            TargetAlias: PWSTR::null(),
+            UserName: PWSTR(user_wide.as_mut_ptr()),
+        };
+        let ok = unsafe { CredWriteW(&cred, 0).is_ok() };
+        eprintln!("[rdp] CredWriteW {} ok={ok}", target);
+    }
+}
+
 // Suppress two persistent dialogs that appear on every RDP connection:
 //   1. "Precaución: conexión remota desconocida" (clipboard/redirect warning)
 //   2. "Seguridad de Windows - Escribir credenciales" (credential re-prompt)
@@ -523,27 +572,10 @@ fn sta_thread(
         };
 
         // ── Store credentials in Windows Credential Manager ───────────────────
-        // NLA/CredSSP reads from Credential Manager to suppress the credential
-        // prompt even when ClearTextPassword is also set.
+        // NLA/CredSSP reads from Credential Manager to authenticate silently.
+        // We use CredWriteW directly (no subprocess) for reliability.
         if let Some(ref pw) = params.password {
-            let target = format!("TERMSRV/{}", params.host);
-            let user = if params.domain.is_empty() {
-                params.username.clone()
-            } else {
-                format!("{}\\{}", params.domain, params.username)
-            };
-            #[cfg(target_os = "windows")]
-            {
-                use std::os::windows::process::CommandExt;
-                let _ = std::process::Command::new("cmdkey")
-                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                    .args([
-                        &format!("/add:{}", target),
-                        &format!("/user:{}", user),
-                        &format!("/pass:{}", pw),
-                    ])
-                    .status();
-            }
+            store_rdp_credential(&params.host, params.port, &params.username, &params.domain, pw);
         }
 
         // ── RDP properties ────────────────────────────────────────────────────
