@@ -554,11 +554,25 @@ fn sta_thread(
         let _ = OleSetContainedObject(&rdp_unk, true);
         let _ = ole_obj.SetHostNames(w!("OrbitalTerm"), w!(""));
 
-        // Set NonScriptable properties BEFORE DoVerb (in-place activation).
-        // MSDN: WarnAboutClipboardRedirection and related properties must be
-        // set before the control is activated — calling them after DoVerb
-        // returns E_INVALIDARG.
-        suppress_rdp_dialogs(&rdp_unk);
+        // NegotiateSecurityLayer must be set before DoVerb — confirmed S_OK here.
+        // WarnAbout* are deferred until after AdvancedSettings so clipboard
+        // redirect is already configured when those properties are set.
+        {
+            const IID_NS3: GUID = GUID::from_values(0xB3378D90, 0x0728, 0x45C7, [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19]);
+            type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
+            type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
+            type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+            let raw = rdp_unk.as_raw() as *mut core::ffi::c_void;
+            let qi: QIFn = core::mem::transmute(*(*(raw as *const *const usize)).add(0));
+            let mut ns3: *mut core::ffi::c_void = core::ptr::null_mut();
+            if qi(raw, &IID_NS3, &mut ns3) >= 0 && !ns3.is_null() {
+                let v: *const usize = *(ns3 as *const *const usize);
+                let put_neg_sec: PutBool = core::mem::transmute(*v.add(12));
+                let release: RelFn = core::mem::transmute(*v.add(2));
+                put_neg_sec(ns3, -1i16); // NegotiateSecurityLayer = TRUE
+                release(ns3);
+            }
+        }
 
         let mut rc = RECT { left: 0, top: 0, right: w, bottom: h };
 
@@ -619,10 +633,18 @@ fn sta_thread(
             let _ = put_bool_prop(adv, "SmartSizing", true);
             // 0 = always connect even if cert doesn't match → suppresses warning dialog
             let _ = put_i4(adv, "AuthenticationLevel", 0);
+            // Enable clipboard redirect explicitly so WarnAboutClipboardRedirection
+            // can be set to FALSE below without returning E_INVALIDARG.
+            let _ = put_bool_prop(adv, "RedirectClipboard", true);
             if params.admin_mode {
                 let _ = put_i4(adv, "ConnectToAdministerServer", 1);
             }
         }
+
+        // WarnAbout* suppression must happen AFTER clipboard redirect is enabled
+        // (AdvancedSettings above). Calling before DoVerb or before
+        // RedirectClipboard=TRUE causes E_INVALIDARG on these properties.
+        suppress_rdp_dialogs(&rdp_unk);
 
         if let Err(e) = call_no_args(&disp, "Connect") {
             let _ = result_tx.send(Err(format!("RDP Connect(): {e}")));
