@@ -307,8 +307,11 @@ pub async fn connect_rdp(
         // detached window. Hardcoding "main" would place the WS_POPUP over
         // the wrong window when RDP is opened in a torn-out window.
         let parent_hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        let session_id = Uuid::new_v4().to_string();
 
         let session = crate::rdp::windows_rdp::launch(
+            app.clone(),
+            &session_id,
             parent_hwnd,
             &connection.host,
             connection.port as u16,
@@ -322,7 +325,6 @@ pub async fn connect_rdp(
             connection.rdp_admin || admin_mode.unwrap_or(false),
         )?;
 
-        let session_id = Uuid::new_v4().to_string();
         embedded_sessions.lock().unwrap().insert(session_id.clone(), session);
         let _ = (rdp_sessions, app, window);
         return Ok(RdpConnectResult { session_id, embedded: true, native_window: true, width: w as u16, height: h as u16 });

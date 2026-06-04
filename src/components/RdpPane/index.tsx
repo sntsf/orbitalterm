@@ -98,18 +98,13 @@ function WindowsEmbeddedViewer({ sessionId, transferred, onSessionEnded }: Windo
     };
   }, [sessionId]);
 
-  // Listen for mstsc disconnect (process exits)
+  // Listen for the backend rdp-disconnected event (emitted when ConnectionState → 0).
   useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const s = await rdpStatus(sessionId);
-        if (s === "disconnected") {
-          clearInterval(interval);
-          onSessionEnded();
-        }
-      } catch { /* ignore */ }
-    }, 2000);
-    return () => clearInterval(interval);
+    let unlisten: UnlistenFn | null = null;
+    listen(`rdp-disconnected-${sessionId}`, () => {
+      onSessionEnded();
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
   }, [sessionId, onSessionEnded]);
 
   return (

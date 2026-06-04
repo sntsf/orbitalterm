@@ -19,6 +19,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
+use tauri::Emitter;
 use windows::Win32::Foundation::{E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -491,6 +492,8 @@ fn register_host_class() {
 // ── STA thread ────────────────────────────────────────────────────────────────
 
 struct LaunchParams {
+    app: tauri::AppHandle,
+    session_id: String,
     parent_hwnd: isize,
     host: String,
     port: u16,
@@ -815,6 +818,10 @@ fn sta_thread(
                             rdp_connected = false;
                             show_pending  = false;
                             let _ = ShowWindow(host_hwnd, SW_HIDE);
+                            params.app.emit(
+                                &format!("rdp-disconnected-{}", params.session_id),
+                                (),
+                            ).ok();
                         }
                         _ => {}
                     }
@@ -846,6 +853,8 @@ fn sta_thread(
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn launch(
+    app: tauri::AppHandle,
+    session_id: &str,
     parent_hwnd: HWND,
     host: &str,
     port: u16,
@@ -859,6 +868,8 @@ pub fn launch(
     admin_mode: bool,
 ) -> Result<WindowsRdpSession, String> {
     let params = LaunchParams {
+        app,
+        session_id: session_id.to_string(),
         parent_hwnd: parent_hwnd.0 as isize,
         host: host.to_string(),
         port,
