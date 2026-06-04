@@ -716,10 +716,11 @@ fn sta_thread(
         // appears during authentication dialogs (NLA credential prompt, cert
         // warning, etc.).  The frontend may call Show before mstscax has
         // finished authenticating; we hold it here and flush once connected.
-        let mut rdp_connected  = false; // true once ConnectionState reaches 2
-        let mut was_connected  = false; // true while connected; reset on disconnect
-        let mut ever_connected = false; // latch: true once connected, never reset
-        let mut show_pending   = false; // Show arrived before rdp_connected
+        let mut rdp_connected   = false; // true once ConnectionState reaches 2
+        let mut was_connected   = false; // true while connected; reset on disconnect
+        let mut ever_connected  = false; // latch: true once connected, never reset
+        let mut show_pending    = false; // Show arrived before rdp_connected
+        let mut dispatch_errors = 0u32; // consecutive get_i4 errors after connected
 
         // ── Message / command loop ─────────────────────────────────────────────
         let mut msg = MSG::default();
@@ -803,32 +804,45 @@ fn sta_thread(
                 // Gate visibility on ConnectionState so the blank host window
                 // never appears during NLA/cert auth dialogs, and hides
                 // immediately when the remote session ends.
-                if let Ok(state) = get_i4(&disp, "ConnectionState") {
-                    match state {
-                        2 if !rdp_connected => {
-                            rdp_connected  = true;
-                            was_connected  = true;
-                            ever_connected = true;
-                            if show_pending {
-                                show_pending = false;
-                                let _ = ShowWindow(host_hwnd, SW_SHOW);
-                                SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
-                                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
-                            }
+                //
+                // When mstscax tears down after logoff it may invalidate the COM
+                // object before ConnectionState can be read, returning an Err.
+                // We treat consecutive IDispatch errors while connected the same
+                // as ConnectionState == 0 (session gone).
+                match get_i4(&disp, "ConnectionState") {
+                    Ok(2) if !rdp_connected => {
+                        dispatch_errors = 0;
+                        rdp_connected  = true;
+                        was_connected  = true;
+                        ever_connected = true;
+                        if show_pending {
+                            show_pending = false;
+                            let _ = ShowWindow(host_hwnd, SW_SHOW);
+                            SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
                         }
-                        0 if was_connected => {
-                            // Session ended: hide the host window and exit the loop.
-                            // The post-loop code emits rdp-disconnected so the
-                            // frontend closes the tab regardless of WHY the loop exits
-                            // (WM_QUIT, parent destroyed, ConnectionState→0, etc.).
+                    }
+                    Ok(0) if was_connected => {
+                        was_connected = false;
+                        rdp_connected = false;
+                        show_pending  = false;
+                        let _ = ShowWindow(host_hwnd, SW_HIDE);
+                        break 'outer;
+                    }
+                    Ok(_) => { dispatch_errors = 0; }
+                    Err(_) if was_connected => {
+                        // COM object error while connected: count consecutive failures.
+                        // 3 in a row (~1.8 s) means the session is gone.
+                        dispatch_errors += 1;
+                        if dispatch_errors >= 3 {
                             was_connected = false;
                             rdp_connected = false;
                             show_pending  = false;
                             let _ = ShowWindow(host_hwnd, SW_HIDE);
                             break 'outer;
                         }
-                        _ => {}
                     }
+                    Err(_) => {}
                 }
 
                 let mut cur = RECT::default();

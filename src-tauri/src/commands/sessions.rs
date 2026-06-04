@@ -151,7 +151,7 @@ pub async fn connect_ssh(
 
     cmd.arg(format!("{}@{}", connection.username, connection.host));
 
-    let _child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
 
     let raw_writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(raw_writer));
@@ -162,6 +162,7 @@ pub async fn connect_ssh(
     let app_handle = app.clone();
     let writer_ref = Arc::clone(&writer);
 
+    // Thread 1: stream PTY output to the frontend as ssh-data events.
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         let mut password_injected = false;
@@ -179,7 +180,6 @@ pub async fn connect_ssh(
                                 || lower.contains("passphrase for")
                             {
                                 if let Ok(mut w) = writer_ref.lock() {
-                                    // PTY raw mode: Enter key is \r, not \n
                                     let _ = write!(w, "{}\r", pass);
                                     let _ = w.flush();
                                     password_injected = true;
@@ -192,8 +192,24 @@ pub async fn connect_ssh(
                 }
             }
         }
+        // On Linux the PTY reader reaches EOF when the process exits, which
+        // is sufficient. On Windows the ConPTY may not signal EOF reliably,
+        // so this path is a fallback — Thread 2 is the primary mechanism.
         app_handle.emit(&format!("ssh-closed-{sid}"), ()).ok();
     });
+
+    // Thread 2: wait for the child process to exit, then emit ssh-closed.
+    // This is the primary exit detection on Windows, where ConPTY does not
+    // reliably deliver EOF to the PTY reader when the ssh process exits.
+    {
+        let app2 = app.clone();
+        let sid2 = session_id.clone();
+        std::thread::spawn(move || {
+            let mut c = child;
+            let _ = c.wait(); // blocks until ssh process exits
+            app2.emit(&format!("ssh-closed-{sid2}"), ()).ok();
+        });
+    }
 
     sessions.lock().unwrap().insert(
         session_id.clone(),
