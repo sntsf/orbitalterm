@@ -142,7 +142,7 @@ export function TabBar() {
       const bar = barRef.current;
       const barRect = bar?.getBoundingClientRect();
 
-      if (barRect && ev.clientY > barRect.bottom + TEAR_THRESHOLD) {
+      if (barRect && ev.clientY > barRect.bottom + TEAR_THRESHOLD && !isWindows) {
         tearOut(state.tab);
         return;
       }
@@ -218,17 +218,19 @@ export function TabBar() {
             className="fixed z-50 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded shadow-lg py-1 min-w-36"
             style={{ left: menu.x, top: menu.y }}
           >
-            <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
-              onClick={() => {
-                const tab = tabs.find((t) => t.id === menu.tabId);
-                if (tab) tearOut(tab);
-                closeMenu();
-              }}
-            >
-              <PanelLeftClose size={11} />
-              Separar ventana
-            </button>
+            {!isWindows && (
+              <button
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                onClick={() => {
+                  const tab = tabs.find((t) => t.id === menu.tabId);
+                  if (tab) tearOut(tab);
+                  closeMenu();
+                }}
+              >
+                <PanelLeftClose size={11} />
+                Separar ventana
+              </button>
+            )}
             <button
               className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
               onClick={() => { reconnectTab(menu.tabId); closeMenu(); }}
