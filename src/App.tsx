@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { TabBar, DetachedTabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/Terminal";
@@ -85,6 +85,10 @@ const SessionPane = memo(function SessionPane({ tab }: { tab: Tab }) {
 
 function DetachedApp({ connectionId, windowLabel }: { connectionId: string; windowLabel: string }) {
   const { connections, tabs, activeTabId, openTab, openTabConnected, setConnections, setFolders, setGroups } = useAppStore();
+  // Guard: popDetachedSession removes the entry on first call. React.StrictMode
+  // runs effects twice — the second call returns null and would open a fresh
+  // (blank) connection instead of restoring the transferred session.
+  const didOpenRef = useRef(false);
 
   // Load data (Sidebar not rendered in detached mode, so load here)
   useEffect(() => {
@@ -102,6 +106,8 @@ function DetachedApp({ connectionId, windowLabel }: { connectionId: string; wind
     if (connections.length === 0) return;
     const conn = connections.find((c) => c.id === connectionId);
     if (!conn) return;
+    if (didOpenRef.current) return;
+    didOpenRef.current = true;
     popDetachedSession(windowLabel)
       .then((sessionId) => {
         console.log("[DetachedApp] popDetachedSession:", sessionId, "label:", windowLabel);
