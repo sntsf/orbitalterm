@@ -7,8 +7,14 @@
 //! WebView2 renders via DirectComposition (DComp). Traditional WS_CHILD windows
 //! exist in the Win32 z-order which lies BELOW the DComp layer — they appear
 //! as black rectangles regardless of HWND_TOP. The fix is to use a WS_POPUP
-//! window (not WS_CHILD) with an owner relationship (GWLP_HWNDPARENT) so it
-//! sits above the DComp layer while still minimizing/restoring with Tauri.
+//! window (not WS_CHILD) with HWND_TOPMOST so it always floats above the DComp
+//! layer regardless of which Tauri window is the logical parent.
+//!
+//! ## Reparenting and deadlocks
+//! SetWindowLongPtrW(GWLP_HWNDPARENT) sends a synchronous cross-thread Win32
+//! message that deadlocks the COM STA thread. We therefore never call it after
+//! creation. Tearout/dock-back just updates the tracked parent variable so
+//! canvas_to_screen() uses the correct reference window for positioning.
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -352,11 +358,10 @@ fn sta_thread(
             }
         };
 
-        // Owner relationship: popup minimizes/restores/always-on-top with Tauri.
-        // This is the GWLP_HWNDPARENT trick — not the same as WS_CHILD parent.
-        SetWindowLongPtrW(host_hwnd, GWLP_HWNDPARENT, parent.0 as isize);
-
-        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, w, h,
+        // HWND_TOPMOST: WS_POPUP must sit above WebView2's DirectComposition layer.
+        // Do NOT set GWLP_HWNDPARENT here — changing it later via SetWindowLongPtrW
+        // sends a cross-thread synchronous message that deadlocks the STA thread.
+        SetWindowPos(host_hwnd, Some(HWND_TOPMOST), sx, sy, w, h,
             SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
 
         // Try MsRdpClient10 first, fall back to MsRdpClient9 for older Windows
@@ -509,7 +514,7 @@ fn sta_thread(
                         rel_x = x;
                         rel_y = y;
                         let (sx, sy) = canvas_to_screen(parent, x, y);
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, width, height,
+                        SetWindowPos(host_hwnd, Some(HWND_TOPMOST), sx, sy, width, height,
                             SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
                         if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
                             let r = RECT { left: 0, top: 0, right: width, bottom: height };
@@ -518,20 +523,22 @@ fn sta_thread(
                     }
                     Ok(ComCmd::Show) => {
                         ShowWindow(host_hwnd, SW_SHOW);
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
+                        SetWindowPos(host_hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0,
                             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
                     }
                     Ok(ComCmd::Hide) => { ShowWindow(host_hwnd, SW_HIDE); }
                     Ok(ComCmd::Reparent { new_parent, rel_x: new_rel_x, rel_y: new_rel_y, width, height }) => {
                         let new_hwnd = HWND(new_parent as *mut _);
-                        // Change owner so WS_POPUP minimizes/restores with the new window
-                        SetWindowLongPtrW(host_hwnd, GWLP_HWNDPARENT, new_parent);
+                        // Update the tracked parent for canvas_to_screen calculations.
+                        // Do NOT call SetWindowLongPtrW(GWLP_HWNDPARENT) — it sends a
+                        // synchronous cross-thread Win32 message that deadlocks this STA thread.
+                        // HWND_TOPMOST keeps the WS_POPUP above the new window's DComp layer.
                         parent = new_hwnd;
                         GetWindowRect(parent, &mut last_parent_rect).ok();
                         rel_x = new_rel_x;
                         rel_y = new_rel_y;
                         let (sx, sy) = canvas_to_screen(parent, rel_x, rel_y);
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, width, height,
+                        SetWindowPos(host_hwnd, Some(HWND_TOPMOST), sx, sy, width, height,
                             SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
                         if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
                             let r = RECT { left: 0, top: 0, right: width, bottom: height };
