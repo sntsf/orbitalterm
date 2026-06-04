@@ -16,7 +16,8 @@
 //! creation. Tearout/dock-back just updates the tracked parent variable so
 //! canvas_to_screen() uses the correct reference window for positioning.
 
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use tauri::Emitter;
@@ -27,6 +28,56 @@ use windows::Win32::System::Ole::*;
 use windows::Win32::System::Variant::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, Ref, PCWSTR};
+
+// IID of the DMsRdpClientEvents / IMsTscAxEvents outbound dispatch interface.
+// This is the connection-point IID passed to IConnectionPointContainer::FindConnectionPoint.
+// Defined in the Windows SDK as DIID_IMsTscAxEvents (mstsclib.h).
+const IID_DMSRDPCLIENTEVENTS: GUID = GUID::from_values(
+    0x209D4C07, 0x9325, 0x11D1,
+    [0xA9, 0xE5, 0x00, 0xC0, 0x4F, 0xC9, 0x9C, 0x1D],
+);
+
+// DISPID 4 in IMsTscAxEvents = OnDisconnected(long discReason)
+const DISPID_ONDISCONNECTED: i32 = 4;
+
+// COM event sink that receives IMsTscAxEvents notifications from mstscax.dll.
+// mstscax fires OnDisconnected (DISPID 4) on the STA thread via DispatchMessageW,
+// so all access to `disconnected` is single-threaded in practice.
+#[implement(IDispatch)]
+struct RdpEventSink {
+    disconnected: Arc<AtomicBool>,
+}
+
+// SAFETY: used exclusively on the dedicated STA COM thread
+unsafe impl Send for RdpEventSink {}
+
+impl IDispatch_Impl for RdpEventSink_Impl {
+    fn GetTypeInfoCount(&self) -> windows::core::Result<u32> { Ok(0) }
+    fn GetTypeInfo(&self, _: u32, _: u32) -> windows::core::Result<ITypeInfo> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetIDsOfNames(
+        &self, _: *const GUID, _: *const PCWSTR, _: u32, _: u32, _: *mut i32,
+    ) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn Invoke(
+        &self,
+        dispidmember: i32,
+        _: *const GUID,
+        _: u32,
+        _: DISPATCH_FLAGS,
+        _: *const DISPPARAMS,
+        _: *mut VARIANT,
+        _: *mut EXCEPINFO,
+        _: *mut u32,
+    ) -> windows::core::Result<()> {
+        if dispidmember == DISPID_ONDISCONNECTED {
+            self.disconnected.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
 
 // MsRdpClient10 (Windows 10+); MsRdpClient9 used as fallback
 const CLSID_MSTSC_10: GUID = GUID::from_values(
@@ -703,6 +754,36 @@ fn sta_thread(
             return;
         }
 
+        // ── COM connection point: subscribe to IMsTscAxEvents ─────────────────
+        // This is the push-based disconnect detection used by mRemoteNG.
+        // mstscax fires OnDisconnected (DISPID 4) synchronously on this STA
+        // thread via DispatchMessageW, which is far more reliable than polling
+        // ConnectionState which can become invalid before the poll runs.
+        let disconnected_flag = Arc::new(AtomicBool::new(false));
+        let mut cp_cookie: u32 = 0;
+        let mut cp_obj: Option<IConnectionPoint> = None;
+        if let Ok(cpc) = rdp_unk.cast::<IConnectionPointContainer>() {
+            if let Ok(found_cp) = cpc.FindConnectionPoint(&IID_DMSRDPCLIENTEVENTS) {
+                let sink_disp: IDispatch = RdpEventSink {
+                    disconnected: disconnected_flag.clone(),
+                }.into();
+                // Cast IDispatch → IUnknown; always succeeds for a valid COM object.
+                let sink_unk: IUnknown = sink_disp.cast().expect("IDispatch→IUnknown");
+                match found_cp.Advise(&sink_unk) {
+                    Ok(cookie) => {
+                        eprintln!("[rdp] IConnectionPoint::Advise ok cookie={cookie}");
+                        cp_cookie = cookie;
+                        cp_obj = Some(found_cp);
+                    }
+                    Err(e) => eprintln!("[rdp] IConnectionPoint::Advise failed: {e}"),
+                }
+            } else {
+                eprintln!("[rdp] FindConnectionPoint(DMsRdpClientEvents) failed");
+            }
+        } else {
+            eprintln!("[rdp] QI IConnectionPointContainer failed");
+        }
+
         let (tx, rx) = mpsc::sync_channel::<ComCmd>(16);
         let _ = result_tx.send(Ok(tx));
 
@@ -801,14 +882,20 @@ fn sta_thread(
                     break 'outer;
                 }
 
-                // Gate visibility on ConnectionState so the blank host window
-                // never appears during NLA/cert auth dialogs, and hides
-                // immediately when the remote session ends.
-                //
-                // When mstscax tears down after logoff it may invalidate the COM
-                // object before ConnectionState can be read, returning an Err.
-                // We treat consecutive IDispatch errors while connected the same
-                // as ConnectionState == 0 (session gone).
+                // Primary disconnect detection: COM connection point OnDisconnected
+                // event (DISPID 4) set the flag synchronously via DispatchMessageW above.
+                if ever_connected && disconnected_flag.load(Ordering::SeqCst) {
+                    eprintln!("[rdp] OnDisconnected event received — closing session");
+                    was_connected = false;
+                    rdp_connected = false;
+                    show_pending  = false;
+                    let _ = ShowWindow(host_hwnd, SW_HIDE);
+                    break 'outer;
+                }
+
+                // Fallback: poll ConnectionState for initial connection detection
+                // (ConnectionState==2 → show window) and as a secondary disconnect
+                // guard for cases where the event sink was not wired (no IConnectionPointContainer).
                 match get_i4(&disp, "ConnectionState") {
                     Ok(2) if !rdp_connected => {
                         dispatch_errors = 0;
@@ -857,6 +944,14 @@ fn sta_thread(
 
             std::thread::sleep(Duration::from_millis(16));
         }
+
+        // Unregister the COM event sink before releasing everything else.
+        if let Some(ref cp) = cp_obj {
+            if cp_cookie != 0 {
+                let _ = cp.Unadvise(cp_cookie);
+            }
+        }
+        drop(cp_obj);
 
         // Notify the frontend regardless of WHY the loop exited (user log-off,
         // WM_QUIT from mstscax, parent window destroyed, explicit Disconnect cmd).
