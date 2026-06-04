@@ -156,6 +156,16 @@ export async function rdpWindowsVisibility(sessionId: string, visible: boolean):
   return invoke("rdp_windows_visibility", { sessionId, visible });
 }
 
+export async function rdpWindowsReparent(
+  sessionId: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): Promise<void> {
+  return invoke("rdp_windows_reparent", { sessionId, x, y, width, height });
+}
+
 export async function rdpResizeSession(sessionId: string, width: number, height: number): Promise<void> {
   return invoke("rdp_resize_session", { sessionId, width, height });
 }

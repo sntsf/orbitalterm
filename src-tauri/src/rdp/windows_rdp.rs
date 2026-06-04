@@ -38,6 +38,7 @@ enum ComCmd {
     Show,
     Hide,
     Disconnect,
+    Reparent { new_parent: isize, rel_x: i32, rel_y: i32, width: i32, height: i32 },
 }
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -325,7 +326,7 @@ fn sta_thread(
 
         let hmod = GetModuleHandleW(None).unwrap_or_default();
         // parent = Tauri main window (top-level application frame)
-        let parent = HWND(params.parent_hwnd as *mut _);
+        let mut parent = HWND(params.parent_hwnd as *mut _);
         let w = params.width.max(640);
         let h = params.height.max(480);
 
@@ -521,6 +522,22 @@ fn sta_thread(
                             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
                     }
                     Ok(ComCmd::Hide) => { ShowWindow(host_hwnd, SW_HIDE); }
+                    Ok(ComCmd::Reparent { new_parent, rel_x: new_rel_x, rel_y: new_rel_y, width, height }) => {
+                        let new_hwnd = HWND(new_parent as *mut _);
+                        // Change owner so WS_POPUP minimizes/restores with the new window
+                        SetWindowLongPtrW(host_hwnd, GWLP_HWNDPARENT, new_parent);
+                        parent = new_hwnd;
+                        GetWindowRect(parent, &mut last_parent_rect).ok();
+                        rel_x = new_rel_x;
+                        rel_y = new_rel_y;
+                        let (sx, sy) = canvas_to_screen(parent, rel_x, rel_y);
+                        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, width, height,
+                            SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
+                        if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
+                            let r = RECT { left: 0, top: 0, right: width, bottom: height };
+                            let _ = ipo.SetObjectRects(&r, &r);
+                        }
+                    }
                     Ok(ComCmd::Disconnect) | Err(mpsc::TryRecvError::Disconnected) => {
                         let _ = call_no_args(&disp, "Disconnect");
                         PostQuitMessage(0);
@@ -616,4 +633,11 @@ pub fn show(session: &WindowsRdpSession) {
 
 pub fn hide(session: &WindowsRdpSession) {
     let _ = session.tx.try_send(ComCmd::Hide);
+}
+
+pub fn reparent(session: &WindowsRdpSession, new_parent: HWND, rel_x: i32, rel_y: i32, width: i32, height: i32) {
+    let _ = session.tx.try_send(ComCmd::Reparent {
+        new_parent: new_parent.0 as isize,
+        rel_x, rel_y, width, height,
+    });
 }

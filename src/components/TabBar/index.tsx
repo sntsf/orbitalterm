@@ -41,12 +41,13 @@ export function TabBar() {
       const isNativeRdp = tab.connection_type === "rdp" && isWindows;
 
       if (isNativeRdp) {
-        // Windows native RDP: hide the WS_POPUP and close the tab immediately
-        // before opening the detached window. The detached window starts its own
-        // fresh RDP session so no session transfer is needed. Closing first
-        // prevents the tab getting stuck if openDetachedWindow throws.
         if (tab.session_id) {
           await rdpWindowsVisibility(tab.session_id, false).catch(() => {});
+          // Preserve the COM session (don't disconnect on closeTab cleanup)
+          skipDisconnectSessions.add(tab.session_id);
+          // Store session_id so the detached window can retrieve it
+          const label = `detached-${tab.connection_id}`;
+          await storeDetachedSession(label, tab.session_id).catch(() => {});
         }
         closeTab(tab.id);
         await openDetachedWindow(tab.connection_id, tab.connection_name);
