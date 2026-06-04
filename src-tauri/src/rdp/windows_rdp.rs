@@ -270,59 +270,77 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
     };
     use windows::core::PWSTR;
 
-    let user_str = if domain.is_empty() {
+    // Build the set of (target, username) pairs to store.
+    // CredSSP looks up TERMSRV/<host> with type CRED_TYPE_GENERIC.
+    // For local accounts (no domain), also store with the ".\username" prefix
+    // that Windows uses internally so CredSSP finds the credential regardless
+    // of which username format it resolves to.
+    let user_plain = if domain.is_empty() {
         username.to_owned()
     } else {
         format!("{}\\{}", domain, username)
     };
+    let user_dot = if domain.is_empty() {
+        Some(format!(".\\{}", username))
+    } else {
+        None
+    };
 
-    // CredSSP looks up TERMSRV/<host> (or TERMSRV/<host>:<port> for custom ports).
-    // mstsc.exe stores RDP credentials as CRED_TYPE_GENERIC; CredSSP also checks
-    // CRED_TYPE_DOMAIN_PASSWORD. Store both to cover all lookup paths.
-    let mut targets = vec![format!("TERMSRV/{}", host)];
+    let mut base_targets = vec![format!("TERMSRV/{}", host)];
     if port != 3389 {
-        targets.push(format!("TERMSRV/{}:{}", host, port));
+        base_targets.push(format!("TERMSRV/{}:{}", host, port));
     }
 
-    let mut user_wide: Vec<u16> = user_str.encode_utf16().chain(Some(0)).collect();
-    // Credential blob is the password as UTF-16 LE with no null terminator.
+    // Credential blob is the password as UTF-16LE with no null terminator.
     let pw_blob: Vec<u8> = password
         .encode_utf16()
         .flat_map(|c| c.to_le_bytes())
         .collect();
 
-    for target in &targets {
+    for target in &base_targets {
         let mut target_wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
-        for cred_type in [CRED_TYPE_GENERIC, CRED_TYPE_DOMAIN_PASSWORD] {
-            let cred = CREDENTIALW {
-                Flags: CRED_FLAGS(0),
-                Type: cred_type,
-                TargetName: PWSTR(target_wide.as_mut_ptr()),
-                Comment: PWSTR::null(),
-                LastWritten: unsafe { std::mem::zeroed() },
-                CredentialBlobSize: pw_blob.len() as u32,
-                CredentialBlob: pw_blob.as_ptr() as *mut u8,
-                Persist: CRED_PERSIST_LOCAL_MACHINE,
-                AttributeCount: 0,
-                Attributes: std::ptr::null_mut(),
-                TargetAlias: PWSTR::null(),
-                UserName: PWSTR(user_wide.as_mut_ptr()),
-            };
-            let ok = unsafe { CredWriteW(&cred, 0).is_ok() };
-            eprintln!("[rdp] CredWriteW {target} type={} ok={ok}", cred_type.0);
+        // Build the list of username variants to store for this target.
+        let mut user_variants: Vec<String> = vec![user_plain.clone()];
+        if let Some(ref dot) = user_dot { user_variants.push(dot.clone()); }
+        for user_str in &user_variants {
+            let mut user_wide: Vec<u16> = user_str.encode_utf16().chain(Some(0)).collect();
+            // mstsc.exe stores as CRED_TYPE_GENERIC; CredSSP reads GENERIC.
+            // DOMAIN_PASSWORD is kept for fallback on domain-joined targets.
+            for cred_type in [CRED_TYPE_GENERIC, CRED_TYPE_DOMAIN_PASSWORD] {
+                let cred = CREDENTIALW {
+                    Flags: CRED_FLAGS(0),
+                    Type: cred_type,
+                    TargetName: PWSTR(target_wide.as_mut_ptr()),
+                    Comment: PWSTR::null(),
+                    LastWritten: unsafe { std::mem::zeroed() },
+                    CredentialBlobSize: pw_blob.len() as u32,
+                    CredentialBlob: pw_blob.as_ptr() as *mut u8,
+                    Persist: CRED_PERSIST_LOCAL_MACHINE,
+                    AttributeCount: 0,
+                    Attributes: std::ptr::null_mut(),
+                    TargetAlias: PWSTR::null(),
+                    UserName: PWSTR(user_wide.as_mut_ptr()),
+                };
+                let ok = unsafe { CredWriteW(&cred, 0).is_ok() };
+                eprintln!("[rdp] CredWriteW {target} user={user_str} type={} ok={ok}", cred_type.0);
+            }
         }
     }
 }
 
-// Suppress the two dialogs that appear on every RDP connection.
+// Suppress the two dialogs that appear on every RDP connection:
+//   1. Clipboard/redirect security warning
+//   2. "Windows Security – enter credentials" credential prompt
 //
-// On Windows 10/11, NS2's ShowRedirectionWarningDialog and PromptForCredentials
-// return E_NOTIMPL. The working modern replacements are:
-//   NS3 WarnAboutClipboardRedirection → suppresses the clipboard/redirect warning
-//   NS5 AllowPromptingForCredentials  → suppresses the Windows Security credential dialog
+// Strategy: call both the inherited NS2 slots (ShowRedirectionWarningDialog,
+// PromptForCredentials) and the NS3-native slots (WarnAbout*) via the NS3
+// vtable. NS2 QI returns E_NOINTERFACE on Win10/11 but the NS3 vtable still
+// contains the NS2 implementations at their inherited offsets — they can be
+// called directly through a valid NS3 pointer. NS3-native WarnAbout* slots
+// return E_INVALIDARG on this Windows version (likely Group Policy enforcement).
 unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
-    // NS3 IID B3378D90-0728-45C7-8ED7-B6159FB92219  (confirmed working by test)
-    // NS5 IID 4EB5335B-6429-477D-B922-D06B48F2D364
+    // NS3 IID B3378D90-0728-45C7-8ED7-B6159FB92219  (QI confirmed working)
+    // NS5 IID 4EB5335B-6429-477D-B922-D06B48F2D364  (QI returns E_NOINTERFACE)
     const IID_NS3: GUID = GUID::from_values(
         0xB3378D90, 0x0728, 0x45C7,
         [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19],
@@ -356,16 +374,24 @@ unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
     let mut ns3: *mut core::ffi::c_void = core::ptr::null_mut();
     if qi(raw, &IID_NS3, &mut ns3) >= 0 && !ns3.is_null() {
         let v: *const usize = *(ns3 as *const *const usize);
-        let put_warn_creds: PutBool = core::mem::transmute(*v.add(18));
-        let put_warn_clip:  PutBool = core::mem::transmute(*v.add(20));
-        let put_neg_sec:    PutBool = core::mem::transmute(*v.add(12));
-        let release: RelFn = core::mem::transmute(*v.add(2));
-        let h1 = put_warn_creds(ns3, 0i16);  // WarnAboutSendingCredentials = FALSE
-        let h2 = put_warn_clip(ns3, 0i16);   // WarnAboutClipboardRedirection = FALSE
-        let h3 = put_neg_sec(ns3, -1i16);    // NegotiateSecurityLayer = TRUE
-        eprintln!("[rdp] NS3 WarnAboutSendingCredentials=0  hr=0x{:08X}", h1 as u32);
-        eprintln!("[rdp] NS3 WarnAboutClipboardRedirection=0 hr=0x{:08X}", h2 as u32);
-        eprintln!("[rdp] NS3 NegotiateSecurityLayer=1        hr=0x{:08X}", h3 as u32);
+        // Inherited NS2 slots (may work even though QI for NS2 returns E_NOINTERFACE):
+        let put_show_redir:   PutBool = core::mem::transmute(*v.add(8));  // ShowRedirectionWarningDialog
+        let put_prompt_creds: PutBool = core::mem::transmute(*v.add(10)); // PromptForCredentials
+        let put_neg_sec:      PutBool = core::mem::transmute(*v.add(12)); // NegotiateSecurityLayer
+        // NS3-native slots (returning E_INVALIDARG on this Windows version):
+        let put_warn_creds: PutBool = core::mem::transmute(*v.add(18)); // WarnAboutSendingCredentials
+        let put_warn_clip:  PutBool = core::mem::transmute(*v.add(20)); // WarnAboutClipboardRedirection
+        let release: RelFn          = core::mem::transmute(*v.add(2));
+        let h1 = put_show_redir(ns3, 0i16);
+        let h2 = put_prompt_creds(ns3, 0i16);
+        let h3 = put_neg_sec(ns3, -1i16);
+        let h4 = put_warn_creds(ns3, 0i16);
+        let h5 = put_warn_clip(ns3, 0i16);
+        eprintln!("[rdp] NS2 ShowRedirectionWarningDialog=0 hr=0x{:08X}", h1 as u32);
+        eprintln!("[rdp] NS2 PromptForCredentials=0         hr=0x{:08X}", h2 as u32);
+        eprintln!("[rdp] NS2 NegotiateSecurityLayer=1        hr=0x{:08X}", h3 as u32);
+        eprintln!("[rdp] NS3 WarnAboutSendingCredentials=0  hr=0x{:08X}", h4 as u32);
+        eprintln!("[rdp] NS3 WarnAboutClipboardRedirection=0 hr=0x{:08X}", h5 as u32);
         release(ns3);
     }
 
@@ -554,9 +580,11 @@ fn sta_thread(
         let _ = OleSetContainedObject(&rdp_unk, true);
         let _ = ole_obj.SetHostNames(w!("OrbitalTerm"), w!(""));
 
-        // NegotiateSecurityLayer must be set before DoVerb — confirmed S_OK here.
-        // WarnAbout* are deferred until after AdvancedSettings so clipboard
-        // redirect is already configured when those properties are set.
+        // Set dialog-suppression and security properties before DoVerb so the
+        // control has them before it performs any authentication or rendering.
+        // NS3 inherits NS2 vtable slots — [8] ShowRedirectionWarningDialog and
+        // [10] PromptForCredentials live at those inherited offsets and may work
+        // even though QI for NS2 directly returns E_NOINTERFACE on Win10/11.
         {
             const IID_NS3: GUID = GUID::from_values(0xB3378D90, 0x0728, 0x45C7, [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19]);
             type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
@@ -567,9 +595,17 @@ fn sta_thread(
             let mut ns3: *mut core::ffi::c_void = core::ptr::null_mut();
             if qi(raw, &IID_NS3, &mut ns3) >= 0 && !ns3.is_null() {
                 let v: *const usize = *(ns3 as *const *const usize);
-                let put_neg_sec: PutBool = core::mem::transmute(*v.add(12));
-                let release: RelFn = core::mem::transmute(*v.add(2));
-                put_neg_sec(ns3, -1i16); // NegotiateSecurityLayer = TRUE
+                // Inherited NS2 slots:
+                let put_show_redir:   PutBool = core::mem::transmute(*v.add(8));  // ShowRedirectionWarningDialog
+                let put_prompt_creds: PutBool = core::mem::transmute(*v.add(10)); // PromptForCredentials
+                let put_neg_sec:      PutBool = core::mem::transmute(*v.add(12)); // NegotiateSecurityLayer
+                let release: RelFn            = core::mem::transmute(*v.add(2));
+                let h1 = put_show_redir(ns3, 0i16);   // ShowRedirectionWarningDialog = FALSE
+                let h2 = put_prompt_creds(ns3, 0i16); // PromptForCredentials = FALSE
+                let h3 = put_neg_sec(ns3, -1i16);     // NegotiateSecurityLayer = TRUE
+                eprintln!("[rdp] pre-DoVerb ShowRedirectionWarningDialog=0 hr=0x{:08X}", h1 as u32);
+                eprintln!("[rdp] pre-DoVerb PromptForCredentials=0         hr=0x{:08X}", h2 as u32);
+                eprintln!("[rdp] pre-DoVerb NegotiateSecurityLayer=1        hr=0x{:08X}", h3 as u32);
                 release(ns3);
             }
         }
