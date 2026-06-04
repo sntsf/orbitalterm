@@ -361,8 +361,10 @@ fn sta_thread(
         // HWND_TOPMOST: WS_POPUP must sit above WebView2's DirectComposition layer.
         // Do NOT set GWLP_HWNDPARENT here — changing it later via SetWindowLongPtrW
         // sends a cross-thread synchronous message that deadlocks the STA thread.
+        // Start hidden: the frontend shows the window via rdpWindowsVisibility once
+        // it has computed the correct position (avoids a white flash during connect).
         SetWindowPos(host_hwnd, Some(HWND_TOPMOST), sx, sy, w, h,
-            SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
+            SWP_NOACTIVATE).ok();
 
         // Try MsRdpClient10 first, fall back to MsRdpClient9 for older Windows
         let rdp_unk: IUnknown = match CoCreateInstance(&CLSID_MSTSC_10, None, CLSCTX_INPROC_SERVER)
