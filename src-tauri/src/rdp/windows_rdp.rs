@@ -246,6 +246,20 @@ fn get_dispatch_sub(disp: &IDispatch, name: &str) -> windows::core::Result<IDisp
     }
 }
 
+fn get_i4(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
+    let id = get_dispid(disp, name)?;
+    unsafe {
+        let mut result: VARIANT = std::mem::zeroed();
+        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYGET,
+            &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
+            Some(&mut result), None, None)?;
+        let r = &result as *const VARIANT as *const VarRaw;
+        let val = if (*r).vt == 3 { (*r).data.lVal } else { 0 };
+        VariantClear(&mut result).ok();
+        Ok(val)
+    }
+}
+
 fn call_no_args(disp: &IDispatch, name: &str) -> windows::core::Result<()> {
     let id = get_dispid(disp, name)?;
     unsafe {
@@ -504,6 +518,8 @@ fn sta_thread(
         let mut rel_y = params.y;
         let mut last_parent_rect = RECT::default();
         GetWindowRect(parent, &mut last_parent_rect).ok();
+        // ConnectionState: 0=disconnected 1=connecting 2=connected 3=disconnecting
+        let mut was_connected = false;
 
         // ── Message / command loop ─────────────────────────────────────────────
         let mut msg = MSG::default();
@@ -563,8 +579,7 @@ fn sta_thread(
                 DispatchMessageW(&msg);
             }
 
-            // Every ~100ms: check parent liveness and reposition if it moved.
-            // Required because WS_POPUP doesn't automatically follow its owner.
+            // Every ~100ms: check parent liveness, reposition, and detect disconnect.
             tick += 1;
             if tick % 6 == 0 {
                 // If the owner window (Tauri) was destroyed (e.g. detached window
@@ -574,6 +589,18 @@ fn sta_thread(
                     let _ = call_no_args(&disp, "Disconnect");
                     PostQuitMessage(0);
                     break 'outer;
+                }
+
+                // Hide the WS_POPUP the moment mstscax disconnects (e.g. user
+                // logs out of the remote Windows session). Without this the blank
+                // HWND_TOPMOST window stays on top of everything until the tab is
+                // closed. ConnectionState: 0=disconnected, 2=connected.
+                if let Ok(state) = get_i4(&disp, "ConnectionState") {
+                    if state == 2 {
+                        was_connected = true;
+                    } else if state == 0 && was_connected {
+                        let _ = ShowWindow(host_hwnd, SW_HIDE);
+                    }
                 }
 
                 let mut cur = RECT::default();
