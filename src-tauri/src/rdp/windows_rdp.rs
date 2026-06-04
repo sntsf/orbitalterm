@@ -716,8 +716,9 @@ fn sta_thread(
         // appears during authentication dialogs (NLA credential prompt, cert
         // warning, etc.).  The frontend may call Show before mstscax has
         // finished authenticating; we hold it here and flush once connected.
-        let mut rdp_connected = false; // true once ConnectionState reaches 2
-        let mut was_connected  = false; // latches true, used for disconnect detect
+        let mut rdp_connected  = false; // true once ConnectionState reaches 2
+        let mut was_connected  = false; // true while connected; reset on disconnect
+        let mut ever_connected = false; // latch: true once connected, never reset
         let mut show_pending   = false; // Show arrived before rdp_connected
 
         // ── Message / command loop ─────────────────────────────────────────────
@@ -805,8 +806,9 @@ fn sta_thread(
                 if let Ok(state) = get_i4(&disp, "ConnectionState") {
                     match state {
                         2 if !rdp_connected => {
-                            rdp_connected = true;
-                            was_connected = true;
+                            rdp_connected  = true;
+                            was_connected  = true;
+                            ever_connected = true;
                             if show_pending {
                                 show_pending = false;
                                 let _ = ShowWindow(host_hwnd, SW_SHOW);
@@ -815,13 +817,15 @@ fn sta_thread(
                             }
                         }
                         0 if was_connected => {
+                            // Session ended: hide the host window and exit the loop.
+                            // The post-loop code emits rdp-disconnected so the
+                            // frontend closes the tab regardless of WHY the loop exits
+                            // (WM_QUIT, parent destroyed, ConnectionState→0, etc.).
+                            was_connected = false;
                             rdp_connected = false;
                             show_pending  = false;
                             let _ = ShowWindow(host_hwnd, SW_HIDE);
-                            params.app.emit(
-                                &format!("rdp-disconnected-{}", params.session_id),
-                                (),
-                            ).ok();
+                            break 'outer;
                         }
                         _ => {}
                     }
@@ -838,6 +842,17 @@ fn sta_thread(
             }
 
             std::thread::sleep(Duration::from_millis(16));
+        }
+
+        // Notify the frontend regardless of WHY the loop exited (user log-off,
+        // WM_QUIT from mstscax, parent window destroyed, explicit Disconnect cmd).
+        // The listener in RdpPane is already unregistered if the tab was manually
+        // closed, so this is a no-op in that case.
+        if ever_connected {
+            params.app.emit(
+                &format!("rdp-disconnected-{}", params.session_id),
+                (),
+            ).ok();
         }
 
         let _ = ole_obj.SetClientSite(None);

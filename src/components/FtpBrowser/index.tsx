@@ -16,12 +16,13 @@ interface FtpBrowserProps {
   sessionId: string | null;
   connectionId: string;
   onConnect: (sessionId: string) => void;
+  onDisconnect?: () => void;
 }
 
 interface CtxMenu { x: number; y: number; entry?: FtpEntry }
 interface FtpProgress { transferred: number; total: number }
 
-export function FtpBrowser({ sessionId, connectionId, onConnect }: FtpBrowserProps) {
+export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }: FtpBrowserProps) {
   const [currentPath, setCurrentPath] = useState("/");
   const [pathInput, setPathInput] = useState("/");
   const [editingPath, setEditingPath] = useState(false);
@@ -62,8 +63,12 @@ export function FtpBrowser({ sessionId, connectionId, onConnect }: FtpBrowserPro
   };
 
   const handleError = (err: unknown) => {
-    if (isFtpGone(err)) setDisconnected(true);
-    else setError(String(err));
+    if (isFtpGone(err)) {
+      setDisconnected(true);
+      setTimeout(() => onDisconnect?.(), 1500);
+    } else {
+      setError(String(err));
+    }
   };
 
   // ── data loading ───────────────────────────────────────────────────────────

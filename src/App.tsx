@@ -22,7 +22,7 @@ import type { Tab } from "./types";
 // ── Standalone FTP pane ────────────────────────────────────────────────────────
 
 function FtpStandalonePane({ tab }: { tab: Tab }) {
-  const { getConnectionById, setTabStatus } = useAppStore();
+  const { getConnectionById, setTabStatus, closeTab } = useAppStore();
   const connection = getConnectionById(tab.connection_id);
   const [sessionId, setSessionId] = useState<string | null>(null);
 
@@ -61,6 +61,7 @@ function FtpStandalonePane({ tab }: { tab: Tab }) {
       sessionId={sessionId}
       connectionId={tab.connection_id}
       onConnect={handleConnect}
+      onDisconnect={() => closeTab(tab.id)}
     />
   );
 }

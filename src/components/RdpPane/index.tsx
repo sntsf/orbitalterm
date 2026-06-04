@@ -40,15 +40,14 @@ interface RdpPaneProps {
 interface WindowsViewerProps {
   sessionId: string;
   transferred?: boolean;
-  onSessionEnded: () => void;
 }
 
-function WindowsEmbeddedViewer({ sessionId, transferred, onSessionEnded }: WindowsViewerProps) {
+// Renders a transparent placeholder that tracks its own position and drives
+// the native WS_POPUP window to stay in sync. Disconnect detection is handled
+// by RdpPane directly so the listener is registered once and never re-created.
+function WindowsEmbeddedViewer({ sessionId, transferred }: WindowsViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Keep the native mstsc window in sync with this placeholder's position.
-  // When the tab is hidden (display:none), getBoundingClientRect returns 0,0 —
-  // we use that signal to hide the native window, and show it again when visible.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -59,7 +58,6 @@ function WindowsEmbeddedViewer({ sessionId, transferred, onSessionEnded }: Windo
       const visible = rect.width > 0 && rect.height > 0;
       if (visible) {
         if (!lastVisible && transferred) {
-          // First sync of a transferred session — reparent WS_POPUP to this window.
           console.log("[WinViewer] reparenting session", sessionId, rect.left, rect.top, rect.width, rect.height);
           rdpWindowsReparent(
             sessionId,
@@ -97,15 +95,6 @@ function WindowsEmbeddedViewer({ sessionId, transferred, onSessionEnded }: Windo
       rdpWindowsVisibility(sessionId, false).catch(() => {});
     };
   }, [sessionId]);
-
-  // Listen for the backend rdp-disconnected event (emitted when ConnectionState → 0).
-  useEffect(() => {
-    let unlisten: UnlistenFn | null = null;
-    listen(`rdp-disconnected-${sessionId}`, () => {
-      onSessionEnded();
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
-  }, [sessionId, onSessionEnded]);
 
   return (
     <div
@@ -427,23 +416,32 @@ export function RdpPane({ tab }: RdpPaneProps) {
     [],
   );
 
+  // Register the rdp-disconnected listener here (not inside WindowsEmbeddedViewer)
+  // so it is set up ONCE when nativeWindow becomes true and never re-created due
+  // to inline callback churn. The STA thread emits this event after the loop exits
+  // regardless of the exit reason (logoff, WM_QUIT, parent destroyed, etc.).
+  useEffect(() => {
+    if (!nativeWindow) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    let unlisten: UnlistenFn | null = null;
+    listen(`rdp-disconnected-${sid}`, () => {
+      const s = sessionIdRef.current;
+      if (s) {
+        disconnectRdp(s).catch(() => {});
+        sessionIdRef.current = null;
+      }
+      closeTab(tab.id);
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [nativeWindow]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Windows native window: transparent placeholder that drives mstsc position
   if (status === "connected" && embedded && nativeWindow && sessionIdRef.current) {
     return (
       <WindowsEmbeddedViewer
         sessionId={sessionIdRef.current}
         transferred={!!tab.session_id}
-        onSessionEnded={() => {
-          // Disconnect the STA thread so the WS_POPUP is destroyed, then
-          // close the tab — the useEffect cleanup skips disconnectRdp because
-          // we already called it here and cleared sessionIdRef.
-          const sid = sessionIdRef.current;
-          if (sid) {
-            disconnectRdp(sid).catch(() => {});
-            sessionIdRef.current = null;
-          }
-          closeTab(tab.id);
-        }}
       />
     );
   }
