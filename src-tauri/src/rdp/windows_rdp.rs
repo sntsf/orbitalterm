@@ -309,37 +309,24 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
     }
 }
 
-// Suppress two persistent dialogs that appear on every RDP connection:
-//   1. "Precaución: conexión remota desconocida" (clipboard/redirect warning)
-//   2. "Seguridad de Windows - Escribir credenciales" (credential re-prompt)
+// Suppress the two dialogs that appear on every RDP connection.
 //
-// Both are controlled by IMsRdpClientNonScriptable2 which is not exposed via
-// IDispatch. We QueryInterface for it and poke the vtable directly.
-//
-// Vtable layout (flat, including IUnknown + NS1 inheritance):
-//   [0-2]  IUnknown (QI, AddRef, Release)
-//   [3]    NotifyRedirectDeviceChange  (NS1)
-//   [4]    SendKeys                    (NS1)
-//   [5]    get_UIParentWindowHandle    (NS2)
-//   [6]    put_UIParentWindowHandle    (NS2)
-//   [7]    get_ShowRedirectionWarningDialog  (NS2)
-//   [8]    put_ShowRedirectionWarningDialog  (NS2) ← clipboard warning
-//   [9]    get_PromptForCredentials    (NS2)
-//   [10]   put_PromptForCredentials    (NS2) ← credential re-prompt
+// On Windows 10/11, NS2's ShowRedirectionWarningDialog and PromptForCredentials
+// return E_NOTIMPL. The working modern replacements are:
+//   NS3 WarnAboutClipboardRedirection → suppresses the clipboard/redirect warning
+//   NS5 AllowPromptingForCredentials  → suppresses the Windows Security credential dialog
 unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
-    // Try NS2 first (has the properties we need), fall back through NS3.
-    // IIDs for IMsRdpClientNonScriptable2 and IMsRdpClientNonScriptable3.
-    const IID_NS2: GUID = GUID::from_values(
-        0x17A5E535, 0x4072, 0x4FA4,
-        [0xAF, 0x11, 0x26, 0xBE, 0x74, 0xED, 0x31, 0x40],
-    );
+    // NS3 IID B3378D90-0728-45C7-8ED7-B6159FB92219  (confirmed working by test)
+    // NS5 IID 4EB5335B-6429-477D-B922-D06B48F2D364
     const IID_NS3: GUID = GUID::from_values(
         0xB3378D90, 0x0728, 0x45C7,
         [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19],
     );
+    const IID_NS5: GUID = GUID::from_values(
+        0x4EB5335B, 0x6429, 0x477D,
+        [0xB9, 0x22, 0xD0, 0x6B, 0x48, 0xF2, 0xD3, 0x64],
+    );
 
-    // windows-rs does not expose QueryInterface as a callable Rust method on
-    // &IUnknown, so call it through vtable index 0 directly.
     type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
     type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
     type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
@@ -348,40 +335,52 @@ unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
     let unk_vtbl: *const usize = *(raw as *const *const usize);
     let qi: QIFn = core::mem::transmute(*unk_vtbl.add(0));
 
-    // Try NS2 first, then NS3 (NS3 inherits NS2 so same offsets work)
-    let mut obj: *mut core::ffi::c_void = core::ptr::null_mut();
-    let mut hr = qi(raw, &IID_NS2, &mut obj);
-    eprintln!("[rdp] QI NS2 hr=0x{:08X} obj={obj:?}", hr as u32);
-    if hr < 0 || obj.is_null() {
-        hr = qi(raw, &IID_NS3, &mut obj);
-        eprintln!("[rdp] QI NS3 hr=0x{:08X} obj={obj:?}", hr as u32);
-    }
-    if hr < 0 || obj.is_null() {
-        eprintln!("[rdp] IMsRdpClientNonScriptable2/3 QI failed — dialogs may still appear");
-        return;
+    // ── NS3: WarnAboutClipboardRedirection + WarnAboutSendingCredentials ──────
+    // Flat vtable offsets:
+    //   [0-2]  IUnknown
+    //   [3-4]  NS1: NotifyRedirectDeviceChange, SendKeys
+    //   [5-16] NS2: UIParentWindowHandle(2), ShowRedirectionWarningDialog(2),
+    //               PromptForCredentials(2), NegotiateSecurityLayer(2),
+    //               EnableCredSspSupport(2), AuthenticationServiceClass(2)
+    //   [17] get_WarnAboutSendingCredentials
+    //   [18] put_WarnAboutSendingCredentials   ← suppress credential-send warning
+    //   [19] get_WarnAboutClipboardRedirection
+    //   [20] put_WarnAboutClipboardRedirection ← suppress clipboard redirect warning
+    //   [21] get_ConnectionBarText
+    //   [22] put_ConnectionBarText
+    let mut ns3: *mut core::ffi::c_void = core::ptr::null_mut();
+    if qi(raw, &IID_NS3, &mut ns3) >= 0 && !ns3.is_null() {
+        let v: *const usize = *(ns3 as *const *const usize);
+        let put_warn_creds: PutBool = core::mem::transmute(*v.add(18));
+        let put_warn_clip:  PutBool = core::mem::transmute(*v.add(20));
+        let put_neg_sec:    PutBool = core::mem::transmute(*v.add(12));
+        let release: RelFn = core::mem::transmute(*v.add(2));
+        let h1 = put_warn_creds(ns3, 0i16);  // WarnAboutSendingCredentials = FALSE
+        let h2 = put_warn_clip(ns3, 0i16);   // WarnAboutClipboardRedirection = FALSE
+        let h3 = put_neg_sec(ns3, -1i16);    // NegotiateSecurityLayer = TRUE
+        eprintln!("[rdp] NS3 WarnAboutSendingCredentials=0  hr=0x{:08X}", h1 as u32);
+        eprintln!("[rdp] NS3 WarnAboutClipboardRedirection=0 hr=0x{:08X}", h2 as u32);
+        eprintln!("[rdp] NS3 NegotiateSecurityLayer=1        hr=0x{:08X}", h3 as u32);
+        release(ns3);
     }
 
-    // Vtable layout (flat, IUnknown[0-2] + NS1[3-4] + NS2[5-16]):
-    //   [7]  get_ShowRedirectionWarningDialog  ← clipboard/redirection warning
-    //   [8]  put_ShowRedirectionWarningDialog
-    //   [9]  get_PromptForCredentials          ← Windows Security credential dialog
-    //   [10] put_PromptForCredentials
-    //   [11] get_NegotiateSecurityLayer
-    //   [12] put_NegotiateSecurityLayer
-    let vtbl: *const usize = *(obj as *const *const usize);
-    let put_show_warn:     PutBool = core::mem::transmute(*vtbl.add(8));
-    let put_prompt_creds:  PutBool = core::mem::transmute(*vtbl.add(10));
-    let put_neg_sec_layer: PutBool = core::mem::transmute(*vtbl.add(12));
-    let release:           RelFn   = core::mem::transmute(*vtbl.add(2));
-
-    // VARIANT_BOOL: FALSE = 0, TRUE = -1 (0xFFFF as i16)
-    let hr1 = put_show_warn(obj, 0i16);     // ShowRedirectionWarningDialog = FALSE
-    let hr2 = put_prompt_creds(obj, 0i16);  // PromptForCredentials = FALSE
-    let hr3 = put_neg_sec_layer(obj, -1i16); // NegotiateSecurityLayer = TRUE
-    eprintln!("[rdp] put_ShowRedirectionWarningDialog hr=0x{:08X}", hr1 as u32);
-    eprintln!("[rdp] put_PromptForCredentials         hr=0x{:08X}", hr2 as u32);
-    eprintln!("[rdp] put_NegotiateSecurityLayer       hr=0x{:08X}", hr3 as u32);
-    release(obj);
+    // ── NS5: AllowPromptingForCredentials ────────────────────────────────────
+    // NS5 vtable extends NS3 [0-22] with:
+    //   NS4 [23-28]: MarkRdpSettingsSecure(2), PasswordContainsSmartCardPin(2),
+    //                RedirectionWarningType(2)  → 6 methods
+    //   NS5 [29] get_AllowPromptingForCredentials
+    //       [30] put_AllowPromptingForCredentials ← suppress credential-prompt UI
+    let mut ns5: *mut core::ffi::c_void = core::ptr::null_mut();
+    let hr5 = qi(raw, &IID_NS5, &mut ns5);
+    eprintln!("[rdp] QI NS5 hr=0x{:08X} obj={ns5:?}", hr5 as u32);
+    if hr5 >= 0 && !ns5.is_null() {
+        let v: *const usize = *(ns5 as *const *const usize);
+        let put_allow: PutBool = core::mem::transmute(*v.add(30));
+        let release: RelFn = core::mem::transmute(*v.add(2));
+        let h = put_allow(ns5, 0i16); // AllowPromptingForCredentials = FALSE
+        eprintln!("[rdp] NS5 AllowPromptingForCredentials=0 hr=0x{:08X}", h as u32);
+        release(ns5);
+    }
 }
 
 fn call_no_args(disp: &IDispatch, name: &str) -> windows::core::Result<()> {
