@@ -367,22 +367,27 @@ unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
 
     // ── IMsRdpExtendedSettings: revert April-2026 redirection dialog ──────────
     // Vtable: [0-2] IUnknown, [3] put_Property, [4] get_Property
-    // Setting RedirectionWarningDialogVersion=1 re-enables the pre-update dialog
-    // behavior so that WarnAboutClipboardRedirection=FALSE below is respected.
-    let mut ext: *mut core::ffi::c_void = core::ptr::null_mut();
-    let hr_ext = qi(raw, &IID_EXT, &mut ext);
+    // Must be called AFTER DoVerb — before activation the interface pointer is
+    // uninitialised and Release() on it crashes (STATUS_ACCESS_VIOLATION).
+    //
+    // Safety notes:
+    //  • IUnknown::from_raw takes ownership of the QI'd pointer and calls
+    //    Release through windows-rs's type-safe mechanism when dropped.
+    //  • ManuallyDrop<BSTR> prevents a double-free if the callee incorrectly
+    //    releases the [in] BSTR parameter (non-standard but observed behaviour).
+    let mut ext_raw: *mut core::ffi::c_void = core::ptr::null_mut();
+    let hr_ext = qi(raw, &IID_EXT, &mut ext_raw);
     eprintln!("[rdp] QI IMsRdpExtendedSettings hr=0x{:08X}", hr_ext as u32);
-    if hr_ext >= 0 && !ext.is_null() {
-        let ev: *const usize = *(ext as *const *const usize);
+    if hr_ext >= 0 && !ext_raw.is_null() {
+        let ext_unk = IUnknown::from_raw(ext_raw as *mut _); // owns the ref; Release on drop
+        let ev: *const usize = *(ext_unk.as_raw() as *const *const usize);
         let put_prop: PutPropFn = core::mem::transmute(*ev.add(3));
-        let rel_ext: RelFn      = core::mem::transmute(*ev.add(2));
-        let prop = BSTR::from("RedirectionWarningDialogVersion");
+        let prop = core::mem::ManuallyDrop::new(BSTR::from("RedirectionWarningDialogVersion"));
         let mut val: VARIANT = core::mem::zeroed();
         { let r = &mut val as *mut VARIANT as *mut VarRaw; (*r).vt = 3; (*r).data.lVal = 1; }
-        let h = put_prop(ext, prop.as_ptr() as *mut u16, &mut val);
-        VariantClear(&mut val).ok();
+        let h = put_prop(ext_unk.as_raw() as *mut _, prop.as_ptr() as *mut u16, &mut val);
         eprintln!("[rdp] ExtSettings RedirectionWarningDialogVersion=1 hr=0x{:08X}", h as u32);
-        rel_ext(ext);
+        // ext_unk dropped here → Release via windows-rs (safe even if put_prop failed)
     }
 
     // ── NS3: WarnAboutClipboardRedirection + WarnAboutSendingCredentials ──────
@@ -601,33 +606,18 @@ fn sta_thread(
         let _ = OleSetContainedObject(&rdp_unk, true);
         let _ = ole_obj.SetHostNames(w!("OrbitalTerm"), w!(""));
 
-        // Set all dialog-suppression properties before DoVerb.
+        // Set NegotiateSecurityLayer and dialog-suppression properties before
+        // DoVerb via the NS3 vtable. IMsRdpExtendedSettings is NOT called here
+        // because it requires the control to be fully activated (after DoVerb);
+        // calling it before activation returns an uninitialised pointer that
+        // crashes on Release. It is called in suppress_rdp_dialogs instead.
         {
-            const IID_EXT: GUID = GUID::from_values(0x302D8188, 0x0052, 0x4807, [0x80, 0x6A, 0x36, 0x2B, 0x62, 0x8F, 0x9A, 0xC5]);
             const IID_NS3: GUID = GUID::from_values(0xB3378D90, 0x0728, 0x45C7, [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19]);
-            type QIFn      = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
-            type PutBool   = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
-            type PutPropFn = unsafe extern "system" fn(*mut core::ffi::c_void, *mut u16, *mut VARIANT) -> i32;
-            type RelFn     = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+            type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
+            type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
+            type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
             let raw = rdp_unk.as_raw() as *mut core::ffi::c_void;
             let qi: QIFn = core::mem::transmute(*(*(raw as *const *const usize)).add(0));
-
-            // IMsRdpExtendedSettings: revert April-2026 dialog to pre-update behavior.
-            let mut ext: *mut core::ffi::c_void = core::ptr::null_mut();
-            if qi(raw, &IID_EXT, &mut ext) >= 0 && !ext.is_null() {
-                let ev: *const usize = *(ext as *const *const usize);
-                let put_prop: PutPropFn = core::mem::transmute(*ev.add(3));
-                let rel_ext: RelFn      = core::mem::transmute(*ev.add(2));
-                let prop = BSTR::from("RedirectionWarningDialogVersion");
-                let mut val: VARIANT = core::mem::zeroed();
-                { let r = &mut val as *mut VARIANT as *mut VarRaw; (*r).vt = 3; (*r).data.lVal = 1; }
-                let h = put_prop(ext, prop.as_ptr() as *mut u16, &mut val);
-                VariantClear(&mut val).ok();
-                eprintln!("[rdp] pre-DoVerb RedirectionWarningDialogVersion=1 hr=0x{:08X}", h as u32);
-                rel_ext(ext);
-            }
-
-            // NS3 inherited NS2 slots + NegotiateSecurityLayer.
             let mut ns3: *mut core::ffi::c_void = core::ptr::null_mut();
             if qi(raw, &IID_NS3, &mut ns3) >= 0 && !ns3.is_null() {
                 let v: *const usize = *(ns3 as *const *const usize);
