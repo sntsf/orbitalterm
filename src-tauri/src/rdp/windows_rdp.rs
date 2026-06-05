@@ -99,6 +99,9 @@ static WATCHER_PID: AtomicU32 = AtomicU32::new(0);
 // this HWND until it actually closes, avoiding a spam loop caused by the
 // asynchronous gap between PostMessage and the dialog's message loop.
 static WATCHER_PENDING: AtomicIsize = AtomicIsize::new(0);
+// OrbRdpHostWnd HWND so the watcher thread can scan its child windows for the
+// mstscax credential dialog (rendered as a child, not a top-level window).
+static WATCHER_HOST_HWND: AtomicIsize = AtomicIsize::new(0);
 
 unsafe extern "system" fn watcher_dismiss_cb(hwnd: HWND, _: LPARAM) -> BOOL {
     let our_pid = WATCHER_PID.load(Ordering::Relaxed);
@@ -212,6 +215,56 @@ unsafe extern "system" fn watcher_scan_cb(hwnd: HWND, _: LPARAM) -> BOOL {
     }
 
     eprintln!("[rdp] watcher-scan: class='{cls_trimmed}' title='{title_s}'");
+    BOOL(1)
+}
+
+// Scan child windows of the mstscax host HWND to find any credential dialog
+// that mstscax renders as a child window (not a top-level window, so invisible
+// to EnumWindows).  Logs all children for diagnosis; also auto-dismisses any
+// #32770 child (standard Win32 dialog) exactly like watcher_dismiss_cb.
+unsafe extern "system" fn watcher_host_child_cb(hwnd: HWND, _: LPARAM) -> BOOL {
+    let mut cls = [0u16; 64];
+    GetClassNameW(hwnd, &mut cls);
+    let cls_s = String::from_utf16_lossy(&cls);
+    let cls_trimmed = cls_s.trim_end_matches('\0');
+
+    let mut title = [0u16; 256];
+    let n = GetWindowTextW(hwnd, &mut title);
+    let title_s = if n > 0 { String::from_utf16_lossy(&title[..n as usize]) } else { String::new() };
+
+    let visible = IsWindowVisible(hwnd).as_bool();
+    eprintln!("[rdp] host-child: class='{cls_trimmed}' title='{title_s}' visible={visible}");
+
+    // If this child is a standard Win32 dialog, try to auto-dismiss it exactly
+    // as the top-level watcher does (checkboxes + default button).
+    if cls[0] == 35 && cls[1] == 51 && cls[2] == 50
+        && cls[3] == 55 && cls[4] == 55 && cls[5] == 48 && cls[6] == 0
+        && visible
+        && WATCHER_PENDING.load(Ordering::Relaxed) != hwnd.0 as isize
+    {
+        eprintln!("[rdp] host-child: dismissing #32770 child '{title_s}'");
+        unsafe extern "system" fn check_cb(child: HWND, _: LPARAM) -> BOOL {
+            let style = GetWindowLongW(child, GWL_STYLE) as u32;
+            let bt = style & 0xF;
+            if bt == 2 || bt == 3 || bt == 5 || bt == 6 {
+                PostMessageW(Some(child), BM_SETCHECK, WPARAM(1), LPARAM(0)).ok();
+            }
+            BOOL(1)
+        }
+        EnumChildWindows(Some(hwnd), Some(check_cb), LPARAM(0));
+        let r = SendMessageW(hwnd, 0x400u32, Some(WPARAM(0)), Some(LPARAM(0)));
+        let hi = ((r.0 as usize) >> 16) & 0xFFFF;
+        let lo = (r.0 as usize) & 0xFFFF;
+        let btn_id: i32 = if hi == 0xDC00 && lo > 0 { lo as i32 }
+                          else if GetDlgItem(Some(hwnd), 1).is_ok() { 1 }
+                          else { 0 };
+        if btn_id > 0 {
+            if let Ok(btn) = GetDlgItem(Some(hwnd), btn_id) {
+                WATCHER_PENDING.store(hwnd.0 as isize, Ordering::Relaxed);
+                PostMessageW(Some(btn), BM_CLICK, WPARAM(0), LPARAM(0)).ok();
+            }
+        }
+    }
     BOOL(1)
 }
 
@@ -715,16 +768,12 @@ fn get_i4(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
 // quoting issues). NLA/CredSSP picks these up automatically during Connect().
 fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, password: &str) {
     use windows::Win32::Security::Credentials::{
-        CredWriteW, CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE,
+        CredWriteW, CredDeleteW, CredReadW, CredFree,
+        CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE,
         CRED_TYPE_DOMAIN_PASSWORD, CRED_TYPE_GENERIC,
     };
     use windows::core::PWSTR;
 
-    // Build the set of (target, username) pairs to store.
-    // CredSSP looks up TERMSRV/<host> with type CRED_TYPE_GENERIC.
-    // For local accounts (no domain), also store with the ".\username" prefix
-    // that Windows uses internally so CredSSP finds the credential regardless
-    // of which username format it resolves to.
     let user_plain = if domain.is_empty() {
         username.to_owned()
     } else {
@@ -736,10 +785,12 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
         None
     };
 
-    let mut base_targets = vec![
-        format!("TERMSRV/{}", host),
-        format!("TERMSRV/{}:{}", host, port), // always store both forms
-    ];
+    // For the default RDP port (3389), mstscax/CredSSP looks up TERMSRV/<host>
+    // without the port suffix.  For non-standard ports, also store the :port form.
+    let mut base_targets = vec![format!("TERMSRV/{}", host)];
+    if port != 3389 {
+        base_targets.push(format!("TERMSRV/{}:{}", host, port));
+    }
 
     // Credential blob is the password as UTF-16LE with no null terminator.
     let pw_blob: Vec<u8> = password
@@ -749,9 +800,21 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
 
     for target in &base_targets {
         let mut target_wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+
+        // Delete any stale credential with either type before writing fresh ones.
+        // A stale credential with a different username or wrong password causes
+        // mstscax to prompt even though we wrote a correct one afterward.
+        for cred_type in [CRED_TYPE_GENERIC, CRED_TYPE_DOMAIN_PASSWORD] {
+            unsafe {
+                let ok = CredDeleteW(PCWSTR(target_wide.as_ptr()), cred_type, 0).is_ok();
+                if ok { eprintln!("[rdp] CredDeleteW {target} type={} cleared", cred_type.0); }
+            }
+        }
+
         // Build the list of username variants to store for this target.
         let mut user_variants: Vec<String> = vec![user_plain.clone()];
         if let Some(ref dot) = user_dot { user_variants.push(dot.clone()); }
+
         for user_str in &user_variants {
             let mut user_wide: Vec<u16> = user_str.encode_utf16().chain(Some(0)).collect();
             // mstsc.exe stores as CRED_TYPE_GENERIC; CredSSP reads GENERIC.
@@ -773,6 +836,23 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
                 };
                 let ok = unsafe { CredWriteW(&cred, 0).is_ok() };
                 eprintln!("[rdp] CredWriteW {target} user={user_str} type={} ok={ok}", cred_type.0);
+            }
+        }
+
+        // Read back the DOMAIN_PASSWORD entry to confirm it was stored correctly.
+        unsafe {
+            let mut pcred: *mut CREDENTIALW = std::ptr::null_mut();
+            if CredReadW(PCWSTR(target_wide.as_ptr()), CRED_TYPE_DOMAIN_PASSWORD, 0,
+                         &mut pcred).is_ok() && !pcred.is_null()
+            {
+                let c = &*pcred;
+                let stored_user = if !c.UserName.is_null() {
+                    c.UserName.to_string().unwrap_or_default()
+                } else { String::new() };
+                eprintln!("[rdp] CredReadW verify {target}: user='{stored_user}' blob_bytes={}", c.CredentialBlobSize);
+                CredFree(pcred as *const _);
+            } else {
+                eprintln!("[rdp] CredReadW verify FAILED for {target}");
             }
         }
     }
@@ -1236,6 +1316,7 @@ fn sta_thread(
         // are also auto-dismissed (the CBT hook above only fires on this thread).
         use windows::Win32::System::Threading::GetCurrentProcessId;
         WATCHER_PID.store(GetCurrentProcessId(), Ordering::Relaxed);
+        WATCHER_HOST_HWND.store(host_hwnd.0 as isize, Ordering::Relaxed);
         let watcher_done = Arc::new(AtomicBool::new(false));
         {
             let done = watcher_done.clone();
@@ -1255,16 +1336,25 @@ fn sta_thread(
                             WATCHER_PENDING.store(0, Ordering::Relaxed);
                         }
                     }
-                    // Every ~1 s, log all visible titled windows in our process so
-                    // we can identify non-#32770 dialogs (e.g. credential prompts).
+                    // Every ~1 s, log all visible titled windows in our process and
+                    // scan child windows of the mstscax host HWND so we can identify
+                    // non-#32770 top-level dialogs and child-window credential UIs.
                     scan_tick += 1;
                     if scan_tick % 7 == 0 {
                         unsafe { EnumWindows(Some(watcher_scan_cb), LPARAM(0)).ok() };
+                        let hh = WATCHER_HOST_HWND.load(Ordering::Relaxed);
+                        if hh != 0 {
+                            let host = HWND(hh as *mut _);
+                            if unsafe { IsWindow(Some(host)) }.as_bool() {
+                                unsafe { EnumChildWindows(Some(host), Some(watcher_host_child_cb), LPARAM(0)) };
+                            }
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(150));
                 }
                 WATCHER_PID.store(0, Ordering::Relaxed);
                 WATCHER_PENDING.store(0, Ordering::Relaxed);
+                WATCHER_HOST_HWND.store(0, Ordering::Relaxed);
                 eprintln!("[rdp] watcher thread exited");
             });
         }
@@ -1528,6 +1618,7 @@ fn sta_thread(
         }
 
         // Signal the cross-thread watcher to stop.
+        WATCHER_HOST_HWND.store(0, Ordering::Relaxed);
         watcher_done.store(true, Ordering::Relaxed);
 
         // Unregister all COM event sink registrations before releasing.
