@@ -143,6 +143,25 @@ unsafe extern "system" fn watcher_dismiss_cb(hwnd: HWND, _: LPARAM) -> BOOL {
     }
     EnumChildWindows(Some(hwnd), Some(log_btn_w), LPARAM(0));
 
+    // Before clicking Connect, ensure every redirect-permission checkbox is
+    // checked (BS_CHECKBOX/BS_AUTOCHECKBOX) so clipboard/drive redirections
+    // are actually enabled for the session (KB5057577 dialog).
+    unsafe extern "system" fn check_all_checkboxes(child: HWND, _: LPARAM) -> BOOL {
+        let mut cls2 = [0u16; 32];
+        GetClassNameW(child, &mut cls2);
+        if !String::from_utf16_lossy(&cls2).trim_end_matches('\0').eq_ignore_ascii_case("Button") {
+            return BOOL(1);
+        }
+        let style = GetWindowLongW(child, GWL_STYLE) as u32;
+        // BS_CHECKBOX=2, BS_AUTOCHECKBOX=3, BS_3STATE=5, BS_AUTO3STATE=6
+        let bt = style & 0xF;
+        if bt == 2 || bt == 3 || bt == 5 || bt == 6 {
+            PostMessageW(Some(child), BM_SETCHECK, WPARAM(1 /* BST_CHECKED */), LPARAM(0)).ok();
+        }
+        BOOL(1)
+    }
+    EnumChildWindows(Some(hwnd), Some(check_all_checkboxes), LPARAM(0));
+
     // Determine which button to click: DM_GETDEFID first, then IDOK fallback.
     let r = SendMessageW(hwnd, 0x400u32, Some(WPARAM(0)), Some(LPARAM(0)));
     let hi = ((r.0 as usize) >> 16) & 0xFFFF;
@@ -163,6 +182,36 @@ unsafe extern "system" fn watcher_dismiss_cb(hwnd: HWND, _: LPARAM) -> BOOL {
     } else {
         eprintln!("[rdp] watcher: WARN no dismiss button for '{title_trimmed}'");
     }
+    BOOL(1)
+}
+
+// Log ALL visible titled windows in our process so we can identify the class
+// of any dialog that isn't #32770 (e.g. credential prompts, Xaml hosts).
+unsafe extern "system" fn watcher_scan_cb(hwnd: HWND, _: LPARAM) -> BOOL {
+    let our_pid = WATCHER_PID.load(Ordering::Relaxed);
+    if our_pid == 0 { return BOOL(0); }
+
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid != our_pid { return BOOL(1); }
+    if !IsWindowVisible(hwnd).as_bool() { return BOOL(1); }
+
+    let mut title = [0u16; 256];
+    let n = GetWindowTextW(hwnd, &mut title);
+    if n == 0 { return BOOL(1); }
+    let title_s = String::from_utf16_lossy(&title[..n as usize]);
+
+    let mut cls = [0u16; 64];
+    GetClassNameW(hwnd, &mut cls);
+    let cls_s = String::from_utf16_lossy(&cls);
+    let cls_trimmed = cls_s.trim_end_matches('\0');
+
+    // Skip the host popup window and the main Tauri app window.
+    if cls_trimmed == "OrbRdpHostWnd" || cls_trimmed == "Chrome_WidgetWin_1" {
+        return BOOL(1);
+    }
+
+    eprintln!("[rdp] watcher-scan: class='{cls_trimmed}' title='{title_s}'");
     BOOL(1)
 }
 
@@ -1103,6 +1152,7 @@ fn sta_thread(
         {
             let done = watcher_done.clone();
             std::thread::spawn(move || {
+                let mut scan_tick: u32 = 0;
                 while !done.load(Ordering::Relaxed) {
                     unsafe { EnumWindows(Some(watcher_dismiss_cb), LPARAM(0)).ok() };
                     // Once a dismissed dialog is fully gone, clear the pending slot
@@ -1113,6 +1163,12 @@ fn sta_thread(
                         if !unsafe { IsWindow(Some(h)) }.as_bool() {
                             WATCHER_PENDING.store(0, Ordering::Relaxed);
                         }
+                    }
+                    // Every ~1 s, log all visible titled windows in our process so
+                    // we can identify non-#32770 dialogs (e.g. credential prompts).
+                    scan_tick += 1;
+                    if scan_tick % 7 == 0 {
+                        unsafe { EnumWindows(Some(watcher_scan_cb), LPARAM(0)).ok() };
                     }
                     std::thread::sleep(Duration::from_millis(150));
                 }
