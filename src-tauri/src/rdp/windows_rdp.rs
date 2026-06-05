@@ -16,7 +16,7 @@
 //! creation. Tearout/dock-back just updates the tracked parent variable so
 //! canvas_to_screen() uses the correct reference window for positioning.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -37,60 +37,154 @@ const IID_DMSRDPCLIENTEVENTS: GUID = GUID::from_values(
     [0xA9, 0xE5, 0x00, 0xC0, 0x4F, 0xC9, 0x9C, 0x1D],
 );
 
-// COM event sink that receives IMsTscAxEvents push notifications from mstscax.dll.
-// All IMsTscAxEvents calls arrive on the STA thread (in-process, no marshaling),
-// so they are delivered synchronously during DispatchMessageW.
+// ── Manual COM event sink ─────────────────────────────────────────────────────
 //
-// We track two flags:
-//  • connected    — DISPID 2 (OnConnected): session fully established
-//  • disconnected — DISPID 4 (OnDisconnected): session ended for any reason
+// mstscax::IConnectionPoint::Advise internally calls
+//   QueryInterface(pUnkSink, cp_iid, &ppv)
+// before storing the pointer.  The standard #[implement(IDispatch)] responds
+// YES only to IID_IUnknown and IID_IDispatch; it does NOT respond to the
+// actual CP IID {336D5562-EFA8-482E-8CB3-C5C0FC7A7DB6} that this version of
+// mstscax exposes → CONNECT_E_CANNOTCONNECT (0x80040202).
 //
-// Using both avoids the "ever_connected never set" failure mode: even if the
-// ConnectionState==2 poll misses the connected window, OnConnected sets the flag
-// so the subsequent OnDisconnected check has a valid baseline.
-#[implement(IDispatch)]
-struct RdpEventSink {
+// Fix: build the COM object manually so QueryInterface responds YES to:
+//   • IID_IUnknown        (00000000-…)
+//   • IID_IDispatch       (00020400-…)
+//   • {336D5562-…}        actual CP IID enumerated at runtime
+//   • {209D4C07-…}        DIID_IMsTscAxEvents (standard IID, used on newer Windows)
+//
+// All four IIDs share the same IDispatch vtable layout (the events interface is
+// dispatch-based), so returning `this` for every successful QI is safe.
+// mstscax delivers OnConnected (DISPID 2) and OnDisconnected (DISPID 4) through
+// IDispatch::Invoke once Advise succeeds.
+
+const IID_IUNKNOWN_S: GUID = GUID::from_values(
+    0x00000000, 0x0000, 0x0000,
+    [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+);
+const IID_IDISPATCH_S: GUID = GUID::from_values(
+    0x00020400, 0x0000, 0x0000,
+    [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+);
+// CP IID that this mstscax.dll version actually exposes (enumerated at runtime).
+const IID_MSTSCAX_EVENTS: GUID = GUID::from_values(
+    0x336D5562, 0xEFA8, 0x482E,
+    [0x8C, 0xB3, 0xC5, 0xC0, 0xFC, 0x7A, 0x7D, 0xB6],
+);
+
+// IDispatch vtable layout (IUnknown × 3 + IDispatch × 4 = 7 entries).
+#[repr(C)]
+struct EvSinkVtbl {
+    qi:      unsafe extern "system" fn(*mut EvSinkInner, *const GUID, *mut *mut core::ffi::c_void) -> i32,
+    addref:  unsafe extern "system" fn(*mut EvSinkInner) -> u32,
+    release: unsafe extern "system" fn(*mut EvSinkInner) -> u32,
+    gtc:     unsafe extern "system" fn(*mut EvSinkInner, *mut u32) -> i32,
+    gti:     unsafe extern "system" fn(*mut EvSinkInner, u32, u32, *mut *mut core::ffi::c_void) -> i32,
+    gidn:    unsafe extern "system" fn(*mut EvSinkInner, *const GUID, *const *const u16, u32, u32, *mut i32) -> i32,
+    invoke:  unsafe extern "system" fn(*mut EvSinkInner, i32, *const GUID, u32, u16, *const core::ffi::c_void, *mut core::ffi::c_void, *mut core::ffi::c_void, *mut u32) -> i32,
+}
+
+#[repr(C)]
+struct EvSinkInner {
+    vtbl:         *const EvSinkVtbl,
+    ref_count:    AtomicU32,
     connected:    Arc<AtomicBool>,
     disconnected: Arc<AtomicBool>,
 }
 
-// SAFETY: used exclusively on the dedicated STA COM thread
-unsafe impl Send for RdpEventSink {}
+// SAFETY: only ever accessed on the COM STA thread; Arc fields are Send+Sync.
+unsafe impl Sync for EvSinkVtbl {}
+unsafe impl Send for EvSinkInner {}
+unsafe impl Sync for EvSinkInner {}
 
-impl IDispatch_Impl for RdpEventSink_Impl {
-    fn GetTypeInfoCount(&self) -> windows::core::Result<u32> { Ok(0) }
-    fn GetTypeInfo(&self, _: u32, _: u32) -> windows::core::Result<ITypeInfo> {
-        Err(E_NOTIMPL.into())
+static EV_SINK_VTBL: EvSinkVtbl = EvSinkVtbl {
+    qi:      ev_sink_qi,
+    addref:  ev_sink_addref,
+    release: ev_sink_release,
+    gtc:     ev_sink_gtc,
+    gti:     ev_sink_gti,
+    gidn:    ev_sink_gidn,
+    invoke:  ev_sink_invoke,
+};
+
+unsafe extern "system" fn ev_sink_qi(
+    this: *mut EvSinkInner, iid: *const GUID, ppv: *mut *mut core::ffi::c_void,
+) -> i32 {
+    // Accept any IID that shares this vtable layout (IDispatch-based interfaces).
+    if *iid == IID_IUNKNOWN_S
+        || *iid == IID_IDISPATCH_S
+        || *iid == IID_MSTSCAX_EVENTS
+        || *iid == IID_DMSRDPCLIENTEVENTS
+    {
+        *ppv = this as *mut _;
+        ev_sink_addref(this);
+        0 // S_OK
+    } else {
+        *ppv = core::ptr::null_mut();
+        -2147467262i32 // E_NOINTERFACE (0x80004002)
     }
-    fn GetIDsOfNames(
-        &self, _: *const GUID, _: *const PCWSTR, _: u32, _: u32, _: *mut i32,
-    ) -> windows::core::Result<()> {
-        Err(E_NOTIMPL.into())
+}
+
+unsafe extern "system" fn ev_sink_addref(this: *mut EvSinkInner) -> u32 {
+    (*this).ref_count.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+unsafe extern "system" fn ev_sink_release(this: *mut EvSinkInner) -> u32 {
+    let prev = (*this).ref_count.fetch_sub(1, Ordering::SeqCst);
+    if prev == 1 {
+        drop(Box::from_raw(this));
     }
-    fn Invoke(
-        &self,
-        dispidmember: i32,
-        _: *const GUID,
-        _: u32,
-        _: DISPATCH_FLAGS,
-        _: *const DISPPARAMS,
-        _: *mut VARIANT,
-        _: *mut EXCEPINFO,
-        _: *mut u32,
-    ) -> windows::core::Result<()> {
-        match dispidmember {
-            2 => { // OnConnected — session fully established
-                self.connected.store(true, Ordering::SeqCst);
-                eprintln!("[rdp-event] OnConnected (DISPID 2)");
-            }
-            4 => { // OnDisconnected — session ended (logoff, network drop, etc.)
-                self.disconnected.store(true, Ordering::SeqCst);
-                eprintln!("[rdp-event] OnDisconnected (DISPID 4)");
-            }
-            _ => {}
+    prev - 1
+}
+
+unsafe extern "system" fn ev_sink_gtc(_: *mut EvSinkInner, pct: *mut u32) -> i32 {
+    *pct = 0; 0
+}
+unsafe extern "system" fn ev_sink_gti(
+    _: *mut EvSinkInner, _: u32, _: u32, _: *mut *mut core::ffi::c_void,
+) -> i32 {
+    -2147467263i32 // E_NOTIMPL
+}
+unsafe extern "system" fn ev_sink_gidn(
+    _: *mut EvSinkInner, _: *const GUID, _: *const *const u16,
+    _: u32, _: u32, _: *mut i32,
+) -> i32 {
+    -2147467263i32 // E_NOTIMPL
+}
+
+unsafe extern "system" fn ev_sink_invoke(
+    this: *mut EvSinkInner,
+    dispid: i32,
+    _: *const GUID, _: u32, _: u16,
+    _: *const core::ffi::c_void, _: *mut core::ffi::c_void,
+    _: *mut core::ffi::c_void, _: *mut u32,
+) -> i32 {
+    let inner = &*this;
+    match dispid {
+        2 => { // OnConnected — session fully established
+            inner.connected.store(true, Ordering::SeqCst);
+            eprintln!("[rdp-event] OnConnected (DISPID 2)");
         }
-        Ok(())
+        4 => { // OnDisconnected — session ended (logoff, network drop, etc.)
+            inner.disconnected.store(true, Ordering::SeqCst);
+            eprintln!("[rdp-event] OnDisconnected (DISPID 4)");
+        }
+        _ => {}
     }
+    0 // S_OK
+}
+
+// Create a COM event sink that responds to QI for both the mstscax-specific
+// events IID and the standard IDispatch IID, then wraps it as IUnknown.
+// ref_count starts at 1; mstscax's Advise will AddRef → 2, our drop → 1,
+// Unadvise → 0 → Box freed.
+fn new_event_sink(connected: Arc<AtomicBool>, disconnected: Arc<AtomicBool>) -> IUnknown {
+    let inner = Box::new(EvSinkInner {
+        vtbl: &EV_SINK_VTBL,
+        ref_count: AtomicU32::new(1),
+        connected,
+        disconnected,
+    });
+    unsafe { <IUnknown as Interface>::from_raw(Box::into_raw(inner) as *mut _) }
 }
 
 // MsRdpClient10 (Windows 10+); MsRdpClient9 used as fallback
@@ -779,13 +873,11 @@ fn sta_thread(
         let mut cp_registrations: Vec<(IConnectionPoint, u32)> = Vec::new();
 
         if let Ok(cpc) = rdp_unk.cast::<IConnectionPointContainer>() {
-            // Build the IDispatch sink once; it will be Advise-d to whichever
-            // connection point(s) mstscax exposes.
-            let sink_disp: IDispatch = RdpEventSink {
-                connected:    event_connected.clone(),
-                disconnected: event_disconnected.clone(),
-            }.into();
-            let sink_unk: IUnknown = sink_disp.cast().expect("IDispatch→IUnknown");
+            // Build the event sink once; it will be Advise-d to whichever
+            // connection point(s) mstscax exposes.  new_event_sink responds to
+            // QI for both the mstscax-specific CP IID and standard IDispatch,
+            // so Advise succeeds regardless of which IID mstscax checks.
+            let sink_unk = new_event_sink(event_connected.clone(), event_disconnected.clone());
 
             // Try the well-known DIID_IMsTscAxEvents IID first.
             // If it fails (different mstscax version / connection point layout),
@@ -919,7 +1011,7 @@ fn sta_thread(
             // Pump the COM STA message queue.
             // mstscax fires IMsTscAxEvents (OnConnected, OnDisconnected, …) as
             // window messages on this thread; DispatchMessageW delivers them to
-            // our RdpEventSink::Invoke synchronously.
+            // our ev_sink_invoke synchronously.
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT { break 'outer; }
                 TranslateMessage(&msg);
