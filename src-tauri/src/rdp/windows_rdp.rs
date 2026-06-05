@@ -215,6 +215,71 @@ unsafe extern "system" fn watcher_scan_cb(hwnd: HWND, _: LPARAM) -> BOOL {
     BOOL(1)
 }
 
+// Cross-process credential dialog watcher.
+// The Windows credential prompt that mstscax spawns during NLA may appear in
+// a separate process (CredentialUIBroker / svchost) and thus won't be visible
+// in our per-PID EnumWindows pass.  This callback has NO pid filter; it
+// matches any visible #32770 whose title contains known credential/security
+// keywords and auto-dismisses it with IDOK so the session proceeds silently.
+unsafe extern "system" fn watcher_cred_cb(hwnd: HWND, _: LPARAM) -> BOOL {
+    if WATCHER_PID.load(Ordering::Relaxed) == 0 { return BOOL(0); }
+    if !IsWindowVisible(hwnd).as_bool() { return BOOL(1); }
+
+    let mut cls = [0u16; 16];
+    GetClassNameW(hwnd, &mut cls);
+    if !(cls[0] == 35 && cls[1] == 51 && cls[2] == 50
+        && cls[3] == 55 && cls[4] == 55 && cls[5] == 48 && cls[6] == 0)
+    {
+        return BOOL(1);
+    }
+
+    let mut title = [0u16; 256];
+    let n = GetWindowTextW(hwnd, &mut title);
+    if n == 0 { return BOOL(1); }
+    let title_s = String::from_utf16_lossy(&title[..n as usize]).to_ascii_lowercase();
+
+    // Only act on windows that look like RDP/credential dialogs.
+    let relevant = title_s.contains("seguridad de windows")
+        || title_s.contains("windows security")
+        || title_s.contains("escritorio remoto")
+        || title_s.contains("remote desktop")
+        || title_s.contains("credential")
+        || title_s.contains("credencial");
+    if !relevant { return BOOL(1); }
+
+    // Skip if we already sent a dismiss to this HWND (shared WATCHER_PENDING slot).
+    if WATCHER_PENDING.load(Ordering::Relaxed) == hwnd.0 as isize {
+        return BOOL(1);
+    }
+
+    let mut title_display = [0u16; 256];
+    let nd = GetWindowTextW(hwnd, &mut title_display);
+    let title_d = String::from_utf16_lossy(&title_display[..nd as usize]);
+    eprintln!("[rdp] watcher-cred: cross-process dialog '{title_d}'");
+
+    // Log buttons for diagnosis
+    unsafe extern "system" fn log_cb(child: HWND, _: LPARAM) -> BOOL {
+        let mut cls2 = [0u16; 32];
+        GetClassNameW(child, &mut cls2);
+        if String::from_utf16_lossy(&cls2).trim_end_matches('\0').eq_ignore_ascii_case("Button") {
+            let mut t = [0u16; 64];
+            let n = GetWindowTextW(child, &mut t);
+            let text = if n > 0 { String::from_utf16_lossy(&t[..n as usize]) } else { String::new() };
+            eprintln!("[rdp] watcher-cred btn id={}: '{text}'", GetDlgCtrlID(child));
+        }
+        BOOL(1)
+    }
+    EnumChildWindows(Some(hwnd), Some(log_cb), LPARAM(0));
+
+    // Dismiss via IDOK (1); use the same check-all-checkboxes approach.
+    if let Ok(btn) = GetDlgItem(Some(hwnd), 1) {
+        WATCHER_PENDING.store(hwnd.0 as isize, Ordering::Relaxed);
+        PostMessageW(Some(btn), BM_CLICK, WPARAM(0), LPARAM(0)).ok();
+        eprintln!("[rdp] watcher-cred: dismissed '{title_d}' via IDOK(1)");
+    }
+    BOOL(1)
+}
+
 unsafe extern "system" fn log_and_find_btn(child: HWND, _: LPARAM) -> BOOL {
     let mut cls = [0u16; 32];
     GetClassNameW(child, &mut cls);
@@ -360,7 +425,7 @@ unsafe extern "system" fn ev_sink_invoke(
     this: *mut EvSinkInner,
     dispid: i32,
     _: *const GUID, _: u32, _: u16,
-    _: *const core::ffi::c_void, _: *mut core::ffi::c_void,
+    parms: *const core::ffi::c_void, _: *mut core::ffi::c_void,
     _: *mut core::ffi::c_void, _: *mut u32,
 ) -> i32 {
     let inner = &*this;
@@ -376,9 +441,22 @@ unsafe extern "system" fn ev_sink_invoke(
             eprintln!("[rdp-event] OnLoginComplete — session ready");
         }
         4 => {
-            // DISPID 4 = OnDisconnected: session ended (logoff, network drop).
+            // DISPID 4 = OnDisconnected(discReason: long).
+            // Log the disconnect reason to distinguish user-initiated, server-side,
+            // auth failure, etc.
+            let disc_reason: i32 = if !parms.is_null() {
+                // DISPPARAMS: *VARIANT rgvarg, *DISPID namedArgs, UINT cArgs, UINT cNamedArgs
+                // OnDisconnected has 1 arg (discReason) at rgvarg[0] as VT_I4.
+                #[repr(C)]
+                struct Dp { rgvarg: *const VarRaw, _named: *mut i32, c_args: u32, _c_named: u32 }
+                let dp = &*(parms as *const Dp);
+                if dp.c_args >= 1 {
+                    let v = &*dp.rgvarg;
+                    if v.vt == 3 { v.data.lVal } else { -1 }
+                } else { -1 }
+            } else { -1 };
             inner.disconnected.store(true, Ordering::SeqCst);
-            eprintln!("[rdp-event] OnDisconnected");
+            eprintln!("[rdp-event] OnDisconnected discReason=0x{disc_reason:08X} ({disc_reason})");
         }
         _ => {}
     }
@@ -1121,6 +1199,16 @@ fn sta_thread(
             // Enable clipboard redirect explicitly so WarnAboutClipboardRedirection
             // can be set to FALSE below without returning E_INVALIDARG.
             let _ = put_bool_prop(adv, "RedirectClipboard", true);
+            // Try to suppress the mstscax internal credential prompt via AdvancedSettings.
+            // PromptForCredentials and PromptForCredentialsOnClient may not exist on all
+            // mstscax versions (best-effort; NS2 path also attempted via vtable below).
+            {
+                let r1 = put_bool_prop(adv, "PromptForCredentials", false);
+                let r2 = put_bool_prop(adv, "PromptForCredentialsOnClient", false);
+                eprintln!("[rdp] PromptForCredentials hr=0x{:08X}  PromptForCredentialsOnClient hr=0x{:08X}",
+                    r1.as_ref().err().map(|e| e.code().0 as u32).unwrap_or(0),
+                    r2.as_ref().err().map(|e| e.code().0 as u32).unwrap_or(0));
+            }
             if params.admin_mode {
                 let _ = put_i4(adv, "ConnectToAdministerServer", 1);
             }
@@ -1154,9 +1242,12 @@ fn sta_thread(
             std::thread::spawn(move || {
                 let mut scan_tick: u32 = 0;
                 while !done.load(Ordering::Relaxed) {
+                    // Per-process: dismiss #32770 redirect/cert dialogs.
                     unsafe { EnumWindows(Some(watcher_dismiss_cb), LPARAM(0)).ok() };
-                    // Once a dismissed dialog is fully gone, clear the pending slot
-                    // so new dialogs (new HWNDs) are not skipped.
+                    // Cross-process: dismiss Windows Security / credential dialogs
+                    // that CredSSP or mstscax may spawn in a broker/svchost process.
+                    unsafe { EnumWindows(Some(watcher_cred_cb), LPARAM(0)).ok() };
+                    // Clear the pending-dismissed HWND once the window is gone.
                     let p = WATCHER_PENDING.load(Ordering::Relaxed);
                     if p != 0 {
                         let h = HWND(p as *mut _);
