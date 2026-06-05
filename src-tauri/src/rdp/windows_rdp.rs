@@ -453,10 +453,10 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
         None
     };
 
-    let mut base_targets = vec![format!("TERMSRV/{}", host)];
-    if port != 3389 {
-        base_targets.push(format!("TERMSRV/{}:{}", host, port));
-    }
+    let mut base_targets = vec![
+        format!("TERMSRV/{}", host),
+        format!("TERMSRV/{}:{}", host, port), // always store both forms
+    ];
 
     // Credential blob is the password as UTF-16LE with no null terminator.
     let pw_blob: Vec<u8> = password
@@ -526,6 +526,58 @@ fn set_rdp_warning_dialog_version() {
     }
 }
 
+// Write per-server registry values under
+//   HKCU\Software\Microsoft\Terminal Server Client\servers\<host>
+// mstscax reads these before showing any warning dialogs and uses UsernameHint
+// to select the right Credential Manager entry for automatic authentication.
+fn suppress_rdp_server_registry(host: &str, port: u16, username: &str, domain: &str) {
+    use windows::Win32::System::Registry::{
+        RegCreateKeyExW, RegSetValueExW, RegCloseKey,
+        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
+        REG_OPTION_NON_VOLATILE, REG_DWORD, REG_SZ,
+    };
+
+    let user_hint = if domain.is_empty() {
+        username.to_owned()
+    } else {
+        format!("{}\\{}", domain, username)
+    };
+
+    // Write under both host-only and host:port forms so whichever key mstscax
+    // resolves to gets the suppression values.
+    let mut server_keys = vec![host.to_owned()];
+    server_keys.push(format!("{}:{}", host, port));
+
+    for server in &server_keys {
+        let subkey_str = format!("Software\\Microsoft\\Terminal Server Client\\servers\\{}", server);
+        let subkey: Vec<u16> = subkey_str.encode_utf16().chain(Some(0)).collect();
+        let mut hkey = HKEY::default();
+        unsafe {
+            if RegCreateKeyExW(
+                HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), Some(0), PCWSTR::null(),
+                REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut hkey, None,
+            ).is_ok() {
+                let zero: u32 = 0;
+                for name in &["WarnAboutClipboardRedirection", "WarnAboutSendingCredentials",
+                               "WarnAboutPrintRedirection"] {
+                    let vname: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+                    RegSetValueExW(hkey, PCWSTR(vname.as_ptr()), Some(0), REG_DWORD,
+                        Some(&zero.to_ne_bytes())).ok();
+                }
+                // UsernameHint: mstscax uses this to locate the Credential Manager
+                // entry for NLA pre-authentication without prompting.
+                let hint_name: Vec<u16> = "UsernameHint".encode_utf16().chain(Some(0)).collect();
+                let hint_bytes: Vec<u8> = user_hint.encode_utf16()
+                    .flat_map(|c| c.to_le_bytes()).chain([0u8, 0u8]).collect();
+                RegSetValueExW(hkey, PCWSTR(hint_name.as_ptr()), Some(0), REG_SZ,
+                    Some(&hint_bytes)).ok();
+                RegCloseKey(hkey);
+            }
+        }
+    }
+    eprintln!("[rdp] per-server registry suppression written for {host} hint={user_hint}");
+}
+
 // Suppress the two dialogs that appear on every RDP connection:
 //   1. Clipboard/redirect security warning (reverted by registry key above)
 //   2. "Windows Security – enter credentials" credential prompt
@@ -584,14 +636,42 @@ unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
         release(ns3);
     }
 
+    // ── NS4: PromptForCredsOnClient + TrustedZoneSite ───────────────────────
+    // NS4 IID: 17A5E535-4072-4FA4-AF32-C8D0D47345E9
+    // Extends NS3 vtable:
+    //   [23-24] RedirectionWarningType (get/put)
+    //   [25-26] AllowCredentialSaving (get/put)
+    //   [27-28] PromptForCredsOnClient (get/put)   ← suppresses the cred dialog
+    //   [29-30] LaunchedViaClientShellInterface (get/put)
+    //   [31-32] TrustedZoneSite (get/put)           ← marks server as trusted
+    const IID_NS4: GUID = GUID::from_values(
+        0x17A5E535, 0x4072, 0x4FA4,
+        [0xAF, 0x32, 0xC8, 0xD0, 0xD4, 0x73, 0x45, 0xE9],
+    );
+    let mut ns4: *mut core::ffi::c_void = core::ptr::null_mut();
+    let hr4 = qi(raw, &IID_NS4, &mut ns4);
+    eprintln!("[rdp] QI NS4 hr=0x{:08X}", hr4 as u32);
+    if hr4 >= 0 && !ns4.is_null() {
+        let v: *const usize = *(ns4 as *const *const usize);
+        let put_prompt_on_client: PutBool = core::mem::transmute(*v.add(28));
+        let put_trusted_zone:     PutBool = core::mem::transmute(*v.add(32));
+        let release: RelFn                = core::mem::transmute(*v.add(2));
+        let h6 = put_prompt_on_client(ns4, 0i16);  // FALSE = no client-side cred prompt
+        let h7 = put_trusted_zone(ns4, -1i16);     // TRUE  = trusted zone → auto creds
+        eprintln!("[rdp] NS4 PromptForCredsOnClient=0  hr=0x{:08X}", h6 as u32);
+        eprintln!("[rdp] NS4 TrustedZoneSite=1         hr=0x{:08X}", h7 as u32);
+        release(ns4);
+    }
+
     // ── NS5: AllowPromptingForCredentials ────────────────────────────────────
-    // NS5 vtable [30] put_AllowPromptingForCredentials (E_NOINTERFACE on this Windows)
+    // NS5 vtable [35] put_AllowPromptingForCredentials
     let mut ns5: *mut core::ffi::c_void = core::ptr::null_mut();
     let hr5 = qi(raw, &IID_NS5, &mut ns5);
     eprintln!("[rdp] QI NS5 hr=0x{:08X}", hr5 as u32);
     if hr5 >= 0 && !ns5.is_null() {
         let v: *const usize = *(ns5 as *const *const usize);
-        let put_allow: PutBool = core::mem::transmute(*v.add(30));
+        // NS5 extends NS4 (ends at [33]); put_AllowPromptingForCredentials is [35]
+        let put_allow: PutBool = core::mem::transmute(*v.add(35));
         let release: RelFn     = core::mem::transmute(*v.add(2));
         let h = put_allow(ns5, 0i16);
         eprintln!("[rdp] NS5 AllowPromptingForCredentials=0 hr=0x{:08X}", h as u32);
@@ -858,6 +938,11 @@ fn sta_thread(
         // Write the registry key that reverts the April-2026 redirection warning
         // dialog to pre-update behavior (HKCU, no elevation required).
         set_rdp_warning_dialog_version();
+
+        // Write per-server registry suppression values and UsernameHint so
+        // mstscax suppresses clipboard/credential dialogs for this specific
+        // server and locates the right Credential Manager entry automatically.
+        suppress_rdp_server_registry(&params.host, params.port, &params.username, &params.domain);
 
         // WarnAbout* suppression — called after clipboard redirect is enabled.
         suppress_rdp_dialogs(&rdp_unk);
