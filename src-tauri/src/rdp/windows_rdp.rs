@@ -84,7 +84,7 @@ const IID_MSTSCAX_EVENTS: GUID = GUID::from_values(
 
 static RDP_AUTO_DISMISS_HOOK: AtomicIsize = AtomicIsize::new(0);
 
-unsafe extern "system" fn log_and_find_btn(child: HWND, lparam: LPARAM) -> BOOL {
+unsafe extern "system" fn log_and_find_btn(child: HWND, _: LPARAM) -> BOOL {
     let mut cls = [0u16; 32];
     GetClassNameW(child, &mut cls);
     let cls_s = String::from_utf16_lossy(&cls);
@@ -122,7 +122,7 @@ unsafe extern "system" fn rdp_auto_dismiss_proc(
             // Strategy 1: DM_GETDEFID (WM_USER+0 = 0x400) returns the default button ID.
             // The default button is always "Accept/Allow/Connect" in warning dialogs.
             // DC_HASDEFID = 0xDC00 in the high word signals a valid default button.
-            let r = SendMessageW(hwnd, 0x400u32, WPARAM(0), LPARAM(0));
+            let r = SendMessageW(hwnd, 0x400u32, Some(WPARAM(0)), Some(LPARAM(0)));
             let hi = ((r.0 as usize) >> 16) & 0xFFFF;
             let lo = (r.0 as usize) & 0xFFFF;
             if hi == 0xDC00 && lo > 0 {
