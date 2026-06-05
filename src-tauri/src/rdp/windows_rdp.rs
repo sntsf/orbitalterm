@@ -74,16 +74,29 @@ const IID_MSTSCAX_EVENTS: GUID = GUID::from_values(
 // ── CBT hook: auto-dismiss mstscax dialog windows ────────────────────────────
 //
 // mstscax creates Win32 dialogs (#32770) on the STA thread for:
+//   • Certificate security warnings (untrusted cert)
 //   • Clipboard / device-redirection security warnings (post-KB5057577)
-//   • Any other blocking warning dialogs
 //
 // We install a WH_CBT thread-local hook before calling Connect() so that
 // HCBT_ACTIVATE fires synchronously when any dialog is about to gain focus.
-// At that point we post WM_COMMAND(IDYES) if the dialog has a Yes/Allow button,
-// which the dialog's own message loop then processes — dismissing it before
-// the user sees it.  Dialogs without IDYES (credential prompts) are left alone.
+// We use DM_GETDEFID to find the default button (the "Accept/Allow/Connect" one)
+// and post WM_COMMAND to it so the dialog's own message loop dismisses it.
 
 static RDP_AUTO_DISMISS_HOOK: AtomicIsize = AtomicIsize::new(0);
+
+unsafe extern "system" fn log_and_find_btn(child: HWND, lparam: LPARAM) -> BOOL {
+    let mut cls = [0u16; 32];
+    GetClassNameW(child, &mut cls);
+    let cls_s = String::from_utf16_lossy(&cls);
+    if cls_s.trim_end_matches('\0').eq_ignore_ascii_case("Button") {
+        let mut txt = [0u16; 64];
+        let n = GetWindowTextW(child, &mut txt);
+        let text = if n > 0 { String::from_utf16_lossy(&txt[..n as usize]) } else { String::new() };
+        let id = GetDlgCtrlID(child);
+        eprintln!("[rdp] dialog btn id={id}: '{text}'");
+    }
+    BOOL(1)
+}
 
 unsafe extern "system" fn rdp_auto_dismiss_proc(
     ncode: i32, wparam: WPARAM, lparam: LPARAM,
@@ -102,12 +115,29 @@ unsafe extern "system" fn rdp_auto_dismiss_proc(
             let title_s = String::from_utf16_lossy(&title);
             let title_trimmed = title_s.trim_end_matches('\0');
             eprintln!("[rdp] HCBT_ACTIVATE dialog: '{title_trimmed}'");
-            // Check for IDYES (6i32) — the "Allow/Permit" button in redirect warnings.
-            // Credential prompts use IDOK(1)/IDCANCEL(2) only and are left alone.
-            if GetDlgItem(Some(hwnd), 6).is_ok() {
-                // Post IDYES to the dialog's own message loop to accept without blocking.
+
+            // Log all buttons so we know the layout.
+            EnumChildWindows(Some(hwnd), Some(log_and_find_btn), LPARAM(0));
+
+            // Strategy 1: DM_GETDEFID (WM_USER+0 = 0x400) returns the default button ID.
+            // The default button is always "Accept/Allow/Connect" in warning dialogs.
+            // DC_HASDEFID = 0xDC00 in the high word signals a valid default button.
+            let r = SendMessageW(hwnd, 0x400u32, WPARAM(0), LPARAM(0));
+            let hi = ((r.0 as usize) >> 16) & 0xFFFF;
+            let lo = (r.0 as usize) & 0xFFFF;
+            if hi == 0xDC00 && lo > 0 {
+                let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(lo), LPARAM(0));
+                eprintln!("[rdp] auto-dismissed via DM_GETDEFID id={lo}: '{title_trimmed}'");
+            } else if GetDlgItem(Some(hwnd), 6).is_ok() {
+                // Fallback: IDYES (6)
                 let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(6), LPARAM(0));
-                eprintln!("[rdp] auto-dismissed: posted IDYES(6) to '{title_trimmed}'");
+                eprintln!("[rdp] auto-dismissed via IDYES(6): '{title_trimmed}'");
+            } else if GetDlgItem(Some(hwnd), 1).is_ok() {
+                // Fallback: IDOK (1) — only if DM_GETDEFID didn't work
+                let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(1), LPARAM(0));
+                eprintln!("[rdp] auto-dismissed via IDOK(1): '{title_trimmed}'");
+            } else {
+                eprintln!("[rdp] WARN: could not find dismiss button for '{title_trimmed}'");
             }
         }
     }
