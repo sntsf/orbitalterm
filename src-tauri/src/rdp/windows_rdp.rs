@@ -530,15 +530,14 @@ unsafe extern "system" fn ev_sink_invoke(
                             },
                         };
 
-                        // Tab: move focus from the pre-filled username field to
-                        // the password field (mstscax sets username from UserName
-                        // property, leaving focus on username initially).
-                        inputs.push(ki(VK_TAB.0, 0, 0));
-                        inputs.push(ki(VK_TAB.0, 0, KEYEVENTF_KEYUP.0));
-
-                        // Type each UTF-16 code unit of the password as a
-                        // Unicode hardware key event (works for all characters,
-                        // including non-ASCII passwords).
+                        // mstscax pre-fills the username from the UserName property
+                        // and focuses the password field by default — no Tab needed.
+                        // (Sending Tab would move focus AWAY from the password field
+                        //  to the Connect button, causing the first auth attempt to
+                        //  submit an empty password.)
+                        //
+                        // Type each UTF-16 code unit as a Unicode hardware key event
+                        // (works for all characters, including non-ASCII passwords).
                         for ch in pw_clone.encode_utf16() {
                             inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0));
                             inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0));
