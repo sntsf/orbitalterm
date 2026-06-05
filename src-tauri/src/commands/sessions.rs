@@ -600,7 +600,7 @@ pub async fn show_rdp_tab_menu(
                 SetForegroundWindow(hwnd).ok();
                 let cmd = TrackPopupMenuEx(
                     hmenu,
-                    TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+                    (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY).0,
                     x, y,
                     hwnd,
                     None,
