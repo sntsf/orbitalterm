@@ -548,6 +548,27 @@ fn suppress_rdp_server_registry(host: &str, port: u16, username: &str, domain: &
     let mut server_keys = vec![host.to_owned()];
     server_keys.push(format!("{}:{}", host, port));
 
+    // Write the global (non-per-server) suppression values first.
+    // On some mstscax versions the global key takes precedence over per-server.
+    let global_subkey: Vec<u16> = "Software\\Microsoft\\Terminal Server Client"
+        .encode_utf16().chain(Some(0)).collect();
+    let mut global_hkey = HKEY::default();
+    unsafe {
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER, PCWSTR(global_subkey.as_ptr()), Some(0), PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut global_hkey, None,
+        ).is_ok() {
+            let zero: u32 = 0;
+            for name in &["WarnAboutClipboardRedirection", "WarnAboutSendingCredentials",
+                           "WarnAboutPrintRedirection"] {
+                let vname: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+                let _ = RegSetValueExW(global_hkey, PCWSTR(vname.as_ptr()), Some(0), REG_DWORD,
+                    Some(&zero.to_ne_bytes()));
+            }
+            let _ = RegCloseKey(global_hkey);
+        }
+    }
+
     for server in &server_keys {
         let subkey_str = format!("Software\\Microsoft\\Terminal Server Client\\servers\\{}", server);
         let subkey: Vec<u16> = subkey_str.encode_utf16().chain(Some(0)).collect();
@@ -561,17 +582,17 @@ fn suppress_rdp_server_registry(host: &str, port: u16, username: &str, domain: &
                 for name in &["WarnAboutClipboardRedirection", "WarnAboutSendingCredentials",
                                "WarnAboutPrintRedirection"] {
                     let vname: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-                    RegSetValueExW(hkey, PCWSTR(vname.as_ptr()), Some(0), REG_DWORD,
-                        Some(&zero.to_ne_bytes())).ok();
+                    let _ = RegSetValueExW(hkey, PCWSTR(vname.as_ptr()), Some(0), REG_DWORD,
+                        Some(&zero.to_ne_bytes()));
                 }
                 // UsernameHint: mstscax uses this to locate the Credential Manager
                 // entry for NLA pre-authentication without prompting.
                 let hint_name: Vec<u16> = "UsernameHint".encode_utf16().chain(Some(0)).collect();
                 let hint_bytes: Vec<u8> = user_hint.encode_utf16()
                     .flat_map(|c| c.to_le_bytes()).chain([0u8, 0u8]).collect();
-                RegSetValueExW(hkey, PCWSTR(hint_name.as_ptr()), Some(0), REG_SZ,
-                    Some(&hint_bytes)).ok();
-                RegCloseKey(hkey);
+                let _ = RegSetValueExW(hkey, PCWSTR(hint_name.as_ptr()), Some(0), REG_SZ,
+                    Some(&hint_bytes));
+                let _ = RegCloseKey(hkey);
             }
         }
     }
@@ -725,6 +746,16 @@ fn sta_thread(
 
         register_host_class();
 
+        // Write registry suppression values and credentials BEFORE creating the COM
+        // object so mstscax reads them at activation time (DoVerb/Connect).
+        // mstscax reads WarnAbout* and UsernameHint during control initialization,
+        // not at Connect() time — writing after DoVerb is too late.
+        if let Some(ref pw) = params.password {
+            store_rdp_credential(&params.host, params.port, &params.username, &params.domain, pw);
+        }
+        set_rdp_warning_dialog_version();
+        suppress_rdp_server_registry(&params.host, params.port, &params.username, &params.domain);
+
         let hmod = GetModuleHandleW(None).unwrap_or_default();
         // parent = Tauri main window (top-level application frame)
         let mut parent = HWND(params.parent_hwnd as *mut _);
@@ -849,13 +880,6 @@ fn sta_thread(
             }
         };
 
-        // ── Store credentials in Windows Credential Manager ───────────────────
-        // NLA/CredSSP reads from Credential Manager to authenticate silently.
-        // We use CredWriteW directly (no subprocess) for reliability.
-        if let Some(ref pw) = params.password {
-            store_rdp_credential(&params.host, params.port, &params.username, &params.domain, pw);
-        }
-
         // ── RDP properties ────────────────────────────────────────────────────
         let _ = put_bstr(&disp, "Server", &params.host);
         let _ = put_i4(&disp, "RDPPort", params.port as i32);
@@ -895,16 +919,7 @@ fn sta_thread(
             }
         }
 
-        // Write the registry key that reverts the April-2026 redirection warning
-        // dialog to pre-update behavior (HKCU, no elevation required).
-        set_rdp_warning_dialog_version();
-
-        // Write per-server registry suppression values and UsernameHint so
-        // mstscax suppresses clipboard/credential dialogs for this specific
-        // server and locates the right Credential Manager entry automatically.
-        suppress_rdp_server_registry(&params.host, params.port, &params.username, &params.domain);
-
-        // WarnAbout* suppression — called after clipboard redirect is enabled.
+        // WarnAbout* suppression via COM (best-effort; registry writes above are primary).
         suppress_rdp_dialogs(&rdp_unk);
 
         if let Err(e) = call_no_args(&disp, "Connect") {
