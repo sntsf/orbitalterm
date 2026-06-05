@@ -87,7 +87,6 @@ struct EvSinkVtbl {
 struct EvSinkInner {
     vtbl:         *const EvSinkVtbl,
     ref_count:    AtomicU32,
-    connected:    Arc<AtomicBool>,
     disconnected: Arc<AtomicBool>,
 }
 
@@ -159,16 +158,15 @@ unsafe extern "system" fn ev_sink_invoke(
     _: *mut core::ffi::c_void, _: *mut u32,
 ) -> i32 {
     let inner = &*this;
-    match dispid {
-        2 => { // OnConnected — session fully established
-            inner.connected.store(true, Ordering::SeqCst);
-            eprintln!("[rdp-event] OnConnected (DISPID 2)");
-        }
-        4 => { // OnDisconnected — session ended (logoff, network drop, etc.)
-            inner.disconnected.store(true, Ordering::SeqCst);
-            eprintln!("[rdp-event] OnDisconnected (DISPID 4)");
-        }
-        _ => {}
+    // Log every DISPID so we can map the events for this mstscax version.
+    eprintln!("[rdp-event] DISPID {dispid}");
+    if dispid == 4 {
+        // DISPID 4 = OnDisconnected in both standard and extended mstscax events.
+        // Do NOT act on any other DISPID here — connect detection is done via
+        // ConnectionState polling so that ever_connected is only set once
+        // ConnectionState == 2 (fully established desktop), not during NLA auth.
+        inner.disconnected.store(true, Ordering::SeqCst);
+        eprintln!("[rdp-event] OnDisconnected confirmed");
     }
     0 // S_OK
 }
@@ -177,11 +175,10 @@ unsafe extern "system" fn ev_sink_invoke(
 // events IID and the standard IDispatch IID, then wraps it as IUnknown.
 // ref_count starts at 1; mstscax's Advise will AddRef → 2, our drop → 1,
 // Unadvise → 0 → Box freed.
-fn new_event_sink(connected: Arc<AtomicBool>, disconnected: Arc<AtomicBool>) -> IUnknown {
+fn new_event_sink(disconnected: Arc<AtomicBool>) -> IUnknown {
     let inner = Box::new(EvSinkInner {
         vtbl: &EV_SINK_VTBL,
         ref_count: AtomicU32::new(1),
-        connected,
         disconnected,
     });
     unsafe { <IUnknown as Interface>::from_raw(Box::into_raw(inner) as *mut _) }
@@ -862,12 +859,11 @@ fn sta_thread(
             return;
         }
 
-        // ── COM connection point: subscribe to IMsTscAxEvents ─────────────────
-        // Push-based detection: mstscax fires OnConnected (DISPID 2) and
-        // OnDisconnected (DISPID 4) synchronously on this STA thread whenever
-        // DispatchMessageW processes the relevant COM notification message.
-        // This is the same mechanism mRemoteNG / Terminals use via AxHost.
-        let event_connected    = Arc::new(AtomicBool::new(false));
+        // ── COM connection point: subscribe to mstscax events ────────────────
+        // OnDisconnected (DISPID 4) is delivered synchronously on this STA thread
+        // when DispatchMessageW processes the relevant COM notification message.
+        // Connection detection (OnConnected) is handled by ConnectionState polling
+        // so that ever_connected is only set once the desktop is fully established.
         let event_disconnected = Arc::new(AtomicBool::new(false));
         // Vec of (connection_point, advise_cookie) kept alive until after loop.
         let mut cp_registrations: Vec<(IConnectionPoint, u32)> = Vec::new();
@@ -877,7 +873,7 @@ fn sta_thread(
             // connection point(s) mstscax exposes.  new_event_sink responds to
             // QI for both the mstscax-specific CP IID and standard IDispatch,
             // so Advise succeeds regardless of which IID mstscax checks.
-            let sink_unk = new_event_sink(event_connected.clone(), event_disconnected.clone());
+            let sink_unk = new_event_sink(event_disconnected.clone());
 
             // Try the well-known DIID_IMsTscAxEvents IID first.
             // If it fails (different mstscax version / connection point layout),
@@ -1018,27 +1014,11 @@ fn sta_thread(
                 DispatchMessageW(&msg);
             }
 
-            // ── COM event checks (every tick = 16 ms) ─────────────────────────
-            // Process OnConnected first so that a back-to-back Connect+Disconnect
-            // within the same tick is still handled correctly.
-
-            // OnConnected (DISPID 2): session is fully established — show window.
-            if event_connected.load(Ordering::SeqCst) && !rdp_connected {
-                event_connected.store(false, Ordering::SeqCst); // consume
-                rdp_connected  = true;
-                ever_connected = true;
-                if show_pending {
-                    show_pending = false;
-                    let _ = ShowWindow(host_hwnd, SW_SHOW);
-                    SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
-                }
-            }
-
+            // ── COM event check (every tick = 16 ms) ──────────────────────────
             // OnDisconnected (DISPID 4): session ended — hide popup and exit loop.
-            // Guard with ever_connected so a failed connection attempt (where
-            // OnDisconnected fires before the session was ever established)
-            // falls through to the polling fallback below instead.
+            // Guard with ever_connected (set only by polling once ConnectionState==2)
+            // so a connection failure before the desktop is visible doesn't close
+            // the tab; the user can retry without losing the tab.
             if ever_connected && event_disconnected.load(Ordering::SeqCst) {
                 eprintln!("[rdp] OnDisconnected event — closing session");
                 rdp_connected = false;
