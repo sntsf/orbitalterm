@@ -95,6 +95,10 @@ static RDP_AUTO_DISMISS_HOOK: AtomicIsize = AtomicIsize::new(0);
 // cleared when it exits so the EnumWindows callback can filter safely.
 
 static WATCHER_PID: AtomicU32 = AtomicU32::new(0);
+// HWND of the dialog we already sent a dismiss to.  We skip re-dismissing
+// this HWND until it actually closes, avoiding a spam loop caused by the
+// asynchronous gap between PostMessage and the dialog's message loop.
+static WATCHER_PENDING: AtomicIsize = AtomicIsize::new(0);
 
 unsafe extern "system" fn watcher_dismiss_cb(hwnd: HWND, _: LPARAM) -> BOOL {
     let our_pid = WATCHER_PID.load(Ordering::Relaxed);
@@ -111,6 +115,11 @@ unsafe extern "system" fn watcher_dismiss_cb(hwnd: HWND, _: LPARAM) -> BOOL {
     if !(cls[0] == 35 && cls[1] == 51 && cls[2] == 50
         && cls[3] == 55 && cls[4] == 55 && cls[5] == 48 && cls[6] == 0)
     {
+        return BOOL(1);
+    }
+
+    // Skip a dialog we've already dismissed — wait for it to actually close.
+    if WATCHER_PENDING.load(Ordering::Relaxed) == hwnd.0 as isize {
         return BOOL(1);
     }
 
@@ -134,16 +143,25 @@ unsafe extern "system" fn watcher_dismiss_cb(hwnd: HWND, _: LPARAM) -> BOOL {
     }
     EnumChildWindows(Some(hwnd), Some(log_btn_w), LPARAM(0));
 
-    // DM_GETDEFID (WM_USER+0 = 0x400) returns (DC_HASDEFID<<16)|button_id
+    // Determine which button to click: DM_GETDEFID first, then IDOK fallback.
     let r = SendMessageW(hwnd, 0x400u32, Some(WPARAM(0)), Some(LPARAM(0)));
     let hi = ((r.0 as usize) >> 16) & 0xFFFF;
     let lo = (r.0 as usize) & 0xFFFF;
-    if hi == 0xDC00 && lo > 0 {
-        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(lo), LPARAM(0));
-        eprintln!("[rdp] watcher: dismissed '{title_trimmed}' id={lo}");
-    } else if GetDlgItem(Some(hwnd), 1).is_ok() {
-        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(1), LPARAM(0));
-        eprintln!("[rdp] watcher: dismissed '{title_trimmed}' via IDOK(1)");
+    let btn_id: i32 = if hi == 0xDC00 && lo > 0 { lo as i32 }
+                      else if GetDlgItem(Some(hwnd), 1).is_ok() { 1 }
+                      else { 0 };
+
+    if btn_id > 0 {
+        if let Ok(btn) = GetDlgItem(Some(hwnd), btn_id) {
+            // Mark pending BEFORE clicking so subsequent polls skip this HWND.
+            WATCHER_PENDING.store(hwnd.0 as isize, Ordering::Relaxed);
+            // BM_CLICK (0x00F5) on the button HWND simulates a full click;
+            // more reliable for custom mstscax dialogs than WM_COMMAND on parent.
+            PostMessageW(Some(btn), BM_CLICK, WPARAM(0), LPARAM(0)).ok();
+            eprintln!("[rdp] watcher: dismissed '{title_trimmed}' btn_id={btn_id}");
+        }
+    } else {
+        eprintln!("[rdp] watcher: WARN no dismiss button for '{title_trimmed}'");
     }
     BOOL(1)
 }
@@ -1087,9 +1105,19 @@ fn sta_thread(
             std::thread::spawn(move || {
                 while !done.load(Ordering::Relaxed) {
                     unsafe { EnumWindows(Some(watcher_dismiss_cb), LPARAM(0)).ok() };
+                    // Once a dismissed dialog is fully gone, clear the pending slot
+                    // so new dialogs (new HWNDs) are not skipped.
+                    let p = WATCHER_PENDING.load(Ordering::Relaxed);
+                    if p != 0 {
+                        let h = HWND(p as *mut _);
+                        if !unsafe { IsWindow(Some(h)) }.as_bool() {
+                            WATCHER_PENDING.store(0, Ordering::Relaxed);
+                        }
+                    }
                     std::thread::sleep(Duration::from_millis(150));
                 }
                 WATCHER_PID.store(0, Ordering::Relaxed);
+                WATCHER_PENDING.store(0, Ordering::Relaxed);
                 eprintln!("[rdp] watcher thread exited");
             });
         }
