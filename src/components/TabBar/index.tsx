@@ -16,6 +16,9 @@ export function TabBar() {
   const [dragSrcId, setDragSrcId] = useState<string | null>(null);
   const [dropBefore, setDropBefore] = useState<string | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
+  // Tracks the RDP session hidden while the context menu is open so we can
+  // restore it when the menu closes (the popup would cover the menu otherwise).
+  const hiddenRdpRef = useRef<string | null>(null);
 
   // Drag state tracked in refs to avoid stale closures in pointermove/pointerup
   const dragRef = useRef<{
@@ -27,7 +30,13 @@ export function TabBar() {
 
   if (tabs.length === 0) return null;
 
-  const closeMenu = () => setMenu(null);
+  const closeMenu = () => {
+    if (hiddenRdpRef.current) {
+      rdpWindowsVisibility(hiddenRdpRef.current, true).catch(() => {});
+      hiddenRdpRef.current = null;
+    }
+    setMenu(null);
+  };
 
   // Windows native RDP sessions use a Win32 child window bound to the original
   // parent HWND — it cannot be transferred to a new Tauri window.  Skip the
@@ -184,6 +193,10 @@ export function TabBar() {
               }}
               onContextMenu={(e) => {
                 e.preventDefault();
+                if (isWindows && tab.connection_type === "rdp" && tab.session_id) {
+                  rdpWindowsVisibility(tab.session_id, false).catch(() => {});
+                  hiddenRdpRef.current = tab.session_id;
+                }
                 setMenu({ tabId: tab.id, x: e.clientX, y: e.clientY });
               }}
               className={[
