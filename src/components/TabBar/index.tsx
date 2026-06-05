@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { X, RefreshCw, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
-import { dockBack, openDetachedWindow, rdpWindowsVisibility, storeDetachedSession } from "../../lib/commands";
+import { dockBack, openDetachedWindow, rdpWindowsVisibility, showRdpTabMenu, storeDetachedSession } from "../../lib/commands";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import type { Tab } from "../../types";
 
@@ -16,9 +16,6 @@ export function TabBar() {
   const [dragSrcId, setDragSrcId] = useState<string | null>(null);
   const [dropBefore, setDropBefore] = useState<string | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
-  // Tracks the RDP session hidden while the context menu is open so we can
-  // restore it when the menu closes (the popup would cover the menu otherwise).
-  const hiddenRdpRef = useRef<string | null>(null);
 
   // Drag state tracked in refs to avoid stale closures in pointermove/pointerup
   const dragRef = useRef<{
@@ -30,13 +27,7 @@ export function TabBar() {
 
   if (tabs.length === 0) return null;
 
-  const closeMenu = () => {
-    if (hiddenRdpRef.current) {
-      rdpWindowsVisibility(hiddenRdpRef.current, true).catch(() => {});
-      hiddenRdpRef.current = null;
-    }
-    setMenu(null);
-  };
+  const closeMenu = () => setMenu(null);
 
   // Windows native RDP sessions use a Win32 child window bound to the original
   // parent HWND — it cannot be transferred to a new Tauri window.  Skip the
@@ -191,13 +182,20 @@ export function TabBar() {
                 if (dragRef.current?.moved) return;
                 setActiveTab(tab.id);
               }}
-              onContextMenu={(e) => {
+              onContextMenu={async (e) => {
                 e.preventDefault();
-                if (isWindows && tab.connection_type === "rdp" && tab.session_id) {
-                  rdpWindowsVisibility(tab.session_id, false).catch(() => {});
-                  hiddenRdpRef.current = tab.session_id;
+                if (isWindows && tab.connection_type === "rdp") {
+                  // Native Win32 popup menu — sits above the WS_POPUP RDP window
+                  // in z-order so the RDP session stays visible during selection.
+                  const dpr = window.devicePixelRatio || 1;
+                  const sx = Math.round(e.screenX * dpr);
+                  const sy = Math.round(e.screenY * dpr);
+                  const action = await showRdpTabMenu(sx, sy);
+                  if (action === "reconnect") reconnectTab(tab.id);
+                  else if (action === "close") closeTab(tab.id);
+                } else {
+                  setMenu({ tabId: tab.id, x: e.clientX, y: e.clientY });
                 }
-                setMenu({ tabId: tab.id, x: e.clientX, y: e.clientY });
               }}
               className={[
                 "flex items-center gap-2 px-3 py-2 border-r border-[var(--color-border)] cursor-pointer shrink-0 group transition-colors min-w-0 max-w-48 touch-none",

@@ -561,6 +561,70 @@ pub async fn rdp_windows_reposition(
     Ok(())
 }
 
+/// Show a native Win32 popup menu for an RDP tab.  The menu window is created
+/// at the OS level (Win32 menu layer), which sits above the WS_POPUP RDP window
+/// in z-order, so the RDP session remains visible during the interaction.
+/// Returns the selected action ("reconnect" | "close") or null if dismissed.
+#[tauri::command]
+pub async fn show_rdp_tab_menu(
+    window: tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            AppendMenuW, CreatePopupMenu, DestroyMenu, SetForegroundWindow,
+            TrackPopupMenuEx, MF_SEPARATOR, MF_STRING,
+            TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+        };
+        use windows::core::w;
+
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        let hwnd_raw = hwnd.0 as isize;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Option<String>>(1);
+
+        window.run_on_main_thread(move || {
+            let hwnd = HWND(hwnd_raw as *mut _);
+            let result = unsafe {
+                let Ok(hmenu) = CreatePopupMenu() else {
+                    let _ = tx.send(None);
+                    return;
+                };
+                AppendMenuW(hmenu, MF_STRING, 1, w!("Reconectar")).ok();
+                AppendMenuW(hmenu, MF_SEPARATOR, 0, w!("")).ok();
+                AppendMenuW(hmenu, MF_STRING, 2, w!("Cerrar")).ok();
+                // SetForegroundWindow is required so the menu disappears when
+                // the user clicks outside (standard Win32 popup menu pattern).
+                SetForegroundWindow(hwnd).ok();
+                let cmd = TrackPopupMenuEx(
+                    hmenu,
+                    TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+                    x, y,
+                    hwnd,
+                    None,
+                );
+                DestroyMenu(hmenu).ok();
+                match cmd.0 {
+                    1 => Some("reconnect".to_string()),
+                    2 => Some("close".to_string()),
+                    _ => None,
+                }
+            };
+            let _ = tx.send(result);
+        }).map_err(|e| e.to_string())?;
+
+        return rx.recv().map_err(|e| e.to_string());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, x, y);
+        Ok(None)
+    }
+}
+
 /// Show or hide the embedded mstsc window (used when switching tabs on Windows).
 #[tauri::command]
 pub async fn rdp_windows_visibility(

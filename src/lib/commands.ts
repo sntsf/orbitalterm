@@ -156,6 +156,13 @@ export async function rdpWindowsVisibility(sessionId: string, visible: boolean):
   return invoke("rdp_windows_visibility", { sessionId, visible });
 }
 
+// Show a native Win32 popup menu at the given physical screen coordinates.
+// Returns "reconnect" | "close" or null if dismissed.  On non-Windows this
+// always returns null; the caller should fall back to the CSS context menu.
+export async function showRdpTabMenu(x: number, y: number): Promise<string | null> {
+  return invoke("show_rdp_tab_menu", { x, y });
+}
+
 export async function rdpWindowsReparent(
   sessionId: string,
   x: number,
