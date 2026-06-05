@@ -775,26 +775,65 @@ fn sta_thread(
         // This is the same mechanism mRemoteNG / Terminals use via AxHost.
         let event_connected    = Arc::new(AtomicBool::new(false));
         let event_disconnected = Arc::new(AtomicBool::new(false));
-        let mut cp_cookie: u32 = 0;
-        let mut cp_obj: Option<IConnectionPoint> = None;
+        // Vec of (connection_point, advise_cookie) kept alive until after loop.
+        let mut cp_registrations: Vec<(IConnectionPoint, u32)> = Vec::new();
+
         if let Ok(cpc) = rdp_unk.cast::<IConnectionPointContainer>() {
-            if let Ok(found_cp) = cpc.FindConnectionPoint(&IID_DMSRDPCLIENTEVENTS) {
-                let sink_disp: IDispatch = RdpEventSink {
-                    connected:    event_connected.clone(),
-                    disconnected: event_disconnected.clone(),
-                }.into();
-                // Cast IDispatch → IUnknown; always succeeds for a valid COM object.
-                let sink_unk: IUnknown = sink_disp.cast().expect("IDispatch→IUnknown");
-                match found_cp.Advise(&sink_unk) {
-                    Ok(cookie) => {
-                        eprintln!("[rdp] IConnectionPoint::Advise ok cookie={cookie}");
-                        cp_cookie = cookie;
-                        cp_obj = Some(found_cp);
+            // Build the IDispatch sink once; it will be Advise-d to whichever
+            // connection point(s) mstscax exposes.
+            let sink_disp: IDispatch = RdpEventSink {
+                connected:    event_connected.clone(),
+                disconnected: event_disconnected.clone(),
+            }.into();
+            let sink_unk: IUnknown = sink_disp.cast().expect("IDispatch→IUnknown");
+
+            // Try the well-known DIID_IMsTscAxEvents IID first.
+            // If it fails (different mstscax version / connection point layout),
+            // enumerate all available connection points and subscribe to every one.
+            // Our Invoke only acts on DISPID 2 and 4, so extra CPs are harmless.
+            let candidates: Vec<IConnectionPoint> =
+                match cpc.FindConnectionPoint(&IID_DMSRDPCLIENTEVENTS) {
+                    Ok(cp) => {
+                        eprintln!("[rdp] FindConnectionPoint(DIID_IMsTscAxEvents) ok");
+                        vec![cp]
                     }
-                    Err(e) => eprintln!("[rdp] IConnectionPoint::Advise failed: {e}"),
+                    Err(e) => {
+                        eprintln!("[rdp] FindConnectionPoint failed ({e:?}), enumerating...");
+                        let mut all = Vec::new();
+                        if let Ok(enum_cp) = cpc.EnumConnectionPoints() {
+                            loop {
+                                let mut cp_arr = [None::<IConnectionPoint>; 1];
+                                let mut fetched: u32 = 0;
+                                // Next(slice, *mut u32) → HRESULT:
+                                //   S_OK(0) = more items; S_FALSE(1) = end; <0 = error
+                                let hr = enum_cp.Next(&mut cp_arr, &mut fetched);
+                                if fetched == 0 { break; }
+                                if let Some(cp) = cp_arr[0].take() {
+                                    if let Ok(iid) = cp.GetConnectionInterface() {
+                                        eprintln!("[rdp] Available CP IID: {iid:?}");
+                                    }
+                                    all.push(cp);
+                                }
+                                if hr.0 != 0 { break; } // S_FALSE(1) or error = end
+                            }
+                        } else {
+                            eprintln!("[rdp] EnumConnectionPoints also failed");
+                        }
+                        all
+                    }
+                };
+
+            for cp in candidates {
+                match cp.Advise(&sink_unk) {
+                    Ok(cookie) => {
+                        eprintln!("[rdp] Advise ok cookie={cookie}");
+                        cp_registrations.push((cp, cookie));
+                    }
+                    Err(e) => eprintln!("[rdp] Advise failed: {e:?}"),
                 }
-            } else {
-                eprintln!("[rdp] FindConnectionPoint(DMsRdpClientEvents) failed");
+            }
+            if cp_registrations.is_empty() {
+                eprintln!("[rdp] No CPs registered — falling back to polling only");
             }
         } else {
             eprintln!("[rdp] QI IConnectionPointContainer failed");
@@ -978,13 +1017,11 @@ fn sta_thread(
             std::thread::sleep(Duration::from_millis(16));
         }
 
-        // Unregister the COM event sink before releasing everything else.
-        if let Some(ref cp) = cp_obj {
-            if cp_cookie != 0 {
-                let _ = cp.Unadvise(cp_cookie);
-            }
+        // Unregister all COM event sink registrations before releasing.
+        for (cp, cookie) in &cp_registrations {
+            let _ = cp.Unadvise(*cookie);
         }
-        drop(cp_obj);
+        drop(cp_registrations);
 
         // Notify the frontend regardless of WHY the loop exited (user log-off,
         // WM_QUIT from mstscax, parent window destroyed, explicit Disconnect cmd).
