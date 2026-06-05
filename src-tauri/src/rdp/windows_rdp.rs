@@ -37,14 +37,20 @@ const IID_DMSRDPCLIENTEVENTS: GUID = GUID::from_values(
     [0xA9, 0xE5, 0x00, 0xC0, 0x4F, 0xC9, 0x9C, 0x1D],
 );
 
-// DISPID 4 in IMsTscAxEvents = OnDisconnected(long discReason)
-const DISPID_ONDISCONNECTED: i32 = 4;
-
-// COM event sink that receives IMsTscAxEvents notifications from mstscax.dll.
-// mstscax fires OnDisconnected (DISPID 4) on the STA thread via DispatchMessageW,
-// so all access to `disconnected` is single-threaded in practice.
+// COM event sink that receives IMsTscAxEvents push notifications from mstscax.dll.
+// All IMsTscAxEvents calls arrive on the STA thread (in-process, no marshaling),
+// so they are delivered synchronously during DispatchMessageW.
+//
+// We track two flags:
+//  • connected    — DISPID 2 (OnConnected): session fully established
+//  • disconnected — DISPID 4 (OnDisconnected): session ended for any reason
+//
+// Using both avoids the "ever_connected never set" failure mode: even if the
+// ConnectionState==2 poll misses the connected window, OnConnected sets the flag
+// so the subsequent OnDisconnected check has a valid baseline.
 #[implement(IDispatch)]
 struct RdpEventSink {
+    connected:    Arc<AtomicBool>,
     disconnected: Arc<AtomicBool>,
 }
 
@@ -72,8 +78,16 @@ impl IDispatch_Impl for RdpEventSink_Impl {
         _: *mut EXCEPINFO,
         _: *mut u32,
     ) -> windows::core::Result<()> {
-        if dispidmember == DISPID_ONDISCONNECTED {
-            self.disconnected.store(true, Ordering::SeqCst);
+        match dispidmember {
+            2 => { // OnConnected — session fully established
+                self.connected.store(true, Ordering::SeqCst);
+                eprintln!("[rdp-event] OnConnected (DISPID 2)");
+            }
+            4 => { // OnDisconnected — session ended (logoff, network drop, etc.)
+                self.disconnected.store(true, Ordering::SeqCst);
+                eprintln!("[rdp-event] OnDisconnected (DISPID 4)");
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -755,17 +769,19 @@ fn sta_thread(
         }
 
         // ── COM connection point: subscribe to IMsTscAxEvents ─────────────────
-        // This is the push-based disconnect detection used by mRemoteNG.
-        // mstscax fires OnDisconnected (DISPID 4) synchronously on this STA
-        // thread via DispatchMessageW, which is far more reliable than polling
-        // ConnectionState which can become invalid before the poll runs.
-        let disconnected_flag = Arc::new(AtomicBool::new(false));
+        // Push-based detection: mstscax fires OnConnected (DISPID 2) and
+        // OnDisconnected (DISPID 4) synchronously on this STA thread whenever
+        // DispatchMessageW processes the relevant COM notification message.
+        // This is the same mechanism mRemoteNG / Terminals use via AxHost.
+        let event_connected    = Arc::new(AtomicBool::new(false));
+        let event_disconnected = Arc::new(AtomicBool::new(false));
         let mut cp_cookie: u32 = 0;
         let mut cp_obj: Option<IConnectionPoint> = None;
         if let Ok(cpc) = rdp_unk.cast::<IConnectionPointContainer>() {
             if let Ok(found_cp) = cpc.FindConnectionPoint(&IID_DMSRDPCLIENTEVENTS) {
                 let sink_disp: IDispatch = RdpEventSink {
-                    disconnected: disconnected_flag.clone(),
+                    connected:    event_connected.clone(),
+                    disconnected: event_disconnected.clone(),
                 }.into();
                 // Cast IDispatch → IUnknown; always succeeds for a valid COM object.
                 let sink_unk: IUnknown = sink_disp.cast().expect("IDispatch→IUnknown");
@@ -793,12 +809,9 @@ fn sta_thread(
         let mut rel_y = params.y;
         let mut last_parent_rect = RECT::default();
         GetWindowRect(parent, &mut last_parent_rect).ok();
-        // Gate visibility on ConnectionState==2 so the blank host window never
-        // appears during authentication dialogs (NLA credential prompt, cert
-        // warning, etc.).  The frontend may call Show before mstscax has
-        // finished authenticating; we hold it here and flush once connected.
-        let mut rdp_connected   = false; // true once ConnectionState reaches 2
-        let mut was_connected   = false; // true while connected; reset on disconnect
+        // Gate visibility on session-connected so the blank host window never
+        // appears during NLA / cert authentication dialogs.
+        let mut rdp_connected   = false; // true once the session is established
         let mut ever_connected  = false; // latch: true once connected, never reset
         let mut show_pending    = false; // Show arrived before rdp_connected
         let mut dispatch_errors = 0u32; // consecutive get_i4 errors after connected
@@ -815,7 +828,8 @@ fn sta_thread(
                         rel_y = y;
                         let (sx, sy) = canvas_to_screen(parent, x, y);
                         // No SWP_SHOWWINDOW: never reveal during auth dialogs.
-                        // Visibility is controlled exclusively by Show/Hide and tick.
+                        // Visibility is controlled exclusively by Show/Hide and the
+                        // connect/disconnect handlers below.
                         SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, width, height,
                             SWP_NOACTIVATE).ok();
                         if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
@@ -863,14 +877,46 @@ fn sta_thread(
                 }
             }
 
-            // Pump the COM STA message queue
+            // Pump the COM STA message queue.
+            // mstscax fires IMsTscAxEvents (OnConnected, OnDisconnected, …) as
+            // window messages on this thread; DispatchMessageW delivers them to
+            // our RdpEventSink::Invoke synchronously.
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT { break 'outer; }
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
 
-            // Every ~100ms: check parent liveness, reposition, and detect disconnect.
+            // ── COM event checks (every tick = 16 ms) ─────────────────────────
+            // Process OnConnected first so that a back-to-back Connect+Disconnect
+            // within the same tick is still handled correctly.
+
+            // OnConnected (DISPID 2): session is fully established — show window.
+            if event_connected.load(Ordering::SeqCst) && !rdp_connected {
+                event_connected.store(false, Ordering::SeqCst); // consume
+                rdp_connected  = true;
+                ever_connected = true;
+                if show_pending {
+                    show_pending = false;
+                    let _ = ShowWindow(host_hwnd, SW_SHOW);
+                    SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
+                }
+            }
+
+            // OnDisconnected (DISPID 4): session ended — hide popup and exit loop.
+            // Guard with ever_connected so a failed connection attempt (where
+            // OnDisconnected fires before the session was ever established)
+            // falls through to the polling fallback below instead.
+            if ever_connected && event_disconnected.load(Ordering::SeqCst) {
+                eprintln!("[rdp] OnDisconnected event — closing session");
+                rdp_connected = false;
+                show_pending  = false;
+                let _ = ShowWindow(host_hwnd, SW_HIDE);
+                break 'outer;
+            }
+
+            // ── Slow path (every ~100 ms): parent liveness + polling fallback ─
             tick += 1;
             if tick % 6 == 0 {
                 // If the owner window (Tauri) was destroyed (e.g. detached window
@@ -882,25 +928,14 @@ fn sta_thread(
                     break 'outer;
                 }
 
-                // Primary disconnect detection: COM connection point OnDisconnected
-                // event (DISPID 4) set the flag synchronously via DispatchMessageW above.
-                if ever_connected && disconnected_flag.load(Ordering::SeqCst) {
-                    eprintln!("[rdp] OnDisconnected event received — closing session");
-                    was_connected = false;
-                    rdp_connected = false;
-                    show_pending  = false;
-                    let _ = ShowWindow(host_hwnd, SW_HIDE);
-                    break 'outer;
-                }
-
-                // Fallback: poll ConnectionState for initial connection detection
-                // (ConnectionState==2 → show window) and as a secondary disconnect
-                // guard for cases where the event sink was not wired (no IConnectionPointContainer).
+                // ConnectionState polling: primary use is detecting the initial
+                // connection (state 2 → show window) for the case where OnConnected
+                // fired before Advise was called. Also acts as a fallback disconnect
+                // guard when the event sink was not registered.
                 match get_i4(&disp, "ConnectionState") {
                     Ok(2) if !rdp_connected => {
                         dispatch_errors = 0;
                         rdp_connected  = true;
-                        was_connected  = true;
                         ever_connected = true;
                         if show_pending {
                             show_pending = false;
@@ -909,20 +944,18 @@ fn sta_thread(
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
                         }
                     }
-                    Ok(0) if was_connected => {
-                        was_connected = false;
+                    // States 0 (NOT_CONNECTED) or 3 (DISCONNECTING) after being connected
+                    Ok(0) | Ok(3) if rdp_connected => {
                         rdp_connected = false;
                         show_pending  = false;
                         let _ = ShowWindow(host_hwnd, SW_HIDE);
                         break 'outer;
                     }
                     Ok(_) => { dispatch_errors = 0; }
-                    Err(_) if was_connected => {
-                        // COM object error while connected: count consecutive failures.
-                        // 3 in a row (~1.8 s) means the session is gone.
+                    Err(_) if rdp_connected => {
+                        // COM error while connected: count consecutive failures.
                         dispatch_errors += 1;
                         if dispatch_errors >= 3 {
-                            was_connected = false;
                             rdp_connected = false;
                             show_pending  = false;
                             let _ = ShowWindow(host_hwnd, SW_HIDE);
