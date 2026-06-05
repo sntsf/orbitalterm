@@ -636,35 +636,12 @@ unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
         release(ns3);
     }
 
-    // ── NS4: PromptForCredsOnClient + TrustedZoneSite ───────────────────────
-    // NS4 IID: 17A5E535-4072-4FA4-AF32-C8D0D47345E9
-    // Extends NS3 vtable:
-    //   [23-24] RedirectionWarningType (get/put)
-    //   [25-26] AllowCredentialSaving (get/put)
-    //   [27-28] PromptForCredsOnClient (get/put)   ← suppresses the cred dialog
-    //   [29-30] LaunchedViaClientShellInterface (get/put)
-    //   [31-32] TrustedZoneSite (get/put)           ← marks server as trusted
-    const IID_NS4: GUID = GUID::from_values(
-        0x17A5E535, 0x4072, 0x4FA4,
-        [0xAF, 0x32, 0xC8, 0xD0, 0xD4, 0x73, 0x45, 0xE9],
-    );
-    let mut ns4: *mut core::ffi::c_void = core::ptr::null_mut();
-    let hr4 = qi(raw, &IID_NS4, &mut ns4);
-    eprintln!("[rdp] QI NS4 hr=0x{:08X}", hr4 as u32);
-    if hr4 >= 0 && !ns4.is_null() {
-        let v: *const usize = *(ns4 as *const *const usize);
-        let put_prompt_on_client: PutBool = core::mem::transmute(*v.add(28));
-        let put_trusted_zone:     PutBool = core::mem::transmute(*v.add(32));
-        let release: RelFn                = core::mem::transmute(*v.add(2));
-        let h6 = put_prompt_on_client(ns4, 0i16);  // FALSE = no client-side cred prompt
-        let h7 = put_trusted_zone(ns4, -1i16);     // TRUE  = trusted zone → auto creds
-        eprintln!("[rdp] NS4 PromptForCredsOnClient=0  hr=0x{:08X}", h6 as u32);
-        eprintln!("[rdp] NS4 TrustedZoneSite=1         hr=0x{:08X}", h7 as u32);
-        release(ns4);
-    }
-
     // ── NS5: AllowPromptingForCredentials ────────────────────────────────────
     // NS5 vtable [35] put_AllowPromptingForCredentials
+    // NS4 is intentionally skipped: on this mstscax build QI(NS4) returns S_OK
+    // but maps to the NS3 vtable (no extra entries), so calling offset [28]+
+    // causes an access violation.  The per-server registry approach already
+    // handles PromptForCredsOnClient suppression more reliably.
     let mut ns5: *mut core::ffi::c_void = core::ptr::null_mut();
     let hr5 = qi(raw, &IID_NS5, &mut ns5);
     eprintln!("[rdp] QI NS5 hr=0x{:08X}", hr5 as u32);
