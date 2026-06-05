@@ -84,6 +84,70 @@ const IID_MSTSCAX_EVENTS: GUID = GUID::from_values(
 
 static RDP_AUTO_DISMISS_HOOK: AtomicIsize = AtomicIsize::new(0);
 
+// ── Cross-thread dialog watcher ───────────────────────────────────────────────
+//
+// The CBT thread hook only catches dialogs on the STA thread.  mstscax may
+// create clipboard/credential warning dialogs on worker threads.  This watcher
+// polls EnumWindows (all threads, our process) every 150 ms and auto-dismisses
+// any visible #32770 dialog with a default button.
+//
+// WATCHER_PID is set to our process ID before the watcher thread starts and
+// cleared when it exits so the EnumWindows callback can filter safely.
+
+static WATCHER_PID: AtomicU32 = AtomicU32::new(0);
+
+unsafe extern "system" fn watcher_dismiss_cb(hwnd: HWND, _: LPARAM) -> BOOL {
+    let our_pid = WATCHER_PID.load(Ordering::Relaxed);
+    if our_pid == 0 { return BOOL(0); }
+
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid != our_pid { return BOOL(1); }
+    if !IsWindowVisible(hwnd).as_bool() { return BOOL(1); }
+
+    let mut cls = [0u16; 16];
+    GetClassNameW(hwnd, &mut cls);
+    // "#32770" in UTF-16: [35, 51, 50, 55, 55, 48, 0]
+    if !(cls[0] == 35 && cls[1] == 51 && cls[2] == 50
+        && cls[3] == 55 && cls[4] == 55 && cls[5] == 48 && cls[6] == 0)
+    {
+        return BOOL(1);
+    }
+
+    let mut title = [0u16; 256];
+    GetWindowTextW(hwnd, &mut title);
+    let title_s = String::from_utf16_lossy(&title);
+    let title_trimmed = title_s.trim_end_matches('\0');
+    eprintln!("[rdp] watcher: visible dialog '{title_trimmed}'");
+
+    // Log buttons for diagnosis
+    unsafe extern "system" fn log_btn_w(child: HWND, _: LPARAM) -> BOOL {
+        let mut cls2 = [0u16; 32];
+        GetClassNameW(child, &mut cls2);
+        if String::from_utf16_lossy(&cls2).trim_end_matches('\0').eq_ignore_ascii_case("Button") {
+            let mut t = [0u16; 64];
+            let n = GetWindowTextW(child, &mut t);
+            let text = if n > 0 { String::from_utf16_lossy(&t[..n as usize]) } else { String::new() };
+            eprintln!("[rdp] watcher btn id={}: '{text}'", GetDlgCtrlID(child));
+        }
+        BOOL(1)
+    }
+    EnumChildWindows(Some(hwnd), Some(log_btn_w), LPARAM(0));
+
+    // DM_GETDEFID (WM_USER+0 = 0x400) returns (DC_HASDEFID<<16)|button_id
+    let r = SendMessageW(hwnd, 0x400u32, Some(WPARAM(0)), Some(LPARAM(0)));
+    let hi = ((r.0 as usize) >> 16) & 0xFFFF;
+    let lo = (r.0 as usize) & 0xFFFF;
+    if hi == 0xDC00 && lo > 0 {
+        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(lo), LPARAM(0));
+        eprintln!("[rdp] watcher: dismissed '{title_trimmed}' id={lo}");
+    } else if GetDlgItem(Some(hwnd), 1).is_ok() {
+        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(1), LPARAM(0));
+        eprintln!("[rdp] watcher: dismissed '{title_trimmed}' via IDOK(1)");
+    }
+    BOOL(1)
+}
+
 unsafe extern "system" fn log_and_find_btn(child: HWND, _: LPARAM) -> BOOL {
     let mut cls = [0u16; 32];
     GetClassNameW(child, &mut cls);
@@ -1012,6 +1076,25 @@ fn sta_thread(
             }
         }
 
+        // Cross-thread dialog watcher: polls EnumWindows every 150 ms so that
+        // clipboard/credential warning dialogs created on mstscax worker threads
+        // are also auto-dismissed (the CBT hook above only fires on this thread).
+        use windows::Win32::System::Threading::GetCurrentProcessId;
+        WATCHER_PID.store(GetCurrentProcessId(), Ordering::Relaxed);
+        let watcher_done = Arc::new(AtomicBool::new(false));
+        {
+            let done = watcher_done.clone();
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    unsafe { EnumWindows(Some(watcher_dismiss_cb), LPARAM(0)).ok() };
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                WATCHER_PID.store(0, Ordering::Relaxed);
+                eprintln!("[rdp] watcher thread exited");
+            });
+        }
+        eprintln!("[rdp] cross-thread watcher started");
+
         if let Err(e) = call_no_args(&disp, "Connect") {
             let _ = result_tx.send(Err(format!("RDP Connect(): {e}")));
             DestroyWindow(host_hwnd).ok();
@@ -1268,6 +1351,9 @@ fn sta_thread(
         if hook_raw != 0 {
             let _ = UnhookWindowsHookEx(HHOOK(hook_raw as *mut std::ffi::c_void));
         }
+
+        // Signal the cross-thread watcher to stop.
+        watcher_done.store(true, Ordering::Relaxed);
 
         // Unregister all COM event sink registrations before releasing.
         for (cp, cookie) in &cp_registrations {
