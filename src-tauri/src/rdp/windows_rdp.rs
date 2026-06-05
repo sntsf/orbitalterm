@@ -21,7 +21,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use tauri::Emitter;
-use windows::Win32::Foundation::{E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::*;
@@ -509,6 +509,9 @@ unsafe extern "system" fn ev_sink_invoke(
                         std::thread::sleep(Duration::from_millis(800));
 
                         let hwnd = HWND(hwnd_raw as *mut _);
+                        // Ensure host window is visible (alpha=0 keeps it transparent
+                        // to the user) so its ATL child can receive keyboard focus.
+                        ShowWindow(hwnd, SW_SHOW).ok();
                         // Bring our host window to the foreground so SendInput
                         // is delivered to the mstscax ATL window that has focus.
                         SetForegroundWindow(hwnd).ok();
@@ -1214,7 +1217,7 @@ fn sta_thread(
         // Never change the owner at runtime via SetWindowLongPtrW(GWLP_HWNDPARENT):
         // that sends a synchronous cross-thread Win32 message which deadlocks.
         let host_hwnd = match CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             HOST_CLASS, w!(""),
             WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
             sx, sy, w, h,
@@ -1227,6 +1230,13 @@ fn sta_thread(
                 return;
             }
         };
+
+        // Start fully transparent (alpha=0) so mstscax's NLA credential dialog is
+        // invisible to the user even if mstscax forces host_hwnd visible.  The ATL
+        // child window can still receive keyboard focus while transparent, which lets
+        // DISPID 18's SendInput injection work without any visible flash.
+        // When the session is established (rdp_connected=true) we switch to alpha=255.
+        SetLayeredWindowAttributes(host_hwnd, COLORREF(0), 0, LWA_ALPHA).ok();
 
         // HWND_TOP: owned popup (owner set in CreateWindowExW) stays above its
         // owner (Tauri) in z-order but is NOT always-on-top, so other applications
@@ -1557,6 +1567,7 @@ fn sta_thread(
                     }
                     Ok(ComCmd::Show) => {
                         if rdp_connected {
+                            SetLayeredWindowAttributes(host_hwnd, COLORREF(0), 255, LWA_ALPHA).ok();
                             let _ = ShowWindow(host_hwnd, SW_SHOW);
                             SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
@@ -1651,6 +1662,12 @@ fn sta_thread(
                         dispatch_errors = 0;
                         rdp_connected  = true;
                         ever_connected = true;
+                        // Session established — make window fully opaque and position
+                        // it correctly before showing so the user sees no flash.
+                        SetLayeredWindowAttributes(host_hwnd, COLORREF(0), 255, LWA_ALPHA).ok();
+                        let (tsx, tsy) = canvas_to_screen(parent, rel_x, rel_y);
+                        SetWindowPos(host_hwnd, Some(HWND_TOP), tsx, tsy, 0, 0,
+                            SWP_NOSIZE | SWP_NOACTIVATE).ok();
                         if show_pending {
                             show_pending = false;
                             let _ = ShowWindow(host_hwnd, SW_SHOW);
