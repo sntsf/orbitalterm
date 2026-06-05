@@ -806,7 +806,7 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
         // mstscax to prompt even though we wrote a correct one afterward.
         for cred_type in [CRED_TYPE_GENERIC, CRED_TYPE_DOMAIN_PASSWORD] {
             unsafe {
-                let ok = CredDeleteW(PCWSTR(target_wide.as_ptr()), cred_type, 0).is_ok();
+                let ok = CredDeleteW(PCWSTR(target_wide.as_ptr()), cred_type, Some(0)).is_ok();
                 if ok { eprintln!("[rdp] CredDeleteW {target} type={} cleared", cred_type.0); }
             }
         }
@@ -842,7 +842,7 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
         // Read back the DOMAIN_PASSWORD entry to confirm it was stored correctly.
         unsafe {
             let mut pcred: *mut CREDENTIALW = std::ptr::null_mut();
-            if CredReadW(PCWSTR(target_wide.as_ptr()), CRED_TYPE_DOMAIN_PASSWORD, 0,
+            if CredReadW(PCWSTR(target_wide.as_ptr()), CRED_TYPE_DOMAIN_PASSWORD, Some(0),
                          &mut pcred).is_ok() && !pcred.is_null()
             {
                 let c = &*pcred;
