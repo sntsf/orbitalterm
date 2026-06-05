@@ -582,15 +582,10 @@ fn suppress_rdp_server_registry(host: &str, port: u16, username: &str, domain: &
 //   1. Clipboard/redirect security warning (reverted by registry key above)
 //   2. "Windows Security – enter credentials" credential prompt
 unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
-    // NS3 B3378D90-0728-45C7-8ED7-B6159FB92219 (QI confirmed working)
-    // NS5 4EB5335B-6429-477D-B922-D06B48F2D364 (QI returns E_NOINTERFACE)
+    // Only NS3 is accessed via vtable; NS4/NS5 are skipped (see comment below).
     const IID_NS3: GUID = GUID::from_values(
         0xB3378D90, 0x0728, 0x45C7,
         [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19],
-    );
-    const IID_NS5: GUID = GUID::from_values(
-        0x4EB5335B, 0x6429, 0x477D,
-        [0xB9, 0x22, 0xD0, 0x6B, 0x48, 0xF2, 0xD3, 0x64],
     );
 
     type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
@@ -636,24 +631,12 @@ unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
         release(ns3);
     }
 
-    // ── NS5: AllowPromptingForCredentials ────────────────────────────────────
-    // NS5 vtable [35] put_AllowPromptingForCredentials
-    // NS4 is intentionally skipped: on this mstscax build QI(NS4) returns S_OK
-    // but maps to the NS3 vtable (no extra entries), so calling offset [28]+
-    // causes an access violation.  The per-server registry approach already
-    // handles PromptForCredsOnClient suppression more reliably.
-    let mut ns5: *mut core::ffi::c_void = core::ptr::null_mut();
-    let hr5 = qi(raw, &IID_NS5, &mut ns5);
-    eprintln!("[rdp] QI NS5 hr=0x{:08X}", hr5 as u32);
-    if hr5 >= 0 && !ns5.is_null() {
-        let v: *const usize = *(ns5 as *const *const usize);
-        // NS5 extends NS4 (ends at [33]); put_AllowPromptingForCredentials is [35]
-        let put_allow: PutBool = core::mem::transmute(*v.add(35));
-        let release: RelFn     = core::mem::transmute(*v.add(2));
-        let h = put_allow(ns5, 0i16);
-        eprintln!("[rdp] NS5 AllowPromptingForCredentials=0 hr=0x{:08X}", h as u32);
-        release(ns5);
-    }
+    // NS4 and NS5 vtable access is intentionally skipped.
+    // On this mstscax build QI(NS4) returns S_OK but maps to the NS3 vtable
+    // (no extra entries), causing an access violation at offset [28]+.
+    // NS5 may exhibit the same pattern at offset [35].
+    // The per-server registry approach handles all credential/prompt suppression
+    // more reliably without vtable hackery.
 }
 
 fn call_no_args(disp: &IDispatch, name: &str) -> windows::core::Result<()> {
