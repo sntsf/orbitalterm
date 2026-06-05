@@ -16,7 +16,7 @@
 //! creation. Tearout/dock-back just updates the tracked parent variable so
 //! canvas_to_screen() uses the correct reference window for positioning.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -70,6 +70,50 @@ const IID_MSTSCAX_EVENTS: GUID = GUID::from_values(
     0x336D5562, 0xEFA8, 0x482E,
     [0x8C, 0xB3, 0xC5, 0xC0, 0xFC, 0x7A, 0x7D, 0xB6],
 );
+
+// ── CBT hook: auto-dismiss mstscax dialog windows ────────────────────────────
+//
+// mstscax creates Win32 dialogs (#32770) on the STA thread for:
+//   • Clipboard / device-redirection security warnings (post-KB5057577)
+//   • Any other blocking warning dialogs
+//
+// We install a WH_CBT thread-local hook before calling Connect() so that
+// HCBT_ACTIVATE fires synchronously when any dialog is about to gain focus.
+// At that point we post WM_COMMAND(IDYES) if the dialog has a Yes/Allow button,
+// which the dialog's own message loop then processes — dismissing it before
+// the user sees it.  Dialogs without IDYES (credential prompts) are left alone.
+
+static RDP_AUTO_DISMISS_HOOK: AtomicIsize = AtomicIsize::new(0);
+
+unsafe extern "system" fn rdp_auto_dismiss_proc(
+    ncode: i32, wparam: WPARAM, lparam: LPARAM,
+) -> LRESULT {
+    // HCBT_ACTIVATE (5) fires just before a window gains focus.
+    if ncode == 5 {
+        let hwnd = HWND(wparam.0 as *mut _);
+        let mut cls = [0u16; 16];
+        GetClassNameW(hwnd, &mut cls);
+        // "#32770" in UTF-16: [35, 51, 50, 55, 55, 48, 0]
+        if cls[0] == 35 && cls[1] == 51 && cls[2] == 50
+            && cls[3] == 55 && cls[4] == 55 && cls[5] == 48 && cls[6] == 0
+        {
+            let mut title = [0u16; 256];
+            GetWindowTextW(hwnd, &mut title);
+            let title_s = String::from_utf16_lossy(&title);
+            let title_trimmed = title_s.trim_end_matches('\0');
+            eprintln!("[rdp] HCBT_ACTIVATE dialog: '{title_trimmed}'");
+            // Check for IDYES (6i32) — the "Allow/Permit" button in redirect warnings.
+            // Credential prompts use IDOK(1)/IDCANCEL(2) only and are left alone.
+            if GetDlgItem(Some(hwnd), 6).is_ok() {
+                // Post IDYES to the dialog's own message loop to accept without blocking.
+                let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(6), LPARAM(0));
+                eprintln!("[rdp] auto-dismissed: posted IDYES(6) to '{title_trimmed}'");
+            }
+        }
+    }
+    let hook = HHOOK(RDP_AUTO_DISMISS_HOOK.load(Ordering::Relaxed) as *mut _);
+    CallNextHookEx(Some(hook), ncode, wparam, lparam)
+}
 
 // IDispatch vtable layout (IUnknown × 3 + IDispatch × 4 = 7 entries).
 #[repr(C)]
@@ -898,13 +942,15 @@ fn sta_thread(
         // AdvancedSettings: password, security layer, and AuthenticationLevel.
         // AuthenticationLevel MUST be set on AdvancedSettings (not the main
         // client object) to actually suppress the "unknown certificate" warning.
-        let adv = get_dispatch_sub(&disp, "AdvancedSettings9")
-            .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings7"))
-            .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings5"))
-            .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings2"));
-        if let Ok(ref adv) = adv {
+        let adv_names = ["AdvancedSettings9","AdvancedSettings7","AdvancedSettings5","AdvancedSettings2"];
+        let adv = adv_names.iter().find_map(|name| {
+            get_dispatch_sub(&disp, name).ok().map(|d| { eprintln!("[rdp] AdvancedSettings: {name}"); d })
+        });
+        if let Some(ref adv) = adv {
             if let Some(ref pw) = params.password {
-                let _ = put_bstr(adv, "ClearTextPassword", pw);
+                let r = put_bstr(adv, "ClearTextPassword", pw);
+                eprintln!("[rdp] ClearTextPassword hr=0x{:08X}", r.as_ref().err()
+                    .map(|e| e.code().0 as u32).unwrap_or(0));
             }
             let _ = put_i4(adv, "RDPPort", params.port as i32);
             let _ = put_bool_prop(adv, "EnableCredSspSupport", true);
@@ -921,6 +967,20 @@ fn sta_thread(
 
         // WarnAbout* suppression via COM (best-effort; registry writes above are primary).
         suppress_rdp_dialogs(&rdp_unk);
+
+        // Install thread-local CBT hook to auto-dismiss any #32770 dialogs with
+        // an IDYES button (redirect/security warnings) before the user sees them.
+        // Installed just before Connect() so it's active during the whole session.
+        {
+            use windows::Win32::System::Threading::GetCurrentThreadId;
+            match SetWindowsHookExW(WH_CBT, Some(rdp_auto_dismiss_proc), None, GetCurrentThreadId()) {
+                Ok(hook) => {
+                    RDP_AUTO_DISMISS_HOOK.store(hook.0 as isize, Ordering::Relaxed);
+                    eprintln!("[rdp] CBT hook installed");
+                }
+                Err(e) => eprintln!("[rdp] CBT hook failed: {e:?}"),
+            }
+        }
 
         if let Err(e) = call_no_args(&disp, "Connect") {
             let _ = result_tx.send(Err(format!("RDP Connect(): {e}")));
@@ -1171,6 +1231,12 @@ fn sta_thread(
             }
 
             std::thread::sleep(Duration::from_millis(16));
+        }
+
+        // Remove the CBT hook now that the session is ending.
+        let hook_raw = RDP_AUTO_DISMISS_HOOK.swap(0, Ordering::Relaxed);
+        if hook_raw != 0 {
+            let _ = UnhookWindowsHookEx(HHOOK(hook_raw as *mut std::ffi::c_void));
         }
 
         // Unregister all COM event sink registrations before releasing.
