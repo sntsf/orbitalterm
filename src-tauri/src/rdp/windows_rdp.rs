@@ -22,13 +22,14 @@ use std::time::Duration;
 
 use tauri::Emitter;
 use windows::Win32::Foundation::{E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::Variant::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_TYPE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_RETURN, VK_TAB,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, Ref, PCWSTR};
@@ -1172,11 +1173,11 @@ fn register_cover_class() {
     unsafe {
         let hmod = GetModuleHandleW(None).unwrap_or_default();
         let wc = WNDCLASSW {
-            lpfnWndProc: Some(DefWindowProcW),
+            lpfnWndProc: Some(host_wnd_proc),
             lpszClassName: COVER_CLASS,
             hInstance: hmod.into(),
             // System "window" color brush (opaque white) — hides everything beneath.
-            hbrBackground: HBRUSH(6isize as *mut core::ffi::c_void),
+            hbrBackground: HBRUSH((5 + 1) as *mut core::ffi::c_void), // COLOR_WINDOW + 1
             ..Default::default()
         };
         RegisterClassW(&wc);
