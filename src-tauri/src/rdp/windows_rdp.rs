@@ -1142,23 +1142,21 @@ unsafe fn canvas_to_screen(hwnd: HWND, cx: i32, cy: i32) -> (i32, i32) {
 const HOST_CLASS: PCWSTR = w!("OrbRdpHostWnd");
 
 unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    // GWLP_USERDATA = 0 (default) → session not yet connected.
-    // Any ShowWindow / SetWindowPos(SWP_SHOWWINDOW) that mstscax sends to make the
-    // NLA credential dialog visible is redirected to the off-screen position
-    // (-32000, -32000) so the user never sees it.  The window remains WS_VISIBLE,
-    // which is required for the ATL child to receive keyboard focus, allowing
-    // DISPID 18's SendInput password injection to be delivered.
-    // GWLP_USERDATA = 1 → session connected: normal on-screen show is allowed.
-    if msg == WM_WINDOWPOSCHANGING {
+    if msg == WM_WINDOWPOSCHANGING && GetWindowLongPtrW(hwnd, GWLP_USERDATA) == 0 {
         let pos = lp.0 as *mut WINDOWPOS;
-        if !pos.is_null()
-            && (*pos).flags.0 & SWP_SHOWWINDOW.0 != 0
-            && GetWindowLongPtrW(hwnd, GWLP_USERDATA) == 0
-        {
-            (*pos).x = -32000;
-            (*pos).y = -32000;
-            (*pos).flags.0 &= !SWP_NOMOVE.0; // force our x/y to be applied
-            eprintln!("[rdp] host_wnd_proc: SWP_SHOWWINDOW → offscreen until connected");
+        if !pos.is_null() {
+            // While GWLP_USERDATA==0 (pre-connected), intercept both SWP_SHOWWINDOW and
+            // any plain repositioning. mstscax first shows with SWP_SHOWWINDOW, then sends
+            // a second position-only SetWindowPos to move the window back on-screen.
+            // Both must be redirected to (-32000,-32000) so the credential UI stays hidden.
+            if (*pos).flags.0 & SWP_SHOWWINDOW.0 != 0
+                || (*pos).flags.0 & SWP_NOMOVE.0 == 0
+            {
+                (*pos).x = -32000;
+                (*pos).y = -32000;
+                (*pos).flags.0 &= !SWP_NOMOVE.0;
+                eprintln!("[rdp] host_wnd_proc: forced offscreen (not yet connected)");
+            }
         }
     }
     DefWindowProcW(hwnd, msg, wp, lp)
