@@ -31,6 +31,18 @@ typedef void (*orb_frame_fn )(void *user_ctx,
 typedef void (*orb_error_fn )(void *user_ctx, const char *msg);
 
 /*
+ * Security mode values for orb_session_new security_mode parameter:
+ *   0 = negotiate  (FreeRDP default: NLA preferred, falls back to TLS/RDP)
+ *   1 = nla        (NLA only)
+ *   2 = tls        (TLS only, no NLA)
+ *   3 = rdp        (Classic RDP security, no NLA/TLS)
+ */
+#define ORB_SEC_NEGOTIATE 0
+#define ORB_SEC_NLA       1
+#define ORB_SEC_TLS       2
+#define ORB_SEC_RDP       3
+
+/*
  * orb_session_new – allocate and connect an RDP session.
  *
  * Returns NULL on allocation failure; connection errors are reported
@@ -44,6 +56,8 @@ OrbRdpSession *orb_session_new(const char   *host,
                                 uint16_t      width,
                                 uint16_t      height,
                                 bool          console_mode,
+                                int           security_mode, /* ORB_SEC_* */
+                                uint16_t      color_depth,   /* 8/15/16/24/32 */
                                 orb_frame_fn  on_frame,
                                 orb_error_fn  on_error,
                                 void         *user_ctx);

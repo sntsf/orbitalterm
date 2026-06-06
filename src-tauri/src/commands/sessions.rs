@@ -21,7 +21,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
     db.query_row(
         "SELECT id, name, type, host, port, username, auth_type, key_path,
                 folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
-                sort_order, group_id, icon, url, custom_hosts
+                sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -46,6 +46,8 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 icon: row.get::<_, String>(17).unwrap_or_default(),
                 url: row.get::<_, String>(18).unwrap_or_default(),
                 custom_hosts: row.get::<_, String>(19).unwrap_or_default(),
+                rdp_security: row.get::<_, String>(20).unwrap_or_else(|_| "negotiate".to_string()),
+                rdp_color_depth: row.get::<_, i64>(21).unwrap_or(32),
             })
         },
     )
@@ -304,6 +306,8 @@ pub async fn connect_rdp(
             w,
             h,
             connection.rdp_admin || admin_mode.unwrap_or(false),
+            &connection.rdp_security,
+            connection.rdp_color_depth as u16,
         )?;
         let width = session.width;
         let height = session.height;
@@ -339,6 +343,8 @@ pub async fn connect_rdp(
             w,
             h,
             connection.rdp_admin || admin_mode.unwrap_or(false),
+            &connection.rdp_security,
+            connection.rdp_color_depth as i32,
         )?;
 
         embedded_sessions.lock().unwrap().insert(session_id.clone(), session);

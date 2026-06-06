@@ -360,6 +360,7 @@ export function Sidebar() {
       folder_id: conn.folder_id, notes: conn.notes, description: conn.description,
       domain: conn.domain, rdp_admin: conn.rdp_admin, group_id: conn.group_id,
       icon: conn.icon, url: conn.url ?? "", custom_hosts: conn.custom_hosts ?? "",
+      rdp_security: conn.rdp_security ?? "negotiate", rdp_color_depth: conn.rdp_color_depth ?? 32,
     });
     await copyPassword(conn.id, created.id).catch(() => {});
     setConnections(await getConnections());

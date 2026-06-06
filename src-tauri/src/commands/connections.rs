@@ -35,7 +35,14 @@ pub struct Connection {
     pub url: String,
     #[serde(default)]
     pub custom_hosts: String,
+    #[serde(default = "default_rdp_security")]
+    pub rdp_security: String,
+    #[serde(default = "default_rdp_color_depth")]
+    pub rdp_color_depth: i64,
 }
+
+fn default_rdp_security() -> String { "negotiate".to_string() }
+fn default_rdp_color_depth() -> i64 { 32 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NewConnection {
@@ -61,6 +68,10 @@ pub struct NewConnection {
     pub url: String,
     #[serde(default)]
     pub custom_hosts: String,
+    #[serde(default = "default_rdp_security")]
+    pub rdp_security: String,
+    #[serde(default = "default_rdp_color_depth")]
+    pub rdp_color_depth: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -102,12 +113,14 @@ fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
         icon: row.get::<_, String>(17).unwrap_or_default(),
         url: row.get::<_, String>(18).unwrap_or_default(),
         custom_hosts: row.get::<_, String>(19).unwrap_or_default(),
+        rdp_security: row.get::<_, String>(20).unwrap_or_else(|_| "negotiate".to_string()),
+        rdp_color_depth: row.get::<_, i64>(21).unwrap_or(32),
     })
 }
 
 const SELECT_COLS: &str = "id, name, type, host, port, username, auth_type, key_path,
                            folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
-                           sort_order, group_id, icon, url, custom_hosts";
+                           sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth";
 
 #[tauri::command]
 pub fn get_connections() -> Result<Vec<Connection>, String> {
@@ -147,12 +160,12 @@ pub fn save_connection(conn: NewConnection) -> Result<Connection, String> {
         |row| row.get(0),
     ).unwrap_or(0);
     db.execute(
-        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
         params![id, conn.name, conn.conn_type, conn.host, conn.port,
                 conn.username, conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
                 conn.description, conn.domain, conn.rdp_admin as i64, sort_order, group_id,
-                conn.icon, conn.url, conn.custom_hosts],
+                conn.icon, conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth],
     )
     .map_err(|e| e.to_string())?;
 
@@ -170,11 +183,12 @@ pub fn update_connection(conn: Connection) -> Result<Connection, String> {
     db.execute(
         "UPDATE connections SET name=?1,type=?2,host=?3,port=?4,username=?5,
          auth_type=?6,key_path=?7,folder_id=?8,notes=?9,description=?10,domain=?11,
-         rdp_admin=?12,icon=?13,url=?14,custom_hosts=?15,updated_at=datetime('now') WHERE id=?16",
+         rdp_admin=?12,icon=?13,url=?14,custom_hosts=?15,rdp_security=?16,rdp_color_depth=?17,
+         updated_at=datetime('now') WHERE id=?18",
         params![conn.name, conn.conn_type, conn.host, conn.port, conn.username,
                 conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
                 conn.description, conn.domain, conn.rdp_admin as i64, conn.icon,
-                conn.url, conn.custom_hosts, conn.id],
+                conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.id],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)

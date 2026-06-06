@@ -1184,6 +1184,8 @@ struct LaunchParams {
     width: i32,
     height: i32,
     admin_mode: bool,
+    rdp_security: String,
+    color_depth: i32,
 }
 
 fn sta_thread(
@@ -1291,6 +1293,7 @@ fn sta_thread(
         let _ = ole_obj.SetHostNames(w!("OrbitalTerm"), w!(""));
 
         // NegotiateSecurityLayer must be set before DoVerb (vtable[12] on NS3).
+        // rdp_security="rdp" disables NLA + TLS (classic RDP, no DISPID 18 credential dialog).
         // All other NS3/NS5 dialog-suppression calls happen after DoVerb in
         // suppress_rdp_dialogs — calling them before activation crashes (AV).
         {
@@ -1305,8 +1308,11 @@ fn sta_thread(
                 let v: *const usize = *(ns3 as *const *const usize);
                 let put_neg_sec: PutBool = core::mem::transmute(*v.add(12));
                 let release: RelFn       = core::mem::transmute(*v.add(2));
-                let h = put_neg_sec(ns3, -1i16);
-                eprintln!("[rdp] pre-DoVerb NegotiateSecurityLayer=1 hr=0x{:08X}", h as u32);
+                // "rdp" = classic RDP security, disable NegotiateSecurityLayer
+                let neg_sec_val: i16 = if params.rdp_security == "rdp" { 0 } else { -1 };
+                let h = put_neg_sec(ns3, neg_sec_val);
+                eprintln!("[rdp] pre-DoVerb NegotiateSecurityLayer={} hr=0x{:08X}",
+                    if neg_sec_val == 0 { 0 } else { 1 }, h as u32);
                 release(ns3);
             }
         }
@@ -1381,10 +1387,17 @@ fn sta_thread(
                     .map(|e| e.code().0 as u32).unwrap_or(0));
             }
             let _ = put_i4(adv, "RDPPort", params.port as i32);
-            let _ = put_bool_prop(adv, "EnableCredSspSupport", true);
+            // NLA (CredSSP) is disabled for "rdp" and "tls" security modes.
+            let use_nla = params.rdp_security != "rdp" && params.rdp_security != "tls";
+            let _ = put_bool_prop(adv, "EnableCredSspSupport", use_nla);
+            eprintln!("[rdp] EnableCredSspSupport={use_nla} (security={})", params.rdp_security);
             let _ = put_bool_prop(adv, "SmartSizing", true);
             // 0 = always connect even if cert doesn't match → suppresses warning dialog
             let _ = put_i4(adv, "AuthenticationLevel", 0);
+            // Color depth (bits per pixel): 8, 15, 16, 24, or 32
+            if [8i32, 15, 16, 24, 32].contains(&params.color_depth) {
+                let _ = put_i4(adv, "ColorDepth", params.color_depth);
+            }
             // Enable clipboard redirect explicitly so WarnAboutClipboardRedirection
             // can be set to FALSE below without returning E_INVALIDARG.
             let _ = put_bool_prop(adv, "RedirectClipboard", true);
@@ -1787,6 +1800,8 @@ pub fn launch(
     width: i32,
     height: i32,
     admin_mode: bool,
+    rdp_security: &str,
+    color_depth: i32,
 ) -> Result<WindowsRdpSession, String> {
     let params = LaunchParams {
         app,
@@ -1799,6 +1814,8 @@ pub fn launch(
         password: password.map(str::to_string),
         x, y, width, height,
         admin_mode,
+        rdp_security: rdp_security.to_string(),
+        color_depth,
     };
     let (result_tx, result_rx) = mpsc::sync_channel::<Result<mpsc::SyncSender<ComCmd>, String>>(1);
     std::thread::spawn(move || sta_thread(params, result_tx));

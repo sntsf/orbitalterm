@@ -10,7 +10,7 @@ import {
   deletePassword,
   hasPassword,
 } from "../../lib/commands";
-import type { AuthType, ConnectionType } from "../../types";
+import type { AuthType, ConnectionType, RdpSecurity } from "../../types";
 import { CONN_ICONS, DEFAULT_CONN_ICON, ConnIconDisplay, type ConnIconKey } from "../../lib/connIcons";
 
 const DEFAULT_PORTS: Record<ConnectionType, number> = {
@@ -31,7 +31,7 @@ const AUTH_FOR_TYPE: Record<ConnectionType, AuthType[]> = {
   browser: [],
 };
 
-type FieldKey = "type" | "name" | "desc" | "host" | "port" | "user" | "auth" | "key" | "password" | "domain" | "notes" | "icon" | "url" | "customHosts";
+type FieldKey = "type" | "name" | "desc" | "host" | "port" | "user" | "auth" | "key" | "password" | "domain" | "notes" | "icon" | "url" | "customHosts" | "rdpSecurity" | "rdpColorDepth" | "rdpAdmin";
 
 const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string }>> = {
   es: {
@@ -49,6 +49,9 @@ const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string 
     icon:     { title: "Icono", body: "Icono visual que identifica el tipo o rol de este servidor en la lista de conexiones. Se asigna automáticamente según el tipo de conexión." },
     url:      { title: "URL", body: "Dirección web a la que se conectará el navegador integrado. Ejemplo: https://vcenter.empresa.local o 10.0.0.1. Si no incluye protocolo se usará https:// por defecto." },
     customHosts: { title: "Hosts personalizados", body: "Entradas DNS locales para esta conexión, con el mismo formato que /etc/hosts. Se aplican solo cuando este navegador está abierto, sin modificar el sistema. Ejemplo:\n10.0.0.5 vcenter.empresa.local" },
+    rdpSecurity: { title: "Seguridad RDP", body: "Protocolo de seguridad para la conexión RDP.\n• Automático (NLA): negocia el mejor protocolo disponible, preferiendo NLA (CredSSP).\n• Solo NLA: fuerza autenticación NLA. Requiere credenciales válidas en el dominio.\n• Solo TLS: usa TLS sin NLA. Útil cuando NLA falla pero se quiere cifrado.\n• RDP Clásico: seguridad RDP heredada sin NLA ni TLS. Usar para servidores antiguos o cuando NLA no está disponible." },
+    rdpColorDepth: { title: "Profundidad de color", body: "Bits por píxel para la sesión RDP. Mayor profundidad = mejor calidad visual pero más ancho de banda. 32 bits es el valor recomendado para conexiones rápidas." },
+    rdpAdmin: { title: "Modo administrador", body: "Conecta en modo consola/administrador (equivalente a /admin en mstsc). Útil para administrar servidores sin abrir una sesión de escritorio completa. Solo disponible en Windows Server." },
   },
   en: {
     type:     { title: "Connection type", body: "Protocol used to connect to the remote server: SSH (Linux/Unix), RDP (Windows), VNC (remote desktop), FTP or SFTP (file transfer)." },
@@ -65,6 +68,9 @@ const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string 
     icon:     { title: "Icon", body: "Visual icon that identifies the role of this server in the connection list. Auto-assigned based on connection type." },
     url:      { title: "URL", body: "The web address the embedded browser will open. Example: https://vcenter.company.local or 10.0.0.1. If no scheme is given, https:// is assumed." },
     customHosts: { title: "Custom hosts", body: "Per-connection DNS overrides in /etc/hosts format. Applied only while this browser window is open — the system hosts file is never modified. Example:\n10.0.0.5 vcenter.company.local" },
+    rdpSecurity: { title: "RDP Security", body: "Security protocol for the RDP connection.\n• Auto (NLA): negotiates the best available protocol, preferring NLA (CredSSP).\n• NLA only: forces NLA authentication. Requires valid domain credentials.\n• TLS only: uses TLS without NLA. Useful when NLA fails but encryption is needed.\n• Classic RDP: legacy RDP security without NLA or TLS. Use for older servers." },
+    rdpColorDepth: { title: "Color depth", body: "Bits per pixel for the RDP session. Higher depth = better visual quality but more bandwidth. 32-bit is recommended for fast connections." },
+    rdpAdmin: { title: "Admin mode", body: "Connect in console/admin mode (equivalent to /admin in mstsc). Useful for administering servers without opening a full desktop session. Only available on Windows Server." },
   },
 };
 
@@ -102,6 +108,8 @@ export function PropertiesPanel() {
   const [hasSaved, setHasSaved] = useState(false);
   const [folderId, setFolderId] = useState("");
   const [rdpAdmin, setRdpAdmin] = useState(false);
+  const [rdpSecurity, setRdpSecurity] = useState<RdpSecurity>("negotiate");
+  const [rdpColorDepth, setRdpColorDepth] = useState(32);
   const [notes, setNotes] = useState("");
   const [groupId, setGroupId] = useState("");
   const [icon, setIcon] = useState<string>("");
@@ -121,6 +129,8 @@ export function PropertiesPanel() {
       setUsername(existing.username);
       setDomain(existing.domain);
       setRdpAdmin(existing.rdp_admin ?? false);
+      setRdpSecurity((existing.rdp_security ?? "negotiate") as RdpSecurity);
+      setRdpColorDepth(existing.rdp_color_depth ?? 32);
       setAuthType(existing.auth_type);
       setKeyPath(existing.key_path);
       setFolderId(existing.folder_id ?? "");
@@ -145,6 +155,8 @@ export function PropertiesPanel() {
       setUsername("");
       setDomain("");
       setRdpAdmin(false);
+      setRdpSecurity("negotiate");
+      setRdpColorDepth(32);
       setAuthType("password");
       setKeyPath("");
       setPassword("");
@@ -199,6 +211,8 @@ export function PropertiesPanel() {
         username: username.trim(),
         domain: domain.trim(),
         rdp_admin: rdpAdmin,
+        rdp_security: rdpSecurity,
+        rdp_color_depth: rdpColorDepth,
         auth_type: authType,
         key_path: keyPath.trim(),
         folder_id: folderId || null,
@@ -403,6 +417,40 @@ export function PropertiesPanel() {
             <input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="WORKGROUP"
               onFocus={focus("domain")} onBlur={blur} className={inp} />
           </Row>
+        )}
+
+        {type === "rdp" && (
+          <>
+            <Row label={lang === "es" ? "Seguridad" : "Security"}>
+              <select value={rdpSecurity} onChange={(e) => setRdpSecurity(e.target.value as RdpSecurity)}
+                onFocus={focus("rdpSecurity")} onBlur={blur} className={inp}>
+                <option value="negotiate">{lang === "es" ? "Automático (NLA)" : "Auto (NLA)"}</option>
+                <option value="nla">{lang === "es" ? "Solo NLA" : "NLA only"}</option>
+                <option value="tls">{lang === "es" ? "Solo TLS" : "TLS only"}</option>
+                <option value="rdp">{lang === "es" ? "RDP Clásico" : "Classic RDP"}</option>
+              </select>
+            </Row>
+            <Row label={lang === "es" ? "Color" : "Color depth"}>
+              <select value={rdpColorDepth} onChange={(e) => setRdpColorDepth(Number(e.target.value))}
+                onFocus={focus("rdpColorDepth")} onBlur={blur} className={inp}>
+                <option value={32}>32 bit</option>
+                <option value={24}>24 bit</option>
+                <option value={16}>16 bit</option>
+                <option value={15}>15 bit</option>
+                <option value={8}>8 bit</option>
+              </select>
+            </Row>
+            <Row label={lang === "es" ? "Admin" : "Admin mode"}>
+              <label className="flex items-center gap-2 cursor-pointer pt-1"
+                onFocus={focus("rdpAdmin")} onBlur={blur} tabIndex={0}>
+                <input type="checkbox" checked={rdpAdmin} onChange={(e) => setRdpAdmin(e.target.checked)}
+                  className="accent-[var(--color-accent)]" />
+                <span className="text-[12px] text-[var(--color-text-muted)]">
+                  {lang === "es" ? "Modo consola/administrador" : "Console/admin mode"}
+                </span>
+              </label>
+            </Row>
+          </>
         )}
 
         {type === "browser" ? (
