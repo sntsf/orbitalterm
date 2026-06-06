@@ -1142,23 +1142,6 @@ unsafe fn canvas_to_screen(hwnd: HWND, cx: i32, cy: i32) -> (i32, i32) {
 const HOST_CLASS: PCWSTR = w!("OrbRdpHostWnd");
 
 unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if msg == WM_WINDOWPOSCHANGING && GetWindowLongPtrW(hwnd, GWLP_USERDATA) == 0 {
-        let pos = lp.0 as *mut WINDOWPOS;
-        if !pos.is_null() {
-            // While GWLP_USERDATA==0 (pre-connected), intercept both SWP_SHOWWINDOW and
-            // any plain repositioning. mstscax first shows with SWP_SHOWWINDOW, then sends
-            // a second position-only SetWindowPos to move the window back on-screen.
-            // Both must be redirected to (-32000,-32000) so the credential UI stays hidden.
-            if (*pos).flags.0 & SWP_SHOWWINDOW.0 != 0
-                || (*pos).flags.0 & SWP_NOMOVE.0 == 0
-            {
-                (*pos).x = -32000;
-                (*pos).y = -32000;
-                (*pos).flags.0 &= !SWP_NOMOVE.0;
-                eprintln!("[rdp] host_wnd_proc: forced offscreen (not yet connected)");
-            }
-        }
-    }
     DefWindowProcW(hwnd, msg, wp, lp)
 }
 
@@ -1169,6 +1152,31 @@ fn register_host_class() {
             lpfnWndProc: Some(host_wnd_proc),
             lpszClassName: HOST_CLASS,
             hInstance: hmod.into(),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+    }
+}
+
+// ── Cover window class ────────────────────────────────────────────────────────
+//
+// OrbRdpCoverWnd is a WS_EX_TOPMOST opaque overlay placed over the RDP canvas
+// for the duration of NLA authentication.  It hides both the host window's
+// white background and the mstscax ATL credential UI, which DirectX-renders
+// at screen coordinates independently of the host window's position.
+// The cover is destroyed (not just hidden) when the session ends.
+
+const COVER_CLASS: PCWSTR = w!("OrbRdpCoverWnd");
+
+fn register_cover_class() {
+    unsafe {
+        let hmod = GetModuleHandleW(None).unwrap_or_default();
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(DefWindowProcW),
+            lpszClassName: COVER_CLASS,
+            hInstance: hmod.into(),
+            // System "window" color brush (opaque white) — hides everything beneath.
+            hbrBackground: HBRUSH(6isize as *mut core::ffi::c_void),
             ..Default::default()
         };
         RegisterClassW(&wc);
@@ -1204,6 +1212,7 @@ fn sta_thread(
         }
 
         register_host_class();
+        register_cover_class();
 
         // Write registry suppression values and credentials BEFORE creating the COM
         // object so mstscax reads them at activation time (DoVerb/Connect).
@@ -1248,13 +1257,10 @@ fn sta_thread(
             }
         };
 
-        // HWND_TOP: owned popup (owner set in CreateWindowExW) stays above its
-        // owner (Tauri) in z-order but is NOT always-on-top, so other applications
-        // can be brought to the foreground normally.
-        // Start hidden (no SWP_SHOWWINDOW): mstscax's NLA ShowWindow attempts are
-        // intercepted by host_wnd_proc (GWLP_USERDATA=0) and redirected to -32000
-        // so the credential dialog is invisible.  After ConnectionState==2, we set
-        // GWLP_USERDATA=1 and reposition to the correct on-screen coordinates.
+        // HWND_TOP: owned popup stays above its owner (Tauri) in z-order but is
+        // NOT always-on-top, so other applications can be brought to the foreground.
+        // The cover window (WS_EX_TOPMOST) hides both this window and the ATL
+        // credential UI during NLA auth and is shown just below.
         SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, w, h,
             SWP_NOACTIVATE).ok();
 
@@ -1320,6 +1326,25 @@ fn sta_thread(
             }
         }
 
+        // ── Cover window ──────────────────────────────────────────────────────
+        // Show an opaque WS_EX_TOPMOST cover over the RDP canvas area now, before
+        // DoVerb / Connect activates mstscax.  This hides both the host window's
+        // blank background and the ATL DirectX credential UI that mstscax renders
+        // at the canvas screen coordinates during NLA authentication.
+        // The cover is hidden (and then destroyed) once the session connects.
+        let cover_hwnd: HWND = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            COVER_CLASS, w!(""),
+            WS_POPUP,
+            sx, sy, w, h,
+            Some(parent), None, Some(hmod.into()), None,
+        ).unwrap_or(HWND(core::ptr::null_mut()));
+        if !cover_hwnd.is_invalid() {
+            SetWindowPos(cover_hwnd, Some(HWND_TOPMOST), sx, sy, w, h,
+                SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
+            eprintln!("[rdp] cover window shown at ({sx},{sy}) {w}x{h}");
+        }
+
         let mut rc = RECT { left: 0, top: 0, right: w, bottom: h };
 
         let dv_result = ole_obj.DoVerb(-5i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
@@ -1335,6 +1360,7 @@ fn sta_thread(
             Ok(d) => d,
             Err(e) => {
                 let _ = result_tx.send(Err(format!("IDispatch QI: {e}")));
+                if !cover_hwnd.is_invalid() { DestroyWindow(cover_hwnd).ok(); }
                 DestroyWindow(host_hwnd).ok();
                 CoUninitialize();
                 return;
@@ -1460,6 +1486,7 @@ fn sta_thread(
 
         if let Err(e) = call_no_args(&disp, "Connect") {
             let _ = result_tx.send(Err(format!("RDP Connect(): {e}")));
+            if !cover_hwnd.is_invalid() { DestroyWindow(cover_hwnd).ok(); }
             DestroyWindow(host_hwnd).ok();
             CoUninitialize();
             return;
@@ -1579,7 +1606,6 @@ fn sta_thread(
                     }
                     Ok(ComCmd::Show) => {
                         if rdp_connected {
-                            SetWindowLongPtrW(host_hwnd, GWLP_USERDATA, 1);
                             let _ = ShowWindow(host_hwnd, SW_SHOW);
                             SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
@@ -1674,18 +1700,19 @@ fn sta_thread(
                         dispatch_errors = 0;
                         rdp_connected  = true;
                         ever_connected = true;
-                        // Session connected: unlock on-screen show and reposition the
-                        // window from the offscreen position (-32000) to where it belongs.
-                        SetWindowLongPtrW(host_hwnd, GWLP_USERDATA, 1);
+                        show_pending   = false;
+                        // Hide the cover now that auth is complete, then bring
+                        // the session window to the foreground.
+                        if !cover_hwnd.is_invalid() {
+                            ShowWindow(cover_hwnd, SW_HIDE).ok();
+                        }
                         let (tsx, tsy) = canvas_to_screen(parent, rel_x, rel_y);
                         SetWindowPos(host_hwnd, Some(HWND_TOP), tsx, tsy, 0, 0,
                             SWP_NOSIZE | SWP_NOACTIVATE).ok();
-                        if show_pending {
-                            show_pending = false;
-                            let _ = ShowWindow(host_hwnd, SW_SHOW);
-                            SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
-                        }
+                        let _ = ShowWindow(host_hwnd, SW_SHOW);
+                        SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
+                        eprintln!("[rdp] cover hidden — session connected at ({tsx},{tsy})");
                     }
                     // States 0 (NOT_CONNECTED) or 3 (DISCONNECTING) after being connected
                     Ok(0) | Ok(3) if rdp_connected => {
@@ -1748,8 +1775,8 @@ fn sta_thread(
             ).ok();
         }
 
-        SetWindowLongPtrW(host_hwnd, GWLP_USERDATA, 0);
         let _ = ole_obj.SetClientSite(None);
+        if !cover_hwnd.is_invalid() { DestroyWindow(cover_hwnd).ok(); }
         DestroyWindow(host_hwnd).ok();
         drop(disp);
         drop(ole_obj);
