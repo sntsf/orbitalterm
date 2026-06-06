@@ -1666,11 +1666,12 @@ fn sta_thread(
                 eprintln!("[rdp] login complete — session armed for disconnect detection");
             }
 
-            // DISPID 4 = OnDisconnected: session ended — hide popup and exit loop.
-            // Guard with ever_connected so a failed/rejected connection attempt
-            // (no DISPID 3) doesn't close the tab; the user can retry.
-            if ever_connected && event_disconnected.load(Ordering::SeqCst) {
-                eprintln!("[rdp] OnDisconnected event — closing session");
+            // DISPID 4 = OnDisconnected: session ended — hide cover and exit loop.
+            // Always handle disconnect regardless of ever_connected; if login never
+            // completed (e.g. discReason=516 encryption error) the cover window must
+            // be hidden or the user sees a permanent blank screen.
+            if event_disconnected.load(Ordering::SeqCst) {
+                eprintln!("[rdp] OnDisconnected event (ever_connected={ever_connected}) — closing session");
                 rdp_connected = false;
                 show_pending  = false;
                 let _ = ShowWindow(host_hwnd, SW_HIDE);
@@ -1719,6 +1720,13 @@ fn sta_thread(
                         let _ = ShowWindow(host_hwnd, SW_HIDE);
                         break 'outer;
                     }
+                    // State 0 when we never connected: connection attempt failed
+                    // (event sink may not have fired DISPID 4). Exit so the tab closes.
+                    Ok(0) if !rdp_connected && !ever_connected => {
+                        eprintln!("[rdp] ConnectionState=0 without login — connection failed");
+                        show_pending = false;
+                        break 'outer;
+                    }
                     Ok(_) => { dispatch_errors = 0; }
                     Err(_) if rdp_connected => {
                         // COM error while connected: count consecutive failures.
@@ -1763,15 +1771,13 @@ fn sta_thread(
         drop(cp_registrations);
 
         // Notify the frontend regardless of WHY the loop exited (user log-off,
-        // WM_QUIT from mstscax, parent window destroyed, explicit Disconnect cmd).
-        // The listener in RdpPane is already unregistered if the tab was manually
-        // closed, so this is a no-op in that case.
-        if ever_connected {
-            params.app.emit(
-                &format!("rdp-disconnected-{}", params.session_id),
-                (),
-            ).ok();
-        }
+        // WM_QUIT from mstscax, parent window destroyed, explicit Disconnect cmd,
+        // or failed connection attempt). The listener in RdpPane is already
+        // unregistered if the tab was manually closed, so this is a no-op then.
+        params.app.emit(
+            &format!("rdp-disconnected-{}", params.session_id),
+            (),
+        ).ok();
 
         let _ = ole_obj.SetClientSite(None);
         if !cover_hwnd.is_invalid() { DestroyWindow(cover_hwnd).ok(); }
