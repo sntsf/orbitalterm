@@ -21,7 +21,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use tauri::Emitter;
-use windows::Win32::Foundation::{COLORREF, E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::*;
@@ -1142,6 +1142,25 @@ unsafe fn canvas_to_screen(hwnd: HWND, cx: i32, cy: i32) -> (i32, i32) {
 const HOST_CLASS: PCWSTR = w!("OrbRdpHostWnd");
 
 unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // GWLP_USERDATA = 0 (default) → session not yet connected.
+    // Any ShowWindow / SetWindowPos(SWP_SHOWWINDOW) that mstscax sends to make the
+    // NLA credential dialog visible is redirected to the off-screen position
+    // (-32000, -32000) so the user never sees it.  The window remains WS_VISIBLE,
+    // which is required for the ATL child to receive keyboard focus, allowing
+    // DISPID 18's SendInput password injection to be delivered.
+    // GWLP_USERDATA = 1 → session connected: normal on-screen show is allowed.
+    if msg == WM_WINDOWPOSCHANGING {
+        let pos = lp.0 as *mut WINDOWPOS;
+        if !pos.is_null()
+            && (*pos).flags.0 & SWP_SHOWWINDOW.0 != 0
+            && GetWindowLongPtrW(hwnd, GWLP_USERDATA) == 0
+        {
+            (*pos).x = -32000;
+            (*pos).y = -32000;
+            (*pos).flags.0 &= !SWP_NOMOVE.0; // force our x/y to be applied
+            eprintln!("[rdp] host_wnd_proc: SWP_SHOWWINDOW → offscreen until connected");
+        }
+    }
     DefWindowProcW(hwnd, msg, wp, lp)
 }
 
@@ -1217,7 +1236,7 @@ fn sta_thread(
         // Never change the owner at runtime via SetWindowLongPtrW(GWLP_HWNDPARENT):
         // that sends a synchronous cross-thread Win32 message which deadlocks.
         let host_hwnd = match CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+            WS_EX_TOOLWINDOW,
             HOST_CLASS, w!(""),
             WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
             sx, sy, w, h,
@@ -1231,18 +1250,13 @@ fn sta_thread(
             }
         };
 
-        // Start fully transparent (alpha=0) so mstscax's NLA credential dialog is
-        // invisible to the user even if mstscax forces host_hwnd visible.  The ATL
-        // child window can still receive keyboard focus while transparent, which lets
-        // DISPID 18's SendInput injection work without any visible flash.
-        // When the session is established (rdp_connected=true) we switch to alpha=255.
-        SetLayeredWindowAttributes(host_hwnd, COLORREF(0), 0, LWA_ALPHA).ok();
-
         // HWND_TOP: owned popup (owner set in CreateWindowExW) stays above its
         // owner (Tauri) in z-order but is NOT always-on-top, so other applications
         // can be brought to the foreground normally.
-        // Start hidden: shown by the tick once ConnectionState == 2, so no white
-        // flash appears during NLA/cert authentication dialogs.
+        // Start hidden (no SWP_SHOWWINDOW): mstscax's NLA ShowWindow attempts are
+        // intercepted by host_wnd_proc (GWLP_USERDATA=0) and redirected to -32000
+        // so the credential dialog is invisible.  After ConnectionState==2, we set
+        // GWLP_USERDATA=1 and reposition to the correct on-screen coordinates.
         SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, w, h,
             SWP_NOACTIVATE).ok();
 
@@ -1567,7 +1581,7 @@ fn sta_thread(
                     }
                     Ok(ComCmd::Show) => {
                         if rdp_connected {
-                            SetLayeredWindowAttributes(host_hwnd, COLORREF(0), 255, LWA_ALPHA).ok();
+                            SetWindowLongPtrW(host_hwnd, GWLP_USERDATA, 1);
                             let _ = ShowWindow(host_hwnd, SW_SHOW);
                             SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
@@ -1662,9 +1676,9 @@ fn sta_thread(
                         dispatch_errors = 0;
                         rdp_connected  = true;
                         ever_connected = true;
-                        // Session established — make window fully opaque and position
-                        // it correctly before showing so the user sees no flash.
-                        SetLayeredWindowAttributes(host_hwnd, COLORREF(0), 255, LWA_ALPHA).ok();
+                        // Session connected: unlock on-screen show and reposition the
+                        // window from the offscreen position (-32000) to where it belongs.
+                        SetWindowLongPtrW(host_hwnd, GWLP_USERDATA, 1);
                         let (tsx, tsy) = canvas_to_screen(parent, rel_x, rel_y);
                         SetWindowPos(host_hwnd, Some(HWND_TOP), tsx, tsy, 0, 0,
                             SWP_NOSIZE | SWP_NOACTIVATE).ok();
@@ -1736,6 +1750,7 @@ fn sta_thread(
             ).ok();
         }
 
+        SetWindowLongPtrW(host_hwnd, GWLP_USERDATA, 0);
         let _ = ole_obj.SetClientSite(None);
         DestroyWindow(host_hwnd).ok();
         drop(disp);
