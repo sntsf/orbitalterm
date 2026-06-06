@@ -521,8 +521,9 @@ unsafe extern "system" fn ev_sink_invoke(
             if let Some(ref pw) = &inner.password {
                 let pw_clone = pw.clone();
                 std::thread::spawn(move || unsafe {
-                    // Wait for the credential UI to finish rendering and gain focus.
-                    std::thread::sleep(Duration::from_millis(600));
+                    // Wait for the credential UI to finish rendering and acquire focus.
+                    // 1000ms is more conservative than 600ms to handle slow NLA roundtrips.
+                    std::thread::sleep(Duration::from_millis(1000));
 
                     let mut inputs: Vec<INPUT> = Vec::new();
                     let ki = |vk: u16, scan: u16, flags: u32| INPUT {
@@ -538,8 +539,18 @@ unsafe extern "system" fn ev_sink_invoke(
                         },
                     };
 
-                    // mstscax pre-fills the username and focuses the password field;
-                    // no Tab needed (Tab would shift focus to the Connect button).
+                    // Ctrl+A to select any pre-filled content (mstscax may populate
+                    // the password field from ClearTextPassword after a failed NLA
+                    // attempt; typing would then append rather than replace).
+                    // VK_CONTROL=0x11, VK_A=0x41
+                    inputs.push(ki(0x11, 0, 0));
+                    inputs.push(ki(0x41, 0, 0));
+                    inputs.push(ki(0x41, 0, KEYEVENTF_KEYUP.0));
+                    inputs.push(ki(0x11, 0, KEYEVENTF_KEYUP.0));
+
+                    // Type the password — replaces any selected content.
+                    // mstscax focuses the password field; no Tab needed (Tab would
+                    // shift focus to the Connect button instead).
                     for ch in pw_clone.encode_utf16() {
                         inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0));
                         inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0));
