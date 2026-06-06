@@ -1671,13 +1671,25 @@ fn sta_thread(
             // is handled correctly (ever_connected set before disconnect check).
 
             // DISPID 3 = OnLoginComplete: Windows session login succeeded.
-            // This is our primary ever_connected signal because all events —
-            // including both DISPID 3 and DISPID 4 — can arrive in a single
-            // message-pump pass before the first 100ms polling tick fires.
+            // Show the host window immediately here rather than waiting for the
+            // 100ms ConnectionState poll — the poll can miss state=2 if it fires
+            // during the brief auth→desktop transition where state changes quickly.
             if event_logged_in.load(Ordering::SeqCst) {
                 event_logged_in.store(false, Ordering::SeqCst);
                 ever_connected = true;
-                eprintln!("[rdp] login complete — session armed for disconnect detection");
+                rdp_connected  = true;
+                show_pending   = false;
+                // Hide cover (no-op if already hidden) and reveal the RDP window.
+                if !cover_hwnd.is_invalid() {
+                    let _ = ShowWindow(cover_hwnd, SW_HIDE);
+                }
+                let (tsx, tsy) = canvas_to_screen(parent, rel_x, rel_y);
+                SetWindowPos(host_hwnd, Some(HWND_TOP), tsx, tsy, 0, 0,
+                    SWP_NOSIZE | SWP_NOACTIVATE).ok();
+                let _ = ShowWindow(host_hwnd, SW_SHOW);
+                SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
+                eprintln!("[rdp] login complete — session window shown at ({tsx},{tsy})");
             }
 
             // DISPID 4 = OnDisconnected: session ended — hide cover and exit loop.
