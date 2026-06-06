@@ -494,67 +494,51 @@ unsafe extern "system" fn ev_sink_invoke(
     eprintln!("[rdp-event] DISPID {dispid}");
     match dispid {
         18 => {
-            // DISPID 18 fires when the mstscax credential dialog appears.
-            // The dialog is rendered as DirectX inside the ATL control window
-            // (class ATL:…) — there are no Win32 child edit controls to fill
-            // with WM_SETTEXT.  The only reliable path is SendInput: bring
-            // the host HWND to the foreground, then inject
-            //   Tab (move username→password field) + password chars + Enter.
+            // DISPID 18 fires when the mstscax credential dialog is ready for input.
+            // The dialog lives inside the ATL control window (class ATL:…) and is
+            // rendered via DirectX — no Win32 child edit controls exist to fill with
+            // WM_SETTEXT.  The only reliable path is SendInput.
+            //
+            // With the cover-window approach the ATL credential field already has
+            // keyboard focus (mstscax focused it as part of the in-place activation).
+            // We must NOT call SetForegroundWindow(host_hwnd) here: doing so moves
+            // focus from the ATL password field to the WS_POPUP parent, causing
+            // SendInput keystrokes to land on the wrong window and auth to fail.
+            //
             // We spawn a thread so we do not block the COM STA message pump.
             eprintln!("[rdp-event] DISPID 18 — credential dialog visible; injecting password");
-            if let (Some(ref pw), hwnd_raw) = (&inner.password, inner.host_hwnd_raw) {
-                if hwnd_raw != 0 {
-                    let pw_clone = pw.clone();
-                    std::thread::spawn(move || unsafe {
-                        // Give the credential UI time to finish rendering.
-                        std::thread::sleep(Duration::from_millis(800));
+            if let Some(ref pw) = &inner.password {
+                let pw_clone = pw.clone();
+                std::thread::spawn(move || unsafe {
+                    // Wait for the credential UI to finish rendering and gain focus.
+                    std::thread::sleep(Duration::from_millis(600));
 
-                        let hwnd = HWND(hwnd_raw as *mut _);
-                        // Ensure host window is visible (alpha=0 keeps it transparent
-                        // to the user) so its ATL child can receive keyboard focus.
-                        ShowWindow(hwnd, SW_SHOW).ok();
-                        // Bring our host window to the foreground so SendInput
-                        // is delivered to the mstscax ATL window that has focus.
-                        SetForegroundWindow(hwnd).ok();
-                        std::thread::sleep(Duration::from_millis(200));
-
-                        let mut inputs: Vec<INPUT> = Vec::new();
-
-                        // Helper to build a keyboard INPUT entry.
-                        let ki = |vk: u16, scan: u16, flags: u32| INPUT {
-                            r#type: INPUT_TYPE(1), // INPUT_KEYBOARD
-                            Anonymous: INPUT_0 {
-                                ki: KEYBDINPUT {
-                                    wVk: VIRTUAL_KEY(vk),
-                                    wScan: scan,
-                                    dwFlags: KEYBD_EVENT_FLAGS(flags),
-                                    time: 0,
-                                    dwExtraInfo: 0,
-                                },
+                    let mut inputs: Vec<INPUT> = Vec::new();
+                    let ki = |vk: u16, scan: u16, flags: u32| INPUT {
+                        r#type: INPUT_TYPE(1),
+                        Anonymous: INPUT_0 {
+                            ki: KEYBDINPUT {
+                                wVk: VIRTUAL_KEY(vk),
+                                wScan: scan,
+                                dwFlags: KEYBD_EVENT_FLAGS(flags),
+                                time: 0,
+                                dwExtraInfo: 0,
                             },
-                        };
+                        },
+                    };
 
-                        // mstscax pre-fills the username from the UserName property
-                        // and focuses the password field by default — no Tab needed.
-                        // (Sending Tab would move focus AWAY from the password field
-                        //  to the Connect button, causing the first auth attempt to
-                        //  submit an empty password.)
-                        //
-                        // Type each UTF-16 code unit as a Unicode hardware key event
-                        // (works for all characters, including non-ASCII passwords).
-                        for ch in pw_clone.encode_utf16() {
-                            inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0));
-                            inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0));
-                        }
+                    // mstscax pre-fills the username and focuses the password field;
+                    // no Tab needed (Tab would shift focus to the Connect button).
+                    for ch in pw_clone.encode_utf16() {
+                        inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0));
+                        inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0));
+                    }
+                    inputs.push(ki(VK_RETURN.0, 0, 0));
+                    inputs.push(ki(VK_RETURN.0, 0, KEYEVENTF_KEYUP.0));
 
-                        // Enter: submit the credential dialog.
-                        inputs.push(ki(VK_RETURN.0, 0, 0));
-                        inputs.push(ki(VK_RETURN.0, 0, KEYEVENTF_KEYUP.0));
-
-                        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                        eprintln!("[rdp] credential keystrokes injected: {sent}/{} inputs", inputs.len());
-                    });
-                }
+                    let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                    eprintln!("[rdp] credential keystrokes injected: {sent}/{} inputs", inputs.len());
+                });
             }
         }
         3 => {
