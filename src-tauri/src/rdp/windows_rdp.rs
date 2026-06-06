@@ -419,8 +419,11 @@ struct EvSinkInner {
     disconnected: Arc<AtomicBool>, // DISPID 4 = OnDisconnected
     // DISPID 18 = credential dialog shown (DirectX-rendered inside ATL window).
     // We inject Tab + password + Enter via SendInput to fill it automatically.
-    password:     Option<String>,
+    password:      Option<String>,
     host_hwnd_raw: isize,
+    // The cover window is hidden when DISPID 18 fires so that if the automatic
+    // credential injection fails the user can see and interact with the prompt.
+    cover_hwnd_raw: isize,
 }
 
 // SAFETY: only ever accessed on the COM STA thread; Arc fields are Send+Sync.
@@ -507,6 +510,14 @@ unsafe extern "system" fn ev_sink_invoke(
             //
             // We spawn a thread so we do not block the COM STA message pump.
             eprintln!("[rdp-event] DISPID 18 — credential dialog visible; injecting password");
+            // Hide the cover window now so the mstscax credential dialog is reachable.
+            // If auto-injection succeeds the cover was already hidden; if it fails the
+            // user can see and interact with the credential prompt directly.
+            let cover_raw = inner.cover_hwnd_raw;
+            if cover_raw != 0 {
+                ShowWindow(HWND(cover_raw as *mut _), SW_HIDE).ok();
+                eprintln!("[rdp] cover hidden for credential dialog");
+            }
             if let Some(ref pw) = &inner.password {
                 let pw_clone = pw.clone();
                 std::thread::spawn(move || unsafe {
@@ -582,6 +593,7 @@ fn new_event_sink(
     disconnected: Arc<AtomicBool>,
     password: Option<String>,
     host_hwnd_raw: isize,
+    cover_hwnd_raw: isize,
 ) -> IUnknown {
     let inner = Box::new(EvSinkInner {
         vtbl: &EV_SINK_VTBL,
@@ -590,6 +602,7 @@ fn new_event_sink(
         disconnected,
         password,
         host_hwnd_raw,
+        cover_hwnd_raw,
     });
     unsafe { <IUnknown as Interface>::from_raw(Box::into_raw(inner) as *mut _) }
 }
@@ -1511,6 +1524,7 @@ fn sta_thread(
                 event_disconnected.clone(),
                 params.password.clone(),
                 host_hwnd.0 as isize,
+                cover_hwnd.0 as isize,
             );
 
             // Try the well-known DIID_IMsTscAxEvents IID first.
