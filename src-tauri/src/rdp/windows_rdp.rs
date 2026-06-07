@@ -520,17 +520,31 @@ unsafe extern "system" fn ev_sink_invoke(
             }
             if let Some(ref pw) = &inner.password {
                 let pw_clone = pw.clone();
+                let host_hwnd_raw = inner.host_hwnd_raw;
                 std::thread::spawn(move || unsafe {
                     use windows::Win32::System::DataExchange::{
                         OpenClipboard, EmptyClipboard, SetClipboardData, CloseClipboard,
                     };
                     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
                     use windows::Win32::Foundation::HANDLE;
+                    use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, BringWindowToTop};
                     // CF_UNICODETEXT = 13 (standard Windows clipboard format constant)
                     const CF_UNICODETEXT: u32 = 13;
 
-                    // Wait for the credential UI to finish rendering and acquire focus.
-                    std::thread::sleep(Duration::from_millis(1000));
+                    // Wait for the credential UI to finish rendering.
+                    std::thread::sleep(Duration::from_millis(800));
+
+                    // Bring the RDP host window to the foreground so that SendInput
+                    // reaches the mstscax credential dialog.  The dialog is rendered
+                    // inside the ATL DirectX surface (not a separate top-level HWND),
+                    // so keyboard events must be routed through the host window's
+                    // message queue.
+                    let host = HWND(host_hwnd_raw as *mut _);
+                    BringWindowToTop(host).ok();
+                    let fg_ok = SetForegroundWindow(host).as_bool();
+                    eprintln!("[rdp] SetForegroundWindow(host) -> {fg_ok}");
+                    // Give the OS time to transfer focus before sending input.
+                    std::thread::sleep(Duration::from_millis(200));
 
                     // Use clipboard paste instead of KEYEVENTF_UNICODE to inject the
                     // password.  KEYEVENTF_UNICODE (VK_PACKET) is unreliable for
