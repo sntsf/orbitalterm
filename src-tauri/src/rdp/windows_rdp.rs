@@ -521,11 +521,46 @@ unsafe extern "system" fn ev_sink_invoke(
             if let Some(ref pw) = &inner.password {
                 let pw_clone = pw.clone();
                 std::thread::spawn(move || unsafe {
+                    use windows::Win32::System::DataExchange::{
+                        OpenClipboard, EmptyClipboard, SetClipboardData, CloseClipboard, CF_UNICODETEXT,
+                    };
+                    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+                    use windows::Win32::Foundation::HANDLE;
+
                     // Wait for the credential UI to finish rendering and acquire focus.
-                    // 1000ms is more conservative than 600ms to handle slow NLA roundtrips.
                     std::thread::sleep(Duration::from_millis(1000));
 
-                    let mut inputs: Vec<INPUT> = Vec::new();
+                    // Use clipboard paste instead of KEYEVENTF_UNICODE to inject the
+                    // password.  KEYEVENTF_UNICODE (VK_PACKET) is unreliable for
+                    // non-ASCII characters (e.g. £, €) in the mstscax ATL DirectX
+                    // credential UI — the field may receive some characters but silently
+                    // drop others, producing a truncated or corrupted password.
+                    // Ctrl+V paste uses the clipboard data mechanism which is encoding-
+                    // agnostic and works for any Unicode password.
+                    let mut wide: Vec<u16> = pw_clone.encode_utf16().chain(Some(0u16)).collect();
+                    let byte_len = wide.len() * std::mem::size_of::<u16>();
+                    let mut clipboard_ok = false;
+                    if let Ok(hglob) = GlobalAlloc(GMEM_MOVEABLE, byte_len) {
+                        let ptr = GlobalLock(hglob);
+                        if !ptr.is_null() {
+                            std::ptr::copy_nonoverlapping(
+                                wide.as_ptr() as *const u8, ptr as *mut u8, byte_len,
+                            );
+                            let _ = GlobalUnlock(hglob);
+                        }
+                        if OpenClipboard(None).is_ok() {
+                            let _ = EmptyClipboard();
+                            // After SetClipboardData the clipboard owns hglob; don't GlobalFree it.
+                            if SetClipboardData(CF_UNICODETEXT, HANDLE(hglob.0 as *mut _)).is_ok() {
+                                clipboard_ok = true;
+                                eprintln!("[rdp] clipboard loaded with password ({} chars)", pw_clone.chars().count());
+                            } else {
+                                eprintln!("[rdp] SetClipboardData failed; falling back to key events");
+                            }
+                            let _ = CloseClipboard();
+                        }
+                    }
+
                     let ki = |vk: u16, scan: u16, flags: u32| INPUT {
                         r#type: INPUT_TYPE(1),
                         Anonymous: INPUT_0 {
@@ -538,28 +573,41 @@ unsafe extern "system" fn ev_sink_invoke(
                             },
                         },
                     };
+                    let kup = KEYEVENTF_KEYUP.0;
 
-                    // Ctrl+A to select any pre-filled content (mstscax may populate
-                    // the password field from ClearTextPassword after a failed NLA
-                    // attempt; typing would then append rather than replace).
-                    // VK_CONTROL=0x11, VK_A=0x41
-                    inputs.push(ki(0x11, 0, 0));
-                    inputs.push(ki(0x41, 0, 0));
-                    inputs.push(ki(0x41, 0, KEYEVENTF_KEYUP.0));
-                    inputs.push(ki(0x11, 0, KEYEVENTF_KEYUP.0));
+                    let mut inputs: Vec<INPUT> = Vec::new();
+                    // Ctrl+A — select any pre-filled content before pasting/typing.
+                    inputs.push(ki(0x11, 0, 0));   // VK_CONTROL down
+                    inputs.push(ki(0x41, 0, 0));   // 'A' down
+                    inputs.push(ki(0x41, 0, kup)); // 'A' up
+                    inputs.push(ki(0x11, 0, kup)); // VK_CONTROL up
 
-                    // Type the password — replaces any selected content.
-                    // mstscax focuses the password field; no Tab needed (Tab would
-                    // shift focus to the Connect button instead).
-                    for ch in pw_clone.encode_utf16() {
-                        inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0));
-                        inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0));
+                    if clipboard_ok {
+                        // Ctrl+V — paste from clipboard (handles £, € and all Unicode).
+                        inputs.push(ki(0x11, 0, 0));   // VK_CONTROL down
+                        inputs.push(ki(0x56, 0, 0));   // 'V' down
+                        inputs.push(ki(0x56, 0, kup)); // 'V' up
+                        inputs.push(ki(0x11, 0, kup)); // VK_CONTROL up
+                    } else {
+                        // Fallback: inject each UTF-16 code unit as a Unicode key event.
+                        for ch in pw_clone.encode_utf16() {
+                            inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0));
+                            inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0 | kup));
+                        }
                     }
                     inputs.push(ki(VK_RETURN.0, 0, 0));
-                    inputs.push(ki(VK_RETURN.0, 0, KEYEVENTF_KEYUP.0));
+                    inputs.push(ki(VK_RETURN.0, 0, kup));
 
                     let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                    eprintln!("[rdp] credential keystrokes injected: {sent}/{} inputs", inputs.len());
+                    eprintln!("[rdp] credential inputs sent: {sent}/{}", inputs.len());
+
+                    // Clear clipboard shortly after so the password doesn't linger.
+                    std::thread::sleep(Duration::from_millis(500));
+                    if OpenClipboard(None).is_ok() {
+                        let _ = EmptyClipboard();
+                        let _ = CloseClipboard();
+                        eprintln!("[rdp] clipboard cleared");
+                    }
                 });
             }
         }
