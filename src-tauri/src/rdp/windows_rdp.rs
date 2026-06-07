@@ -27,10 +27,7 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::Variant::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_TYPE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_RETURN,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, Ref, PCWSTR};
 
@@ -1315,8 +1312,14 @@ fn sta_thread(
         // object so mstscax reads them at activation time (DoVerb/Connect).
         // mstscax reads WarnAbout* and UsernameHint during control initialization,
         // not at Connect() time — writing after DoVerb is too late.
+        // Parse domain from username once — used for both CredManager and mstscax properties.
+        let (domain_str, user_str): (&str, &str) = if let Some(pos) = params.username.find('\\') {
+            (&params.username[..pos], &params.username[pos + 1..])
+        } else {
+            (params.domain.as_str(), params.username.as_str())
+        };
+
         if let Some(ref pw) = params.password {
-            // Use split username/domain so CredManager stores the right format.
             store_rdp_credential(&params.host, params.port, user_str, domain_str, pw);
         }
         set_rdp_warning_dialog_version();
@@ -1472,15 +1475,6 @@ fn sta_thread(
         // ── RDP properties ────────────────────────────────────────────────────
         let _ = put_bstr(&disp, "Server", &params.host);
         let _ = put_i4(&disp, "RDPPort", params.port as i32);
-        // If the username contains a domain prefix (e.g. "DOMAIN\user"), split it
-        // so mstscax receives separate UserName and Domain properties.  Passing the
-        // combined "DOMAIN\user" string as UserName without setting Domain can cause
-        // NLA/CredSSP negotiation to fail, resulting in the credential dialog.
-        let (domain_str, user_str): (&str, &str) = if let Some(pos) = params.username.find('\\') {
-            (&params.username[..pos], &params.username[pos + 1..])
-        } else {
-            (params.domain.as_str(), params.username.as_str())
-        };
         let _ = put_bstr(&disp, "UserName", user_str);
         if !domain_str.is_empty() {
             let _ = put_bstr(&disp, "Domain", domain_str);
