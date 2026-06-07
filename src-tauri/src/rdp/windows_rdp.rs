@@ -104,6 +104,11 @@ static WATCHER_PENDING: AtomicIsize = AtomicIsize::new(0);
 // OrbRdpHostWnd HWND so the watcher thread can scan its child windows for the
 // mstscax credential dialog (rendered as a child, not a top-level window).
 static WATCHER_HOST_HWND: AtomicIsize = AtomicIsize::new(0);
+// Set to true once the Windows session login succeeds (DISPID 3 / OnLoginComplete).
+// The watcher stops auto-dismissing cross-process credential/security dialogs after
+// this point: any dialog visible after login is a server-side or user-facing prompt
+// that should not be silently dismissed (e.g. "session limit exceeded" warnings).
+static WATCHER_SESSION_LIVE: AtomicBool = AtomicBool::new(false);
 
 // Finds the ATL child window (class "ATL:…") and checks UIMainClass visibility.
 // Used by the credential-injection thread to locate the window that receives
@@ -298,6 +303,10 @@ unsafe extern "system" fn watcher_host_child_cb(hwnd: HWND, _: LPARAM) -> BOOL {
 // keywords and auto-dismisses it with IDOK so the session proceeds silently.
 unsafe extern "system" fn watcher_cred_cb(hwnd: HWND, _: LPARAM) -> BOOL {
     if WATCHER_PID.load(Ordering::Relaxed) == 0 { return BOOL(0); }
+    // Once the session is live, stop auto-dismissing credential/security dialogs.
+    // Post-login server-side prompts (session limit, group policy notices, etc.)
+    // must not be silently dismissed — doing so can cause an immediate disconnect.
+    if WATCHER_SESSION_LIVE.load(Ordering::Relaxed) { return BOOL(1); }
     if !IsWindowVisible(hwnd).as_bool() { return BOOL(1); }
 
     let mut cls = [0u16; 16];
@@ -545,34 +554,48 @@ unsafe extern "system" fn ev_sink_invoke(
                     const CF_UNICODETEXT: u32 = 13;
 
                     // Wait for the credential UI to finish rendering.
-                    std::thread::sleep(Duration::from_millis(800));
+                    // 1200 ms is needed on slower systems; the retry loop below
+                    // extends this further if the ATL window is not yet visible.
+                    std::thread::sleep(Duration::from_millis(1200));
 
                     let host = HWND(host_hwnd_raw as *mut _);
 
-                    // Find the ATL child window and check whether the session is
-                    // already established.  PostMessage bypasses the focus chain so
-                    // we can deliver keystrokes to the ATL window without needing to
-                    // call SetForegroundWindow (which would move focus away from the
-                    // password field that mstscax already focused in the ATL control).
-                    let mut child_res = FindRdpChildResult {
-                        atl_hwnd: HWND(core::ptr::null_mut()),
-                        ui_main_visible: false,
-                    };
-                    EnumChildWindows(Some(host), Some(find_rdp_child_cb),
-                        LPARAM(&mut child_res as *mut _ as isize));
+                    // Retry finding a VISIBLE ATL child window up to 6 times
+                    // (300 ms apart = up to 1.8 s additional wait) to handle slow
+                    // credential-dialog render on first connection attempts.
+                    // The ATL window may exist but be invisible while mstscax is
+                    // still initialising the DirectX credential surface.
+                    let mut atl = HWND(core::ptr::null_mut());
+                    for attempt in 0u32..=6 {
+                        let mut child_res = FindRdpChildResult {
+                            atl_hwnd: HWND(core::ptr::null_mut()),
+                            ui_main_visible: false,
+                        };
+                        EnumChildWindows(Some(host), Some(find_rdp_child_cb),
+                            LPARAM(&mut child_res as *mut _ as isize));
 
-                    if child_res.ui_main_visible {
-                        // UIMainClass visible means the RDP desktop is already showing —
-                        // the user already typed credentials; don't inject into the session.
-                        eprintln!("[rdp] session established before injection — skipping");
+                        if child_res.ui_main_visible {
+                            eprintln!("[rdp] session established before injection — skipping");
+                            return;
+                        }
+                        if !child_res.atl_hwnd.is_invalid() {
+                            let vis = IsWindowVisible(child_res.atl_hwnd).as_bool();
+                            eprintln!("[rdp] ATL hwnd found on attempt {attempt} visible={vis}");
+                            if vis {
+                                atl = child_res.atl_hwnd;
+                                break;
+                            }
+                        } else {
+                            eprintln!("[rdp] ATL hwnd not found on attempt {attempt}");
+                        }
+                        if attempt < 6 {
+                            std::thread::sleep(Duration::from_millis(300));
+                        }
+                    }
+                    if atl.is_invalid() {
+                        eprintln!("[rdp] ATL window not visible after retries — cannot inject");
                         return;
                     }
-                    if child_res.atl_hwnd.is_invalid() {
-                        eprintln!("[rdp] ATL window not found — cannot inject via PostMessage");
-                        return;
-                    }
-                    let atl = child_res.atl_hwnd;
-                    eprintln!("[rdp] ATL hwnd found for credential injection");
 
                     // Use clipboard paste instead of KEYEVENTF_UNICODE to inject the
                     // password.  KEYEVENTF_UNICODE (VK_PACKET) is unreliable for
@@ -679,6 +702,12 @@ unsafe extern "system" fn ev_sink_invoke(
             // single message-pump pass before the first polling tick runs.
             inner.logged_in.store(true, Ordering::SeqCst);
             eprintln!("[rdp-event] OnLoginComplete — session ready");
+        }
+        38 => {
+            // DISPID 38 fires on newer mstscax builds immediately after OnLoginComplete
+            // in some server configurations.  It does NOT mean the session is ending —
+            // only DISPID 4 / ConnectionState=0 indicates a true disconnect.
+            eprintln!("[rdp-event] DISPID 38 — post-login notification (ignored)");
         }
         4 => {
             // DISPID 4 = OnDisconnected(discReason: long).
@@ -1342,24 +1371,8 @@ fn sta_thread(
         // Split "DOMAIN\user" username into (domain, user) so mstscax and CredSSP
         // receive the correct individual fields.  If the caller already split them
         // (params.domain non-empty), use those; otherwise parse params.username.
-        let (domain_str, user_str): (&str, &str) =
-            if let Some(pos) = params.username.find('\\') {
-                // "DOMAIN\user" in username field — split here
-                (&params.username[..pos], &params.username[pos + 1..])
-            } else if !params.domain.is_empty() {
-                // Already split by the caller
-                (&params.domain, &params.username)
-            } else {
-                // Local account: no domain
-                ("", &params.username)
-            };
-        eprintln!("[rdp] UserName={user_str} Domain={domain_str}");
-
         // Write registry suppression values and credentials BEFORE creating the COM
         // object so mstscax reads them at activation time (DoVerb/Connect).
-        // mstscax reads WarnAbout* and UsernameHint during control initialization,
-        // not at Connect() time — writing after DoVerb is too late.
-        // Parse domain from username once — used for both CredManager and mstscax properties.
         let (domain_str, user_str): (&str, &str) = if let Some(pos) = params.username.find('\\') {
             (&params.username[..pos], &params.username[pos + 1..])
         } else {
@@ -1739,10 +1752,14 @@ fn sta_thread(
         GetWindowRect(parent, &mut last_parent_rect).ok();
         // Gate visibility on session-connected so the blank host window never
         // appears during NLA / cert authentication dialogs.
-        let mut rdp_connected   = false; // true once the session is established
-        let mut ever_connected  = false; // latch: true once connected, never reset
-        let mut show_pending    = false; // Show arrived before rdp_connected
-        let mut dispatch_errors = 0u32; // consecutive get_i4 errors after connected
+        // Ensure the session-live flag is clear at the start of each session so a
+        // previous session's stale flag never suppresses watcher dismissal prematurely.
+        WATCHER_SESSION_LIVE.store(false, Ordering::Relaxed);
+        let mut rdp_connected    = false; // true once the session is established
+        let mut ever_connected   = false; // latch: true once connected, never reset
+        let mut show_pending     = false; // Show arrived before rdp_connected
+        let mut dispatch_errors  = 0u32; // consecutive get_i4 errors after connected
+        let mut disconnect_polls = 0u32; // consecutive state=0/3 polls (debounce)
 
         // ── Message / command loop ─────────────────────────────────────────────
         let mut msg = MSG::default();
@@ -1825,9 +1842,14 @@ fn sta_thread(
             // during the brief auth→desktop transition where state changes quickly.
             if event_logged_in.load(Ordering::SeqCst) {
                 event_logged_in.store(false, Ordering::SeqCst);
-                ever_connected = true;
-                rdp_connected  = true;
-                show_pending   = false;
+                ever_connected   = true;
+                rdp_connected    = true;
+                disconnect_polls = 0;
+                show_pending     = false;
+                // Mark session live so the watcher stops auto-dismissing dialogs:
+                // any dialog after login is a server-side prompt (session limit, policy,
+                // etc.) that must not be silently dismissed as it could cause a disconnect.
+                WATCHER_SESSION_LIVE.store(true, Ordering::Relaxed);
                 // Hide cover (no-op if already hidden) and reveal the RDP window.
                 if !cover_hwnd.is_invalid() {
                     let _ = ShowWindow(cover_hwnd, SW_HIDE);
@@ -1871,10 +1893,12 @@ fn sta_thread(
                 // guard when the event sink was not registered.
                 match get_i4(&disp, "ConnectionState") {
                     Ok(2) if !rdp_connected => {
-                        dispatch_errors = 0;
-                        rdp_connected  = true;
-                        ever_connected = true;
-                        show_pending   = false;
+                        dispatch_errors  = 0;
+                        disconnect_polls = 0;
+                        rdp_connected    = true;
+                        ever_connected   = true;
+                        show_pending     = false;
+                        WATCHER_SESSION_LIVE.store(true, Ordering::Relaxed);
                         // Hide the cover now that auth is complete, then bring
                         // the session window to the foreground.
                         if !cover_hwnd.is_invalid() {
@@ -1888,12 +1912,19 @@ fn sta_thread(
                             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
                         eprintln!("[rdp] cover hidden — session connected at ({tsx},{tsy})");
                     }
-                    // States 0 (NOT_CONNECTED) or 3 (DISCONNECTING) after being connected
+                    // States 0 (NOT_CONNECTED) or 3 (DISCONNECTING) after being connected.
+                    // Debounce: require 3 consecutive polls (~300 ms) before breaking to
+                    // avoid exiting on transient state transitions immediately after login.
                     Ok(0) | Ok(3) if rdp_connected => {
-                        rdp_connected = false;
-                        show_pending  = false;
-                        let _ = ShowWindow(host_hwnd, SW_HIDE);
-                        break 'outer;
+                        disconnect_polls += 1;
+                        eprintln!("[rdp] ConnectionState=0/3 while connected (poll {disconnect_polls}/3)");
+                        if disconnect_polls >= 3 {
+                            eprintln!("[rdp] disconnect confirmed — exiting session loop");
+                            rdp_connected = false;
+                            show_pending  = false;
+                            let _ = ShowWindow(host_hwnd, SW_HIDE);
+                            break 'outer;
+                        }
                     }
                     // State 0 when we never connected: connection attempt failed
                     // (event sink may not have fired DISPID 4). Exit so the tab closes.
@@ -1902,7 +1933,7 @@ fn sta_thread(
                         show_pending = false;
                         break 'outer;
                     }
-                    Ok(_) => { dispatch_errors = 0; }
+                    Ok(_) => { dispatch_errors = 0; disconnect_polls = 0; }
                     Err(_) if rdp_connected => {
                         // COM error while connected: count consecutive failures.
                         dispatch_errors += 1;
@@ -1935,8 +1966,9 @@ fn sta_thread(
             let _ = UnhookWindowsHookEx(HHOOK(hook_raw as *mut std::ffi::c_void));
         }
 
-        // Signal the cross-thread watcher to stop.
+        // Signal the cross-thread watcher to stop and clear per-session state.
         WATCHER_HOST_HWND.store(0, Ordering::Relaxed);
+        WATCHER_SESSION_LIVE.store(false, Ordering::Relaxed);
         watcher_done.store(true, Ordering::Relaxed);
 
         // Unregister all COM event sink registrations before releasing.
