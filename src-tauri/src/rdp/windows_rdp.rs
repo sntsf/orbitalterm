@@ -527,24 +527,59 @@ unsafe extern "system" fn ev_sink_invoke(
                     };
                     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
                     use windows::Win32::Foundation::HANDLE;
-                    use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, BringWindowToTop};
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        SetForegroundWindow, BringWindowToTop,
+                        GetWindowRect, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+                    };
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        MOUSEINPUT, MOUSE_EVENT_FLAGS,
+                        MOUSEEVENTF_MOVE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+                        MOUSEEVENTF_ABSOLUTE,
+                    };
+                    use windows::Win32::Foundation::RECT;
                     // CF_UNICODETEXT = 13 (standard Windows clipboard format constant)
                     const CF_UNICODETEXT: u32 = 13;
 
                     // Wait for the credential UI to finish rendering.
                     std::thread::sleep(Duration::from_millis(800));
 
-                    // Bring the RDP host window to the foreground so that SendInput
-                    // reaches the mstscax credential dialog.  The dialog is rendered
-                    // inside the ATL DirectX surface (not a separate top-level HWND),
-                    // so keyboard events must be routed through the host window's
-                    // message queue.
                     let host = HWND(host_hwnd_raw as *mut _);
                     BringWindowToTop(host).ok();
-                    let fg_ok = SetForegroundWindow(host).as_bool();
-                    eprintln!("[rdp] SetForegroundWindow(host) -> {fg_ok}");
-                    // Give the OS time to transfer focus before sending input.
-                    std::thread::sleep(Duration::from_millis(200));
+                    SetForegroundWindow(host).ok();
+
+                    // Click at the password field position within the mstscax credential
+                    // dialog.  The dialog is rendered inside the ATL DirectX surface —
+                    // SetForegroundWindow alone brings the host window to the front but
+                    // doesn't give the password field keyboard focus.  A real mouse click
+                    // activates the specific UI element under the cursor.
+                    // The credential dialog appears centered in the host window; the
+                    // password field is at approximately 65 % of the window height.
+                    let mut rc = RECT::default();
+                    if GetWindowRect(host, &mut rc).is_ok() {
+                        let click_x = (rc.left + rc.right) / 2;
+                        let click_y = rc.top + (rc.bottom - rc.top) * 65 / 100;
+                        let sw = GetSystemMetrics(SM_CXSCREEN);
+                        let sh = GetSystemMetrics(SM_CYSCREEN);
+                        let norm_x = (click_x * 65535) / sw;
+                        let norm_y = (click_y * 65535) / sh;
+                        let mk = |flags: MOUSE_EVENT_FLAGS| INPUT {
+                            r#type: INPUT_TYPE(0),
+                            Anonymous: INPUT_0 {
+                                mi: MOUSEINPUT {
+                                    dx: norm_x, dy: norm_y, mouseData: 0,
+                                    dwFlags: flags, time: 0, dwExtraInfo: 0,
+                                },
+                            },
+                        };
+                        let abs = MOUSEEVENTF_ABSOLUTE;
+                        SendInput(&[
+                            mk(MOUSEEVENTF_MOVE  | abs),
+                            mk(MOUSEEVENTF_LEFTDOWN | abs),
+                            mk(MOUSEEVENTF_LEFTUP   | abs),
+                        ], std::mem::size_of::<INPUT>() as i32);
+                        eprintln!("[rdp] clicked password field at ({click_x},{click_y})");
+                        std::thread::sleep(Duration::from_millis(150));
+                    }
 
                     // Use clipboard paste instead of KEYEVENTF_UNICODE to inject the
                     // password.  KEYEVENTF_UNICODE (VK_PACKET) is unreliable for
