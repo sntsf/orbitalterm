@@ -630,7 +630,7 @@ unsafe extern "system" fn ev_sink_invoke(
 
                     use windows::Win32::UI::Input::KeyboardAndMouse::{
                         SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-                        KEYBD_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL, VK_RETURN, VK_V,
+                        KEYBD_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL, VK_RETURN, VK_TAB, VK_V,
                     };
                     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 
@@ -663,23 +663,23 @@ unsafe extern "system" fn ev_sink_invoke(
                         };
                         const KF_UP: u32 = 2; // KEYEVENTF_KEYUP
 
-                        // Do NOT send Ctrl+A before pasting: the NLA credential dialog
-                        // starts with focus on the username field (not the password field),
-                        // and Ctrl+A would select the username text, causing Ctrl+V to
-                        // replace it with the password — submitting wrong credentials
-                        // (discReason=7943).  Just Ctrl+V + Enter: the password field
-                        // receives the paste because mstscax focuses it when the dialog
-                        // renders, and the field is empty so no prior text to clear.
-                        let inputs: [INPUT; 6] = [
-                            ki(VK_CONTROL.0, 0),      // Ctrl down
-                            ki(VK_V.0, 0),            // V down  → Ctrl+V (paste)
-                            ki(VK_V.0, KF_UP),        // V up
-                            ki(VK_CONTROL.0, KF_UP),  // Ctrl up
-                            ki(VK_RETURN.0, 0),       // Enter down
-                            ki(VK_RETURN.0, KF_UP),   // Enter up
+                        // The NLA credential dialog opens with keyboard focus on the
+                        // username field.  Tab moves focus forward to the password field.
+                        // Ctrl+V pastes the password.  Enter submits.
+                        // (Ctrl+A is intentionally absent — it selects the username text
+                        // and Ctrl+V would replace the username rather than the password.)
+                        let inputs: [INPUT; 8] = [
+                            ki(VK_TAB.0, 0),           // Tab down  → move focus: username → password
+                            ki(VK_TAB.0, KF_UP),       // Tab up
+                            ki(VK_CONTROL.0, 0),       // Ctrl down
+                            ki(VK_V.0, 0),             // V down    → Ctrl+V (paste into password)
+                            ki(VK_V.0, KF_UP),         // V up
+                            ki(VK_CONTROL.0, KF_UP),   // Ctrl up
+                            ki(VK_RETURN.0, 0),        // Enter down → submit
+                            ki(VK_RETURN.0, KF_UP),    // Enter up
                         ];
                         let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                        eprintln!("[rdp] SendInput: {sent}/{} events (Ctrl+V, Enter)", inputs.len());
+                        eprintln!("[rdp] SendInput: {sent}/{} events (Tab, Ctrl+V, Enter)", inputs.len());
 
                         if attached {
                             AttachThreadInput(our_tid, atl_tid, false);
@@ -990,6 +990,137 @@ fn get_i4(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
     }
 }
 
+// ── DPAPI password protection ─────────────────────────────────────────────────
+//
+// mstscax in NLA mode reads CRED_TYPE_GENERIC/TERMSRV credentials from Windows
+// Credential Manager.  The credential blob MUST be a DPAPI-encrypted UTF-16LE
+// password (same format as the "password 51:b:" field in .rdp files produced
+// by mstsc.exe).  If the blob is stored as cleartext UTF-16LE instead, mstscax
+// silently fails to decrypt it and falls back to showing the credential dialog
+// (DISPID 18) — this was the root cause of all NLA failures so far.
+fn dpapi_protect_password(password: &str) -> Option<Vec<u8>> {
+    use windows::Win32::Security::Cryptography::{
+        CryptProtectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
+    };
+    use windows::Win32::System::Memory::LocalFree;
+    use windows::Win32::Foundation::HLOCAL;
+
+    let pw_bytes: Vec<u8> = password
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
+
+    unsafe {
+        let mut input  = CRYPT_INTEGER_BLOB { cbData: pw_bytes.len() as u32, pbData: pw_bytes.as_ptr() as *mut u8 };
+        let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        let ok = CryptProtectData(
+            &mut input,
+            windows::core::PCWSTR::null(),
+            None, None, None,
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        ).is_ok();
+        if ok && !output.pbData.is_null() {
+            let blob = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+            LocalFree(HLOCAL(output.pbData as *mut _));
+            eprintln!("[rdp] dpapi_protect: {} plaintext bytes → {} encrypted bytes", pw_bytes.len(), blob.len());
+            Some(blob)
+        } else {
+            eprintln!("[rdp] dpapi_protect FAILED");
+            None
+        }
+    }
+}
+
+// Write a temporary .rdp file containing the connection settings and the
+// DPAPI-encrypted password ("password 51:b:" field).  This is identical to
+// the format mstsc.exe produces when you save credentials.  The file is
+// passed to LoadConnectionSettings so mstscax can perform NLA pre-auth without
+// showing the interactive credential dialog (DISPID 18).
+fn write_rdp_temp_file(
+    host: &str, port: u16,
+    username: &str, domain: &str,
+    password: Option<&str>,
+    width: i32, height: i32, color_depth: i32,
+    admin_mode: bool,
+) -> Option<std::path::PathBuf> {
+    let full_address = if port == 3389 {
+        host.to_owned()
+    } else {
+        format!("{}:{}", host, port)
+    };
+
+    let password_line = match password.and_then(dpapi_protect_password) {
+        Some(blob) => {
+            let hex: String = blob.iter().map(|b| format!("{:02x}", b)).collect();
+            format!("password 51:b:{}\r\n", hex)
+        }
+        None => String::new(),
+    };
+
+    let admin_line = if admin_mode { "administrative session:i:1\r\n" } else { "" };
+
+    let content = format!(
+        "full address:s:{full_address}\r\n\
+         username:s:{username}\r\n\
+         domain:s:{domain}\r\n\
+         {password_line}\
+         desktopwidth:i:{width}\r\n\
+         desktopheight:i:{height}\r\n\
+         session bpp:i:{color_depth}\r\n\
+         {admin_line}\
+         prompt for credentials:i:0\r\n\
+         authentication level:i:0\r\n\
+         negotiate security layer:i:1\r\n\
+         enablecredsspsupport:i:1\r\n\
+         redirectclipboard:i:1\r\n\
+         redirectprinters:i:0\r\n\
+         autoreconnection enabled:i:1\r\n\
+         bandwidthautodetect:i:1\r\n\
+         connection type:i:7\r\n\
+         disable wallpaper:i:1\r\n\
+         bitmapcachepersistenable:i:1\r\n\
+         screen mode id:i:1\r\n",
+    );
+
+    let name = format!(
+        "orbterm_{}.rdp",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0),
+    );
+    let path = std::env::temp_dir().join(&name);
+    match std::fs::write(&path, content.as_bytes()) {
+        Ok(()) => {
+            eprintln!("[rdp] temp .rdp file: {}", path.display());
+            Some(path)
+        }
+        Err(e) => {
+            eprintln!("[rdp] failed to write temp .rdp file: {e}");
+            None
+        }
+    }
+}
+
+// Call an IDispatch method that takes a single BSTR argument.
+// Used to call LoadConnectionSettings(filePath) on the mstscax object.
+fn call_method_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core::Result<()> {
+    let id = get_dispid(disp, name)?;
+    let bval = std::mem::ManuallyDrop::new(BSTR::from(value));
+    unsafe {
+        let mut var: VARIANT = std::mem::zeroed();
+        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 8; (*r).data.bstrVal = bval.as_ptr() as *mut u16; }
+        let res = disp.Invoke(
+            id, &GUID::zeroed(), 0x0409, DISPATCH_METHOD,
+            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 1, cNamedArgs: 0 },
+            None, None, None,
+        );
+        VariantClear(&mut var).ok();
+        res
+    }
+}
+
 // Write credentials directly into Windows Credential Manager via CredWriteW.
 // More reliable than spawning cmdkey.exe (no process creation, no UAC, no
 // quoting issues). NLA/CredSSP picks these up automatically during Connect().
@@ -1025,11 +1156,18 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
         base_targets.push(format!("TERMSRV/{}:{}", host, port));
     }
 
-    // Credential blob is the password as UTF-16LE with no null terminator.
-    let pw_blob: Vec<u8> = password
+    // CRED_TYPE_DOMAIN_PASSWORD blob: cleartext UTF-16LE (read by LSA directly).
+    let pw_blob_plain: Vec<u8> = password
         .encode_utf16()
         .flat_map(|c| c.to_le_bytes())
         .collect();
+
+    // CRED_TYPE_GENERIC blob: DPAPI-encrypted UTF-16LE.
+    // mstscax reads CRED_TYPE_GENERIC for NLA pre-authentication, decrypting
+    // the blob with CryptUnprotectData before passing it to CredSSP.  Storing
+    // cleartext here causes the decryption to fail silently → DISPID 18 fires.
+    let pw_blob_dpapi: Vec<u8> = dpapi_protect_password(password)
+        .unwrap_or_else(|| pw_blob_plain.clone());
 
     for target in &base_targets {
         let mut target_wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
@@ -1050,17 +1188,18 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
 
         for user_str in &user_variants {
             let mut user_wide: Vec<u16> = user_str.encode_utf16().chain(Some(0)).collect();
-            // mstsc.exe stores as CRED_TYPE_GENERIC; CredSSP reads GENERIC.
-            // DOMAIN_PASSWORD is kept for fallback on domain-joined targets.
             for cred_type in [CRED_TYPE_GENERIC, CRED_TYPE_DOMAIN_PASSWORD] {
+                // Use DPAPI-encrypted blob for GENERIC (mstscax expects this format),
+                // cleartext UTF-16LE for DOMAIN_PASSWORD (consumed by LSA directly).
+                let blob = if cred_type == CRED_TYPE_GENERIC { &pw_blob_dpapi } else { &pw_blob_plain };
                 let cred = CREDENTIALW {
                     Flags: CRED_FLAGS(0),
                     Type: cred_type,
                     TargetName: PWSTR(target_wide.as_mut_ptr()),
                     Comment: PWSTR::null(),
                     LastWritten: unsafe { std::mem::zeroed() },
-                    CredentialBlobSize: pw_blob.len() as u32,
-                    CredentialBlob: pw_blob.as_ptr() as *mut u8,
+                    CredentialBlobSize: blob.len() as u32,
+                    CredentialBlob: blob.as_ptr() as *mut u8,
                     Persist: CRED_PERSIST_LOCAL_MACHINE,
                     AttributeCount: 0,
                     Attributes: std::ptr::null_mut(),
@@ -1068,24 +1207,8 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
                     UserName: PWSTR(user_wide.as_mut_ptr()),
                 };
                 let ok = unsafe { CredWriteW(&cred, 0).is_ok() };
-                eprintln!("[rdp] CredWriteW {target} user={user_str} type={} ok={ok}", cred_type.0);
-            }
-        }
-
-        // Read back the DOMAIN_PASSWORD entry to confirm it was stored correctly.
-        unsafe {
-            let mut pcred: *mut CREDENTIALW = std::ptr::null_mut();
-            if CredReadW(PCWSTR(target_wide.as_ptr()), CRED_TYPE_DOMAIN_PASSWORD, Some(0),
-                         &mut pcred).is_ok() && !pcred.is_null()
-            {
-                let c = &*pcred;
-                let stored_user = if !c.UserName.is_null() {
-                    c.UserName.to_string().unwrap_or_default()
-                } else { String::new() };
-                eprintln!("[rdp] CredReadW verify {target}: user='{stored_user}' blob_bytes={}", c.CredentialBlobSize);
-                CredFree(pcred as *const _);
-            } else {
-                eprintln!("[rdp] CredReadW verify FAILED for {target}");
+                eprintln!("[rdp] CredWriteW {target} user={user_str} type={} blob={} ok={ok}",
+                    cred_type.0, blob.len());
             }
         }
     }
@@ -1659,12 +1782,49 @@ fn sta_thread(
         }
         eprintln!("[rdp] cross-thread watcher started");
 
+        // ── .rdp temp file: DPAPI password → LoadConnectionSettings ─────────
+        // Write a temporary .rdp file with the DPAPI-encrypted password and
+        // attempt to load it via IDispatch ("LoadConnectionSettings").  If the
+        // method exists on this mstscax version, mstscax will use the DPAPI
+        // credential directly for NLA pre-auth without showing DISPID 18.
+        // The file is deleted in a background thread shortly after Connect() so
+        // the plaintext-equivalent credential doesn't linger on disk.
+        let rdp_temp_path: Option<std::path::PathBuf> = if params.password.is_some() {
+            write_rdp_temp_file(
+                &params.host, params.port, user_str, domain_str,
+                params.password.as_deref(),
+                w, h, params.color_depth, params.admin_mode,
+            )
+        } else {
+            None
+        };
+        if let Some(ref rdp_path) = rdp_temp_path {
+            let path_str = rdp_path.to_string_lossy().into_owned();
+            match call_method_bstr(&disp, "LoadConnectionSettings", &path_str) {
+                Ok(()) => eprintln!("[rdp] LoadConnectionSettings ok"),
+                Err(e) => eprintln!("[rdp] LoadConnectionSettings not available ({e:?}) — using CredManager + injection fallback"),
+            }
+        }
+
         if let Err(e) = call_no_args(&disp, "Connect") {
             let _ = result_tx.send(Err(format!("RDP Connect(): {e}")));
             if !cover_hwnd.is_invalid() { DestroyWindow(cover_hwnd).ok(); }
             DestroyWindow(host_hwnd).ok();
             CoUninitialize();
             return;
+        }
+
+        // Delete the temp .rdp file shortly after Connect() — mstscax has
+        // already read and parsed the settings synchronously by this point.
+        if let Some(path) = rdp_temp_path {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(5));
+                if let Err(e) = std::fs::remove_file(&path) {
+                    eprintln!("[rdp] temp .rdp cleanup error: {e}");
+                } else {
+                    eprintln!("[rdp] temp .rdp file deleted");
+                }
+            });
         }
 
         // ── COM connection point: subscribe to mstscax events ────────────────
