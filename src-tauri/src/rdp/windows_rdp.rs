@@ -430,17 +430,13 @@ struct EvSinkVtbl {
 
 #[repr(C)]
 struct EvSinkInner {
-    vtbl:         *const EvSinkVtbl,
-    ref_count:    AtomicU32,
-    logged_in:    Arc<AtomicBool>, // DISPID 3 = OnLoginComplete
-    disconnected: Arc<AtomicBool>, // DISPID 4 = OnDisconnected
-    // DISPID 18 = credential dialog shown (DirectX-rendered inside ATL window).
-    // We inject Tab + password + Enter via SendInput to fill it automatically.
-    password:      Option<String>,
-    host_hwnd_raw: isize,
-    // The cover window is hidden when DISPID 18 fires so that if the automatic
-    // credential injection fails the user can see and interact with the prompt.
-    cover_hwnd_raw: isize,
+    vtbl:          *const EvSinkVtbl,
+    ref_count:     AtomicU32,
+    logged_in:     Arc<AtomicBool>, // DISPID 3 = OnLoginComplete
+    disconnected:  Arc<AtomicBool>, // DISPID 4 = OnDisconnected
+    password:      Option<String>,  // for injection on DISPID 18
+    host_hwnd_raw: isize,           // OrbRdpHostWnd for finding ATL child
+    cover_hwnd_raw: isize,          // cover window hidden when credential dialog appears
 }
 
 // SAFETY: only ever accessed on the COM STA thread; Arc fields are Send+Sync.
@@ -544,10 +540,7 @@ unsafe extern "system" fn ev_sink_invoke(
                     };
                     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
                     use windows::Win32::Foundation::HANDLE;
-                    use windows::Win32::UI::WindowsAndMessaging::{
-                        EnumChildWindows, PostMessageW,
-                        WM_KEYDOWN, WM_KEYUP, WM_PASTE,
-                    };
+                    use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
                     // CF_UNICODETEXT = 13 (standard Windows clipboard format constant)
                     const CF_UNICODETEXT: u32 = 13;
 
@@ -612,26 +605,61 @@ unsafe extern "system" fn ev_sink_invoke(
                         }
                     }
 
-                    use windows::Win32::Foundation::{WPARAM, LPARAM};
-                    use windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+                        KEYBD_EVENT_FLAGS, VIRTUAL_KEY, VK_A, VK_CONTROL, VK_RETURN, VK_V,
+                    };
+                    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 
                     if clipboard_ok {
-                        // Deliver WM_PASTE directly to the ATL window via PostMessage.
-                        // PostMessage bypasses the focus chain — no SetForegroundWindow
-                        // or mouse click needed.  The ATL window processes WM_PASTE and
-                        // routes it to its internal credential UI password field.
-                        PostMessageW(Some(atl), WM_PASTE, WPARAM(0), LPARAM(0)).ok();
-                        eprintln!("[rdp] WM_PASTE posted to ATL window");
-                        std::thread::sleep(Duration::from_millis(200));
-                    }
+                        // The cover-window keeps keyboard focus on the ATL control while
+                        // the credential dialog loads.  Use AttachThreadInput + SetFocus
+                        // as a belt-and-suspenders measure in case focus drifted, but do
+                        // NOT call SetForegroundWindow — that moves focus to the WS_POPUP
+                        // parent instead of the ATL child, causing SendInput to miss.
+                        let our_tid = GetCurrentThreadId();
+                        let atl_tid = GetWindowThreadProcessId(atl, None);
+                        let attached = AttachThreadInput(our_tid, atl_tid, true).as_bool();
+                        eprintln!("[rdp] AttachThreadInput -> {attached}");
+                        if attached {
+                            SetFocus(Some(atl)).ok();
+                            std::thread::sleep(Duration::from_millis(80));
+                        }
 
-                    // Post Enter to submit the credential dialog.
-                    // LPARAM encoding: repeat=1, scan=0x1C, extended=0, prev=0, trans=0
-                    let enter_dn: isize = 0x001C_0001;
-                    let enter_up: isize = 0xC01C_0001u32 as i32 as isize;
-                    PostMessageW(Some(atl), WM_KEYDOWN, WPARAM(VK_RETURN.0 as usize), LPARAM(enter_dn)).ok();
-                    PostMessageW(Some(atl), WM_KEYUP,   WPARAM(VK_RETURN.0 as usize), LPARAM(enter_up)).ok();
-                    eprintln!("[rdp] VK_RETURN posted to ATL window");
+                        let ki = |vk: u16, flags: u32| INPUT {
+                            r#type: INPUT_KEYBOARD,
+                            Anonymous: INPUT_0 {
+                                ki: KEYBDINPUT {
+                                    wVk: VIRTUAL_KEY(vk),
+                                    wScan: 0,
+                                    dwFlags: KEYBD_EVENT_FLAGS(flags),
+                                    time: 0,
+                                    dwExtraInfo: 0,
+                                },
+                            },
+                        };
+                        const KF_UP: u32 = 2; // KEYEVENTF_KEYUP
+
+                        // Ctrl+A to clear any pre-existing text, then Ctrl+V to paste.
+                        let inputs: [INPUT; 10] = [
+                            ki(VK_CONTROL.0, 0),      // Ctrl down
+                            ki(VK_A.0, 0),            // A down  → Ctrl+A (select all)
+                            ki(VK_A.0, KF_UP),        // A up
+                            ki(VK_CONTROL.0, KF_UP),  // Ctrl up
+                            ki(VK_CONTROL.0, 0),      // Ctrl down
+                            ki(VK_V.0, 0),            // V down  → Ctrl+V (paste)
+                            ki(VK_V.0, KF_UP),        // V up
+                            ki(VK_CONTROL.0, KF_UP),  // Ctrl up
+                            ki(VK_RETURN.0, 0),       // Enter down
+                            ki(VK_RETURN.0, KF_UP),   // Enter up
+                        ];
+                        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                        eprintln!("[rdp] SendInput: {sent}/{} events (Ctrl+A, Ctrl+V, Enter)", inputs.len());
+
+                        if attached {
+                            AttachThreadInput(our_tid, atl_tid, false);
+                        }
+                    }
 
                     // Clear clipboard shortly after so the password doesn't linger.
                     std::thread::sleep(Duration::from_millis(500));
@@ -942,6 +970,9 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
     };
     use windows::core::PWSTR;
 
+    // `username` here is already the bare user (no domain prefix); `domain` is
+    // separate.  For domain accounts, CredSSP expects "DOMAIN\user" in UserName.
+    // The ".\user" form is only valid for local accounts.
     let user_plain = if domain.is_empty() {
         username.to_owned()
     } else {
@@ -1308,6 +1339,22 @@ fn sta_thread(
         register_host_class();
         register_cover_class();
 
+        // Split "DOMAIN\user" username into (domain, user) so mstscax and CredSSP
+        // receive the correct individual fields.  If the caller already split them
+        // (params.domain non-empty), use those; otherwise parse params.username.
+        let (domain_str, user_str): (&str, &str) =
+            if let Some(pos) = params.username.find('\\') {
+                // "DOMAIN\user" in username field — split here
+                (&params.username[..pos], &params.username[pos + 1..])
+            } else if !params.domain.is_empty() {
+                // Already split by the caller
+                (&params.domain, &params.username)
+            } else {
+                // Local account: no domain
+                ("", &params.username)
+            };
+        eprintln!("[rdp] UserName={user_str} Domain={domain_str}");
+
         // Write registry suppression values and credentials BEFORE creating the COM
         // object so mstscax reads them at activation time (DoVerb/Connect).
         // mstscax reads WarnAbout* and UsernameHint during control initialization,
@@ -1323,7 +1370,7 @@ fn sta_thread(
             store_rdp_credential(&params.host, params.port, user_str, domain_str, pw);
         }
         set_rdp_warning_dialog_version();
-        suppress_rdp_server_registry(&params.host, params.port, &params.username, &params.domain);
+        suppress_rdp_server_registry(&params.host, params.port, user_str, domain_str);
 
         let hmod = GetModuleHandleW(None).unwrap_or_default();
         // parent = Tauri main window (top-level application frame)
@@ -1478,8 +1525,6 @@ fn sta_thread(
         let _ = put_bstr(&disp, "UserName", user_str);
         if !domain_str.is_empty() {
             let _ = put_bstr(&disp, "Domain", domain_str);
-        } else if !params.domain.is_empty() {
-            let _ = put_bstr(&disp, "Domain", &params.domain);
         }
         eprintln!("[rdp] UserName={user_str} Domain={domain_str}");
         let _ = put_i4(&disp, "DesktopWidth", w);
