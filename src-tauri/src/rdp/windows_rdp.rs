@@ -522,10 +522,12 @@ unsafe extern "system" fn ev_sink_invoke(
                 let pw_clone = pw.clone();
                 std::thread::spawn(move || unsafe {
                     use windows::Win32::System::DataExchange::{
-                        OpenClipboard, EmptyClipboard, SetClipboardData, CloseClipboard, CF_UNICODETEXT,
+                        OpenClipboard, EmptyClipboard, SetClipboardData, CloseClipboard,
                     };
                     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
                     use windows::Win32::Foundation::HANDLE;
+                    // CF_UNICODETEXT = 13 (standard Windows clipboard format constant)
+                    const CF_UNICODETEXT: u32 = 13;
 
                     // Wait for the credential UI to finish rendering and acquire focus.
                     std::thread::sleep(Duration::from_millis(1000));
@@ -551,7 +553,7 @@ unsafe extern "system" fn ev_sink_invoke(
                         if OpenClipboard(None).is_ok() {
                             let _ = EmptyClipboard();
                             // After SetClipboardData the clipboard owns hglob; don't GlobalFree it.
-                            if SetClipboardData(CF_UNICODETEXT, HANDLE(hglob.0 as *mut _)).is_ok() {
+                            if SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hglob.0 as *mut _))).is_ok() {
                                 clipboard_ok = true;
                                 eprintln!("[rdp] clipboard loaded with password ({} chars)", pw_clone.chars().count());
                             } else {
