@@ -108,6 +108,26 @@ static WATCHER_PENDING: AtomicIsize = AtomicIsize::new(0);
 // mstscax credential dialog (rendered as a child, not a top-level window).
 static WATCHER_HOST_HWND: AtomicIsize = AtomicIsize::new(0);
 
+// Finds the ATL child window (class "ATL:…") and checks UIMainClass visibility.
+// Used by the credential-injection thread to locate the window that receives
+// keyboard input and to detect whether the session is already established.
+struct FindRdpChildResult {
+    atl_hwnd:        HWND,
+    ui_main_visible: bool,
+}
+unsafe extern "system" fn find_rdp_child_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let r = &mut *(lparam.0 as *mut FindRdpChildResult);
+    let mut cls = [0u16; 64];
+    let n = GetClassNameW(hwnd, &mut cls) as usize;
+    let name = String::from_utf16_lossy(&cls[..n]);
+    if name.starts_with("ATL:") && r.atl_hwnd.is_invalid() {
+        r.atl_hwnd = hwnd;
+    } else if name == "UIMainClass" {
+        r.ui_main_visible = IsWindowVisible(hwnd).as_bool();
+    }
+    BOOL(1)
+}
+
 unsafe extern "system" fn watcher_dismiss_cb(hwnd: HWND, _: LPARAM) -> BOOL {
     let our_pid = WATCHER_PID.load(Ordering::Relaxed);
     if our_pid == 0 { return BOOL(0); }
@@ -528,15 +548,9 @@ unsafe extern "system" fn ev_sink_invoke(
                     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
                     use windows::Win32::Foundation::HANDLE;
                     use windows::Win32::UI::WindowsAndMessaging::{
-                        SetForegroundWindow, BringWindowToTop,
-                        GetWindowRect, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+                        EnumChildWindows, PostMessageW,
+                        WM_KEYDOWN, WM_KEYUP, WM_PASTE,
                     };
-                    use windows::Win32::UI::Input::KeyboardAndMouse::{
-                        MOUSEINPUT, MOUSE_EVENT_FLAGS,
-                        MOUSEEVENTF_MOVE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-                        MOUSEEVENTF_ABSOLUTE,
-                    };
-                    use windows::Win32::Foundation::RECT;
                     // CF_UNICODETEXT = 13 (standard Windows clipboard format constant)
                     const CF_UNICODETEXT: u32 = 13;
 
@@ -544,42 +558,31 @@ unsafe extern "system" fn ev_sink_invoke(
                     std::thread::sleep(Duration::from_millis(800));
 
                     let host = HWND(host_hwnd_raw as *mut _);
-                    BringWindowToTop(host).ok();
-                    SetForegroundWindow(host).ok();
 
-                    // Click at the password field position within the mstscax credential
-                    // dialog.  The dialog is rendered inside the ATL DirectX surface —
-                    // SetForegroundWindow alone brings the host window to the front but
-                    // doesn't give the password field keyboard focus.  A real mouse click
-                    // activates the specific UI element under the cursor.
-                    // The credential dialog appears centered in the host window; the
-                    // password field is at approximately 65 % of the window height.
-                    let mut rc = RECT::default();
-                    if GetWindowRect(host, &mut rc).is_ok() {
-                        let click_x = (rc.left + rc.right) / 2;
-                        let click_y = rc.top + (rc.bottom - rc.top) * 65 / 100;
-                        let sw = GetSystemMetrics(SM_CXSCREEN);
-                        let sh = GetSystemMetrics(SM_CYSCREEN);
-                        let norm_x = (click_x * 65535) / sw;
-                        let norm_y = (click_y * 65535) / sh;
-                        let mk = |flags: MOUSE_EVENT_FLAGS| INPUT {
-                            r#type: INPUT_TYPE(0),
-                            Anonymous: INPUT_0 {
-                                mi: MOUSEINPUT {
-                                    dx: norm_x, dy: norm_y, mouseData: 0,
-                                    dwFlags: flags, time: 0, dwExtraInfo: 0,
-                                },
-                            },
-                        };
-                        let abs = MOUSEEVENTF_ABSOLUTE;
-                        SendInput(&[
-                            mk(MOUSEEVENTF_MOVE  | abs),
-                            mk(MOUSEEVENTF_LEFTDOWN | abs),
-                            mk(MOUSEEVENTF_LEFTUP   | abs),
-                        ], std::mem::size_of::<INPUT>() as i32);
-                        eprintln!("[rdp] clicked password field at ({click_x},{click_y})");
-                        std::thread::sleep(Duration::from_millis(150));
+                    // Find the ATL child window and check whether the session is
+                    // already established.  PostMessage bypasses the focus chain so
+                    // we can deliver keystrokes to the ATL window without needing to
+                    // call SetForegroundWindow (which would move focus away from the
+                    // password field that mstscax already focused in the ATL control).
+                    let mut child_res = FindRdpChildResult {
+                        atl_hwnd: HWND(core::ptr::null_mut()),
+                        ui_main_visible: false,
+                    };
+                    EnumChildWindows(Some(host), Some(find_rdp_child_cb),
+                        LPARAM(&mut child_res as *mut _ as isize));
+
+                    if child_res.ui_main_visible {
+                        // UIMainClass visible means the RDP desktop is already showing —
+                        // the user already typed credentials; don't inject into the session.
+                        eprintln!("[rdp] session established before injection — skipping");
+                        return;
                     }
+                    if child_res.atl_hwnd.is_invalid() {
+                        eprintln!("[rdp] ATL window not found — cannot inject via PostMessage");
+                        return;
+                    }
+                    let atl = child_res.atl_hwnd;
+                    eprintln!("[rdp] ATL hwnd found for credential injection");
 
                     // Use clipboard paste instead of KEYEVENTF_UNICODE to inject the
                     // password.  KEYEVENTF_UNICODE (VK_PACKET) is unreliable for
@@ -588,7 +591,7 @@ unsafe extern "system" fn ev_sink_invoke(
                     // drop others, producing a truncated or corrupted password.
                     // Ctrl+V paste uses the clipboard data mechanism which is encoding-
                     // agnostic and works for any Unicode password.
-                    let mut wide: Vec<u16> = pw_clone.encode_utf16().chain(Some(0u16)).collect();
+                    let wide: Vec<u16> = pw_clone.encode_utf16().chain(Some(0u16)).collect();
                     let byte_len = wide.len() * std::mem::size_of::<u16>();
                     let mut clipboard_ok = false;
                     if let Ok(hglob) = GlobalAlloc(GMEM_MOVEABLE, byte_len) {
@@ -612,45 +615,26 @@ unsafe extern "system" fn ev_sink_invoke(
                         }
                     }
 
-                    let ki = |vk: u16, scan: u16, flags: u32| INPUT {
-                        r#type: INPUT_TYPE(1),
-                        Anonymous: INPUT_0 {
-                            ki: KEYBDINPUT {
-                                wVk: VIRTUAL_KEY(vk),
-                                wScan: scan,
-                                dwFlags: KEYBD_EVENT_FLAGS(flags),
-                                time: 0,
-                                dwExtraInfo: 0,
-                            },
-                        },
-                    };
-                    let kup = KEYEVENTF_KEYUP.0;
-
-                    let mut inputs: Vec<INPUT> = Vec::new();
-                    // Ctrl+A — select any pre-filled content before pasting/typing.
-                    inputs.push(ki(0x11, 0, 0));   // VK_CONTROL down
-                    inputs.push(ki(0x41, 0, 0));   // 'A' down
-                    inputs.push(ki(0x41, 0, kup)); // 'A' up
-                    inputs.push(ki(0x11, 0, kup)); // VK_CONTROL up
+                    use windows::Win32::Foundation::{WPARAM, LPARAM};
+                    use windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
 
                     if clipboard_ok {
-                        // Ctrl+V — paste from clipboard (handles £, € and all Unicode).
-                        inputs.push(ki(0x11, 0, 0));   // VK_CONTROL down
-                        inputs.push(ki(0x56, 0, 0));   // 'V' down
-                        inputs.push(ki(0x56, 0, kup)); // 'V' up
-                        inputs.push(ki(0x11, 0, kup)); // VK_CONTROL up
-                    } else {
-                        // Fallback: inject each UTF-16 code unit as a Unicode key event.
-                        for ch in pw_clone.encode_utf16() {
-                            inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0));
-                            inputs.push(ki(0, ch, KEYEVENTF_UNICODE.0 | kup));
-                        }
+                        // Deliver WM_PASTE directly to the ATL window via PostMessage.
+                        // PostMessage bypasses the focus chain — no SetForegroundWindow
+                        // or mouse click needed.  The ATL window processes WM_PASTE and
+                        // routes it to its internal credential UI password field.
+                        PostMessageW(Some(atl), WM_PASTE, WPARAM(0), LPARAM(0)).ok();
+                        eprintln!("[rdp] WM_PASTE posted to ATL window");
+                        std::thread::sleep(Duration::from_millis(200));
                     }
-                    inputs.push(ki(VK_RETURN.0, 0, 0));
-                    inputs.push(ki(VK_RETURN.0, 0, kup));
 
-                    let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                    eprintln!("[rdp] credential inputs sent: {sent}/{}", inputs.len());
+                    // Post Enter to submit the credential dialog.
+                    // LPARAM encoding: repeat=1, scan=0x1C, extended=0, prev=0, trans=0
+                    let enter_dn: isize = 0x001C_0001;
+                    let enter_up: isize = 0xC01C_0001u32 as i32 as isize;
+                    PostMessageW(Some(atl), WM_KEYDOWN, WPARAM(VK_RETURN.0 as usize), LPARAM(enter_dn)).ok();
+                    PostMessageW(Some(atl), WM_KEYUP,   WPARAM(VK_RETURN.0 as usize), LPARAM(enter_up)).ok();
+                    eprintln!("[rdp] VK_RETURN posted to ATL window");
 
                     // Clear clipboard shortly after so the password doesn't linger.
                     std::thread::sleep(Duration::from_millis(500));
@@ -966,7 +950,10 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
     } else {
         format!("{}\\{}", domain, username)
     };
-    let user_dot = if domain.is_empty() {
+    // Only add a ".\" local-machine prefix for plain local usernames (no domain,
+    // no embedded backslash).  For domain accounts the dot prefix is incorrect
+    // and would cause CredSSP to find the wrong credential entry.
+    let user_dot: Option<String> = if domain.is_empty() && !username.contains('\\') {
         Some(format!(".\\{}", username))
     } else {
         None
@@ -1329,7 +1316,8 @@ fn sta_thread(
         // mstscax reads WarnAbout* and UsernameHint during control initialization,
         // not at Connect() time — writing after DoVerb is too late.
         if let Some(ref pw) = params.password {
-            store_rdp_credential(&params.host, params.port, &params.username, &params.domain, pw);
+            // Use split username/domain so CredManager stores the right format.
+            store_rdp_credential(&params.host, params.port, user_str, domain_str, pw);
         }
         set_rdp_warning_dialog_version();
         suppress_rdp_server_registry(&params.host, params.port, &params.username, &params.domain);
@@ -1484,10 +1472,22 @@ fn sta_thread(
         // ── RDP properties ────────────────────────────────────────────────────
         let _ = put_bstr(&disp, "Server", &params.host);
         let _ = put_i4(&disp, "RDPPort", params.port as i32);
-        let _ = put_bstr(&disp, "UserName", &params.username);
-        if !params.domain.is_empty() {
+        // If the username contains a domain prefix (e.g. "DOMAIN\user"), split it
+        // so mstscax receives separate UserName and Domain properties.  Passing the
+        // combined "DOMAIN\user" string as UserName without setting Domain can cause
+        // NLA/CredSSP negotiation to fail, resulting in the credential dialog.
+        let (domain_str, user_str): (&str, &str) = if let Some(pos) = params.username.find('\\') {
+            (&params.username[..pos], &params.username[pos + 1..])
+        } else {
+            (params.domain.as_str(), params.username.as_str())
+        };
+        let _ = put_bstr(&disp, "UserName", user_str);
+        if !domain_str.is_empty() {
+            let _ = put_bstr(&disp, "Domain", domain_str);
+        } else if !params.domain.is_empty() {
             let _ = put_bstr(&disp, "Domain", &params.domain);
         }
+        eprintln!("[rdp] UserName={user_str} Domain={domain_str}");
         let _ = put_i4(&disp, "DesktopWidth", w);
         let _ = put_i4(&disp, "DesktopHeight", h);
         let _ = put_bool_prop(&disp, "FullScreen", false);
