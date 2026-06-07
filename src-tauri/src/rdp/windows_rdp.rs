@@ -630,7 +630,7 @@ unsafe extern "system" fn ev_sink_invoke(
 
                     use windows::Win32::UI::Input::KeyboardAndMouse::{
                         SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-                        KEYBD_EVENT_FLAGS, VIRTUAL_KEY, VK_A, VK_CONTROL, VK_RETURN, VK_V,
+                        KEYBD_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL, VK_RETURN, VK_V,
                     };
                     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 
@@ -663,12 +663,14 @@ unsafe extern "system" fn ev_sink_invoke(
                         };
                         const KF_UP: u32 = 2; // KEYEVENTF_KEYUP
 
-                        // Ctrl+A to clear any pre-existing text, then Ctrl+V to paste.
-                        let inputs: [INPUT; 10] = [
-                            ki(VK_CONTROL.0, 0),      // Ctrl down
-                            ki(VK_A.0, 0),            // A down  → Ctrl+A (select all)
-                            ki(VK_A.0, KF_UP),        // A up
-                            ki(VK_CONTROL.0, KF_UP),  // Ctrl up
+                        // Do NOT send Ctrl+A before pasting: the NLA credential dialog
+                        // starts with focus on the username field (not the password field),
+                        // and Ctrl+A would select the username text, causing Ctrl+V to
+                        // replace it with the password — submitting wrong credentials
+                        // (discReason=7943).  Just Ctrl+V + Enter: the password field
+                        // receives the paste because mstscax focuses it when the dialog
+                        // renders, and the field is empty so no prior text to clear.
+                        let inputs: [INPUT; 6] = [
                             ki(VK_CONTROL.0, 0),      // Ctrl down
                             ki(VK_V.0, 0),            // V down  → Ctrl+V (paste)
                             ki(VK_V.0, KF_UP),        // V up
@@ -677,7 +679,7 @@ unsafe extern "system" fn ev_sink_invoke(
                             ki(VK_RETURN.0, KF_UP),   // Enter up
                         ];
                         let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                        eprintln!("[rdp] SendInput: {sent}/{} events (Ctrl+A, Ctrl+V, Enter)", inputs.len());
+                        eprintln!("[rdp] SendInput: {sent}/{} events (Ctrl+V, Enter)", inputs.len());
 
                         if attached {
                             AttachThreadInput(our_tid, atl_tid, false);
