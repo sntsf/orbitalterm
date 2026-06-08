@@ -10,6 +10,10 @@ use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::Variant::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::Security::Credentials::{
+    CredWriteW, CredDeleteW, CREDENTIALW, CRED_FLAGS,
+    CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_DOMAIN_PASSWORD,
+};
 
 const CLSID_10: GUID = GUID::from_values(0xC0EFA91A,0xEEB7,0x41C7,[0x97,0xFA,0xF0,0xED,0x64,0x5E,0xFB,0x24]);
 const CLSID_9:  GUID = GUID::from_values(0x8B918B82,0x7985,0x4C24,[0x89,0xDF,0xC3,0x3A,0xD2,0xBB,0xFB,0xCD]);
@@ -284,6 +288,40 @@ unsafe fn try_ns_clear_text_password(obj: *mut c_void, password: &str) -> bool {
     hr >= 0
 }
 
+// ── Credential Manager ────────────────────────────────────────────────────────
+
+fn store_cred(host: &str, port: u16, user_plain: &str, password: &str) {
+    let targets: Vec<String> = if port == 3389 {
+        vec![format!("TERMSRV/{}", host)]
+    } else {
+        vec![format!("TERMSRV/{}", host), format!("TERMSRV/{}:{}", host, port)]
+    };
+    let pw_utf16: Vec<u8> = password.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    for target in &targets {
+        let mut target_w: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+        let mut user_w:   Vec<u16> = user_plain.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let _ = CredDeleteW(PCWSTR(target_w.as_ptr()), CRED_TYPE_DOMAIN_PASSWORD, Some(0));
+            let cred = CREDENTIALW {
+                Flags: CRED_FLAGS(0),
+                Type: CRED_TYPE_DOMAIN_PASSWORD,
+                TargetName: windows::core::PWSTR(target_w.as_mut_ptr()),
+                Comment: windows::core::PWSTR::null(),
+                LastWritten: std::mem::zeroed(),
+                CredentialBlobSize: pw_utf16.len() as u32,
+                CredentialBlob: pw_utf16.as_ptr() as *mut u8,
+                Persist: CRED_PERSIST_LOCAL_MACHINE,
+                AttributeCount: 0,
+                Attributes: std::ptr::null_mut(),
+                TargetAlias: windows::core::PWSTR::null(),
+                UserName: windows::core::PWSTR(user_w.as_mut_ptr()),
+            };
+            let ok = CredWriteW(&cred, 0).is_ok();
+            eprintln!("[rdp_test] CredWriteW {target} user={user_plain} DOMAIN_PASSWORD ok={ok}");
+        }
+    }
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -300,6 +338,12 @@ fn main() {
     let (domain_str, user_str): (&str, &str) = if let Some(pos) = username.find('\\') {
         (&username[..pos], &username[pos + 1..])
     } else { ("", username.as_str()) };
+
+    let combined_user = if domain_str.is_empty() {
+        user_str.to_string()
+    } else {
+        format!("{}\\{}", domain_str, user_str)
+    };
 
     eprintln!("[rdp_test] host={host}:{port}  user={user_str}  domain={domain_str}");
     eprintln!("[rdp_test] password length: {} chars", password.len());
@@ -354,15 +398,20 @@ fn main() {
             eprintln!("[rdp_test] WARNING: IOleObject not available");
         }
 
-        // ── Credentials via IDispatch ─────────────────────────────────────────
+        // ── Store credential in Windows Credential Manager ────────────────────
+        // Uses CRED_TYPE_DOMAIN_PASSWORD with plain UTF-16LE — same as cmdkey.
+        // mstscax/CredSSP finds it by TERMSRV/<host> and performs silent NLA.
+        store_cred(host, port, &combined_user, password);
+
+        // ── RDP properties via IDispatch ──────────────────────────────────────
         let disp: IDispatch = rdp_unk.cast().expect("IDispatch");
 
         put_bstr(&disp, "Server", host);
         put_i32(&disp, "RDPPort", port as i32);
-        put_bstr(&disp, "UserName", user_str);
-        if !domain_str.is_empty() { put_bstr(&disp, "Domain", domain_str); }
+        // Combined "DOMAIN\user" — matches the DOMAIN_PASSWORD credential by username.
+        put_bstr(&disp, "UserName", &combined_user);
         put_i32(&disp, "AuthenticationLevel", 0);
-        eprintln!("[rdp_test] Server/UserName/Domain set");
+        eprintln!("[rdp_test] Server/UserName set (combined={combined_user})");
 
         let adv_names = ["AdvancedSettings9","AdvancedSettings7","AdvancedSettings5","AdvancedSettings2"];
         let adv = adv_names.iter().find_map(|n| get_sub_disp(&disp, n).map(|d| { eprintln!("[rdp_test] {n}"); d }));
@@ -372,10 +421,10 @@ fn main() {
             put_i32(adv, "EnableCredSspSupport", 1);
         }
 
-        let ns_ok = try_ns_clear_text_password(raw_rdp, password);
-        if !ns_ok {
-            if let Some(ref adv) = adv { put_bstr(adv, "ClearTextPassword", password); }
-        }
+        // Do NOT use ClearTextPassword or IMsTscNonScriptable — we want to test
+        // that mstscax picks up the DOMAIN_PASSWORD credential silently.
+        eprintln!("[rdp_test] Skipping ClearTextPassword (testing CredMgr path)");
+        let _ = try_ns_clear_text_password; // suppress unused-fn warning
 
         // ── Connect ───────────────────────────────────────────────────────────
         eprintln!("[rdp_test] Connect()...");
