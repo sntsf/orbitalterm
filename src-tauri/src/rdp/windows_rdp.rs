@@ -662,17 +662,11 @@ unsafe extern "system" fn ev_sink_invoke(
                         };
                         const KF_UP: u32 = 2; // KEYEVENTF_KEYUP
 
-                        // The mstscax NLA credential dialog has three fields when
-                        // Domain is set separately: [Username][Domain][Password].
-                        // Focus starts on Username.
-                        // Tab×2: Username → Domain → Password field.
-                        // Ctrl+V: paste password into Password field.
-                        // Enter: submit credentials.
-                        let inputs: [INPUT; 10] = [
-                            ki(VK_TAB.0, 0),           // Tab down  → username → domain
-                            ki(VK_TAB.0, KF_UP),       // Tab up
-                            ki(VK_TAB.0, 0),           // Tab down  → domain → password
-                            ki(VK_TAB.0, KF_UP),       // Tab up
+                        // When UserName and Domain are pre-filled via COM, the
+                        // mstscax NLA credential dialog places focus directly on
+                        // the Password field (username/domain are non-editable).
+                        // No Tab needed — Ctrl+V pastes directly into Password.
+                        let inputs: [INPUT; 6] = [
                             ki(VK_CONTROL.0, 0),       // Ctrl down
                             ki(VK_V.0, 0),             // V down    → Ctrl+V (paste into password)
                             ki(VK_V.0, KF_UP),         // V up
@@ -681,7 +675,7 @@ unsafe extern "system" fn ev_sink_invoke(
                             ki(VK_RETURN.0, KF_UP),    // Enter up
                         ];
                         let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                        eprintln!("[rdp] SendInput: {sent}/{} events (Tab×2, Ctrl+V, Enter)", inputs.len());
+                        eprintln!("[rdp] SendInput: {sent}/{} events (Ctrl+V, Enter)", inputs.len());
 
                         if attached {
                             AttachThreadInput(our_tid, atl_tid, false);
