@@ -4,6 +4,7 @@
 
 #![cfg(target_os = "windows")]
 
+use std::ffi::c_void;
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
