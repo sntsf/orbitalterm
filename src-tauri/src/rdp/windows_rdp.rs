@@ -1126,7 +1126,7 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
     use windows::Win32::Security::Credentials::{
         CredWriteW, CredDeleteW,
         CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE,
-        CRED_TYPE_DOMAIN_PASSWORD, CRED_TYPE_GENERIC,
+        CRED_TYPE_GENERIC,
     };
     use windows::core::PWSTR;
 
@@ -1154,60 +1154,47 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
         base_targets.push(format!("TERMSRV/{}:{}", host, port));
     }
 
-    // CRED_TYPE_DOMAIN_PASSWORD blob: cleartext UTF-16LE (read by LSA directly).
-    let pw_blob_plain: Vec<u8> = password
-        .encode_utf16()
-        .flat_map(|c| c.to_le_bytes())
-        .collect();
-
     // CRED_TYPE_GENERIC blob: DPAPI-encrypted UTF-16LE.
-    // mstscax reads CRED_TYPE_GENERIC for NLA pre-authentication, decrypting
-    // the blob with CryptUnprotectData before passing it to CredSSP.  Storing
-    // cleartext here causes the decryption to fail silently → DISPID 18 fires.
+    // mstscax reads this when building the NLA credential dialog, decrypting the
+    // blob with CryptUnprotectData to pre-fill the password field.  DOMAIN_PASSWORD
+    // is intentionally NOT stored: storing cleartext there caused CredSSP to attempt
+    // NLA silently (suppressing the credential dialog), which resulted in
+    // discReason=0x204 (security data too large) because mstscax sent the DPAPI
+    // blob unsanitised.  Keeping only GENERIC lets the credential dialog appear so
+    // our DISPID-18 injection can submit the correct password.
     let pw_blob_dpapi: Vec<u8> = dpapi_protect_password(password)
-        .unwrap_or_else(|| pw_blob_plain.clone());
+        .unwrap_or_else(|| password.encode_utf16().flat_map(|c| c.to_le_bytes()).collect());
 
     for target in &base_targets {
         let mut target_wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
 
-        // Delete any stale credential with either type before writing fresh ones.
-        // A stale credential with a different username or wrong password causes
-        // mstscax to prompt even though we wrote a correct one afterward.
-        for cred_type in [CRED_TYPE_GENERIC, CRED_TYPE_DOMAIN_PASSWORD] {
-            unsafe {
-                let ok = CredDeleteW(PCWSTR(target_wide.as_ptr()), cred_type, Some(0)).is_ok();
-                if ok { eprintln!("[rdp] CredDeleteW {target} type={} cleared", cred_type.0); }
-            }
+        unsafe {
+            let ok = CredDeleteW(PCWSTR(target_wide.as_ptr()), CRED_TYPE_GENERIC, Some(0)).is_ok();
+            if ok { eprintln!("[rdp] CredDeleteW {target} type=GENERIC cleared"); }
         }
 
-        // Build the list of username variants to store for this target.
         let mut user_variants: Vec<String> = vec![user_plain.clone()];
         if let Some(ref dot) = user_dot { user_variants.push(dot.clone()); }
 
         for user_str in &user_variants {
             let mut user_wide: Vec<u16> = user_str.encode_utf16().chain(Some(0)).collect();
-            for cred_type in [CRED_TYPE_GENERIC, CRED_TYPE_DOMAIN_PASSWORD] {
-                // Use DPAPI-encrypted blob for GENERIC (mstscax expects this format),
-                // cleartext UTF-16LE for DOMAIN_PASSWORD (consumed by LSA directly).
-                let blob = if cred_type == CRED_TYPE_GENERIC { &pw_blob_dpapi } else { &pw_blob_plain };
-                let cred = CREDENTIALW {
-                    Flags: CRED_FLAGS(0),
-                    Type: cred_type,
-                    TargetName: PWSTR(target_wide.as_mut_ptr()),
-                    Comment: PWSTR::null(),
-                    LastWritten: unsafe { std::mem::zeroed() },
-                    CredentialBlobSize: blob.len() as u32,
-                    CredentialBlob: blob.as_ptr() as *mut u8,
-                    Persist: CRED_PERSIST_LOCAL_MACHINE,
-                    AttributeCount: 0,
-                    Attributes: std::ptr::null_mut(),
-                    TargetAlias: PWSTR::null(),
-                    UserName: PWSTR(user_wide.as_mut_ptr()),
-                };
-                let ok = unsafe { CredWriteW(&cred, 0).is_ok() };
-                eprintln!("[rdp] CredWriteW {target} user={user_str} type={} blob={} ok={ok}",
-                    cred_type.0, blob.len());
-            }
+            let cred = CREDENTIALW {
+                Flags: CRED_FLAGS(0),
+                Type: CRED_TYPE_GENERIC,
+                TargetName: PWSTR(target_wide.as_mut_ptr()),
+                Comment: PWSTR::null(),
+                LastWritten: unsafe { std::mem::zeroed() },
+                CredentialBlobSize: pw_blob_dpapi.len() as u32,
+                CredentialBlob: pw_blob_dpapi.as_ptr() as *mut u8,
+                Persist: CRED_PERSIST_LOCAL_MACHINE,
+                AttributeCount: 0,
+                Attributes: std::ptr::null_mut(),
+                TargetAlias: PWSTR::null(),
+                UserName: PWSTR(user_wide.as_mut_ptr()),
+            };
+            let ok = unsafe { CredWriteW(&cred, 0).is_ok() };
+            eprintln!("[rdp] CredWriteW {target} user={user_str} type=GENERIC blob={} ok={ok}",
+                pw_blob_dpapi.len());
         }
     }
 }
@@ -1679,11 +1666,12 @@ fn sta_thread(
             get_dispatch_sub(&disp, name).ok().map(|d| { eprintln!("[rdp] AdvancedSettings: {name}"); d })
         });
         if let Some(ref adv) = adv {
-            if let Some(ref pw) = params.password {
-                let r = put_bstr(adv, "ClearTextPassword", pw);
-                eprintln!("[rdp] ClearTextPassword hr=0x{:08X}", r.as_ref().err()
-                    .map(|e| e.code().0 as u32).unwrap_or(0));
-            }
+            // ClearTextPassword is intentionally NOT set here.
+            // Setting it causes mstscax to bypass the NLA credential dialog
+            // (ATL becomes invisible) and attempt NLA silently — but with the
+            // in-process host this triggers discReason=0x204 (security data
+            // rejected by server).  Instead we rely on GENERIC CredManager +
+            // DISPID 18 injection (Tab+Ctrl+V+Enter) to authenticate.
             let _ = put_i4(adv, "RDPPort", params.port as i32);
             // NLA (CredSSP) is disabled for "rdp" and "tls" security modes.
             let use_nla = params.rdp_security != "rdp" && params.rdp_security != "tls";
