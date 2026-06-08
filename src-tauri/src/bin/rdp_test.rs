@@ -138,7 +138,8 @@ fn make_sink(connected: Arc<AtomicBool>, disc_reason: Arc<AtomicI32>) -> IUnknow
 fn get_dispid(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
     let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
     let mut id = 0i32;
-    unsafe { disp.GetIDsOfNames(&GUID::zeroed(), &[PCWSTR(wide.as_ptr())], 0x0409, std::slice::from_mut(&mut id)) }?;
+    let names = [PCWSTR(wide.as_ptr())];
+    unsafe { disp.GetIDsOfNames(&GUID::zeroed(), names.as_ptr(), 1, 0x0409, &mut id) }?;
     Ok(id)
 }
 fn put_bstr(disp: &IDispatch, name: &str, val: &str) {
@@ -248,15 +249,16 @@ unsafe extern "system" fn site_get_moniker(_: *mut SiteObj, _: u32, _: u32, ppv:
 unsafe extern "system" fn site_get_container(_: *mut SiteObj, ppv: *mut *mut std::ffi::c_void) -> HRESULT
     { *ppv = std::ptr::null_mut(); HRESULT(0x80004001u32 as i32) }
 unsafe extern "system" fn site_on_show(_: *mut SiteObj, _: BOOL) -> HRESULT { HRESULT(0) }
+unsafe extern "system" fn site_ok(_: *mut SiteObj) -> HRESULT { HRESULT(0) }
 
 static SITE_VTBL: SiteVtbl = SiteVtbl {
     qi: site_qi, add_ref: site_add_ref, release: site_release,
-    save_object: |_| HRESULT(0x80004001u32 as i32),
+    save_object: site_stub_hr,
     get_moniker: site_get_moniker,
     get_container: site_get_container,
-    show_object: |_| HRESULT(0),
+    show_object: site_ok,
     on_show: site_on_show,
-    request_new_object_layout: |_| HRESULT(0x80004001u32 as i32),
+    request_new_object_layout: site_stub_hr,
 };
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -287,7 +289,7 @@ fn main() {
     let disc_reason = Arc::new(AtomicI32::new(i32::MIN));
 
     unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).expect("CoInitializeEx");
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
         let rdp_unk: IUnknown = CoCreateInstance(&CLSID_10, None, CLSCTX_INPROC_SERVER)
             .or_else(|_| CoCreateInstance(&CLSID_9, None, CLSCTX_INPROC_SERVER))
@@ -347,7 +349,7 @@ fn main() {
                 loop {
                     let mut cp_arr = [None::<IConnectionPoint>];
                     let mut fetched = 0u32;
-                    if enum_cp.Next(&mut cp_arr, Some(&mut fetched)).is_err() || fetched == 0 { break; }
+                    if enum_cp.Next(&mut cp_arr, &mut fetched as *mut u32).is_err() || fetched == 0 { break; }
                     if let Some(ref cp) = cp_arr[0] {
                         let sink = make_sink(connected.clone(), disc_reason.clone());
                         if cp.Advise(&sink).is_ok() {
