@@ -1106,95 +1106,6 @@ unsafe fn ns_set_clear_text_password(com_ptr: *mut std::ffi::c_void, password: &
     put_hr >= 0
 }
 
-// Write a temporary .rdp file containing the connection settings and the
-// DPAPI-encrypted password ("password 51:b:" field).  This is identical to
-// the format mstsc.exe produces when you save credentials.  The file is
-// passed to LoadConnectionSettings so mstscax can perform NLA pre-auth without
-// showing the interactive credential dialog (DISPID 18).
-fn write_rdp_temp_file(
-    host: &str, port: u16,
-    username: &str, domain: &str,
-    password: Option<&str>,
-    width: i32, height: i32, color_depth: i32,
-    admin_mode: bool,
-) -> Option<std::path::PathBuf> {
-    let full_address = if port == 3389 {
-        host.to_owned()
-    } else {
-        format!("{}:{}", host, port)
-    };
-
-    let password_line = match password.and_then(dpapi_protect_password) {
-        Some(blob) => {
-            let hex: String = blob.iter().map(|b| format!("{:02x}", b)).collect();
-            format!("password 51:b:{}\r\n", hex)
-        }
-        None => String::new(),
-    };
-
-    let admin_line = if admin_mode { "administrative session:i:1\r\n" } else { "" };
-
-    let content = format!(
-        "full address:s:{full_address}\r\n\
-         username:s:{username}\r\n\
-         domain:s:{domain}\r\n\
-         {password_line}\
-         desktopwidth:i:{width}\r\n\
-         desktopheight:i:{height}\r\n\
-         session bpp:i:{color_depth}\r\n\
-         {admin_line}\
-         prompt for credentials:i:0\r\n\
-         authentication level:i:0\r\n\
-         negotiate security layer:i:1\r\n\
-         enablecredsspsupport:i:1\r\n\
-         redirectclipboard:i:1\r\n\
-         redirectprinters:i:0\r\n\
-         autoreconnection enabled:i:1\r\n\
-         bandwidthautodetect:i:1\r\n\
-         connection type:i:7\r\n\
-         disable wallpaper:i:1\r\n\
-         bitmapcachepersistenable:i:1\r\n\
-         screen mode id:i:1\r\n",
-    );
-
-    let name = format!(
-        "orbterm_{}.rdp",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0),
-    );
-    let path = std::env::temp_dir().join(&name);
-    match std::fs::write(&path, content.as_bytes()) {
-        Ok(()) => {
-            eprintln!("[rdp] temp .rdp file: {}", path.display());
-            Some(path)
-        }
-        Err(e) => {
-            eprintln!("[rdp] failed to write temp .rdp file: {e}");
-            None
-        }
-    }
-}
-
-// Call an IDispatch method that takes a single BSTR argument.
-// Used to call LoadConnectionSettings(filePath) on the mstscax object.
-fn call_method_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core::Result<()> {
-    let id = get_dispid(disp, name)?;
-    let bval = std::mem::ManuallyDrop::new(BSTR::from(value));
-    unsafe {
-        let mut var: VARIANT = std::mem::zeroed();
-        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 8; (*r).data.bstrVal = bval.as_ptr() as *mut u16; }
-        let res = disp.Invoke(
-            id, &GUID::zeroed(), 0x0409, DISPATCH_METHOD,
-            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 1, cNamedArgs: 0 },
-            None, None, None,
-        );
-        VariantClear(&mut var).ok();
-        res
-    }
-}
-
 // Write credentials directly into Windows Credential Manager via CredWriteW.
 // More reliable than spawning cmdkey.exe (no process creation, no UAC, no
 // quoting issues). NLA/CredSSP picks these up automatically during Connect().
@@ -1721,11 +1632,16 @@ fn sta_thread(
         // ── RDP properties ────────────────────────────────────────────────────
         let _ = put_bstr(&disp, "Server", &params.host);
         let _ = put_i4(&disp, "RDPPort", params.port as i32);
-        let _ = put_bstr(&disp, "UserName", user_str);
-        if !domain_str.is_empty() {
-            let _ = put_bstr(&disp, "Domain", domain_str);
-        }
-        eprintln!("[rdp] UserName={user_str} Domain={domain_str}");
+        // Use combined "DOMAIN\user" format for UserName — no separate Domain property.
+        // mstscax matches this exactly against the GENERIC CredManager entry stored
+        // as "DOMAIN\user", which lets it perform NLA silently (ATL stays invisible).
+        let combined_user = if domain_str.is_empty() {
+            user_str.to_string()
+        } else {
+            format!("{}\\{}", domain_str, user_str)
+        };
+        let _ = put_bstr(&disp, "UserName", &combined_user);
+        eprintln!("[rdp] UserName={combined_user}");
         let _ = put_i4(&disp, "DesktopWidth", w);
         let _ = put_i4(&disp, "DesktopHeight", h);
         let _ = put_bool_prop(&disp, "FullScreen", false);
@@ -1847,30 +1763,6 @@ fn sta_thread(
         }
         eprintln!("[rdp] cross-thread watcher started");
 
-        // ── .rdp temp file: DPAPI password → LoadConnectionSettings ─────────
-        // Write a temporary .rdp file with the DPAPI-encrypted password and
-        // attempt to load it via IDispatch ("LoadConnectionSettings").  If the
-        // method exists on this mstscax version, mstscax will use the DPAPI
-        // credential directly for NLA pre-auth without showing DISPID 18.
-        // The file is deleted in a background thread shortly after Connect() so
-        // the plaintext-equivalent credential doesn't linger on disk.
-        let rdp_temp_path: Option<std::path::PathBuf> = if params.password.is_some() {
-            write_rdp_temp_file(
-                &params.host, params.port, user_str, domain_str,
-                params.password.as_deref(),
-                w, h, params.color_depth, params.admin_mode,
-            )
-        } else {
-            None
-        };
-        if let Some(ref rdp_path) = rdp_temp_path {
-            let path_str = rdp_path.to_string_lossy().into_owned();
-            match call_method_bstr(&disp, "LoadConnectionSettings", &path_str) {
-                Ok(()) => eprintln!("[rdp] LoadConnectionSettings ok"),
-                Err(e) => eprintln!("[rdp] LoadConnectionSettings not available ({e:?}) — using CredManager + injection fallback"),
-            }
-        }
-
         // ── COM connection point: subscribe to mstscax events ────────────────
         // Subscribe BEFORE Connect() so DISPID 18 (cert warning / credential
         // dialog) and other early events are received from the very first
@@ -1943,19 +1835,6 @@ fn sta_thread(
             DestroyWindow(host_hwnd).ok();
             CoUninitialize();
             return;
-        }
-
-        // Delete the temp .rdp file shortly after Connect() — mstscax has
-        // already read and parsed the settings synchronously by this point.
-        if let Some(path) = rdp_temp_path {
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(5));
-                if let Err(e) = std::fs::remove_file(&path) {
-                    eprintln!("[rdp] temp .rdp cleanup error: {e}");
-                } else {
-                    eprintln!("[rdp] temp .rdp file deleted");
-                }
-            });
         }
 
         let (tx, rx) = mpsc::sync_channel::<ComCmd>(16);
