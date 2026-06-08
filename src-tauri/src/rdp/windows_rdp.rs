@@ -1051,6 +1051,61 @@ fn dpapi_protect_password(password: &str) -> Option<Vec<u8>> {
     }
 }
 
+// Sets the RDP password directly on the mstscax COM object via
+// IMsTscNonScriptable::put_ClearTextPassword before Connect(), so mstscax
+// can perform NLA silently without showing the credential dialog (DISPID 18).
+//
+// IMsTscNonScriptable is not exported by windows-rs 0.61, so we QI and call
+// the method via raw vtable pointer arithmetic.
+//
+// IID: {C539BD95-2782-4D46-9606-50B31E9D4897}
+// Vtable layout (after IUnknown at [0..2]):
+//   [3] put_ClearTextPassword(this, rhs: BSTR) -> HRESULT
+//   [4] get_ClearTextPassword ...
+//   [5..] PortablePassword, PortableSalt, BinaryPassword, BinarySalt, ResetPassword
+unsafe fn ns_set_clear_text_password(com_ptr: *mut std::ffi::c_void, password: &str) -> bool {
+    if com_ptr.is_null() || password.is_empty() { return false; }
+
+    const IID_NS: GUID = GUID::from_values(
+        0xC539BD95, 0x2782, 0x4D46,
+        [0x96, 0x06, 0x50, 0xB3, 0x1E, 0x9D, 0x48, 0x97],
+    );
+
+    // COM interface pointer layout on x64:
+    //   com_ptr → [vtable_ptr (8 bytes)] [object data ...]
+    //   vtable_ptr → [fn_ptr_0 (QI), fn_ptr_1 (AddRef), fn_ptr_2 (Release), ...]
+    let vtbl: *const usize = *(com_ptr as *const *const usize);
+
+    // QueryInterface (vtable[0])
+    type QiFn = unsafe extern "system" fn(
+        *mut std::ffi::c_void, *const GUID, *mut *mut std::ffi::c_void,
+    ) -> i32;
+    let qi: QiFn = std::mem::transmute(*vtbl.add(0));
+    let mut ns_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+    let qi_hr: i32 = qi(com_ptr, &IID_NS, &mut ns_ptr);
+    if qi_hr < 0 || ns_ptr.is_null() {
+        eprintln!("[rdp] IMsTscNonScriptable QI hr=0x{:08X} (not available)", qi_hr as u32);
+        return false;
+    }
+    eprintln!("[rdp] IMsTscNonScriptable QI ok");
+
+    let ns_vtbl: *const usize = *(ns_ptr as *const *const usize);
+    let pw_bstr = BSTR::from(password);
+
+    // put_ClearTextPassword (vtable[3]) — BSTR is *mut u16 in COM ABI
+    type PutFn = unsafe extern "system" fn(*mut std::ffi::c_void, *mut u16) -> i32;
+    let put_fn: PutFn = std::mem::transmute(*ns_vtbl.add(3));
+    let put_hr: i32 = put_fn(ns_ptr, pw_bstr.as_ptr() as *mut u16);
+
+    // Release (vtable[2])
+    type RelFn = unsafe extern "system" fn(*mut std::ffi::c_void) -> u32;
+    let release: RelFn = std::mem::transmute(*ns_vtbl.add(2));
+    release(ns_ptr);
+
+    eprintln!("[rdp] IMsTscNonScriptable::put_ClearTextPassword hr=0x{:08X}", put_hr as u32);
+    put_hr >= 0
+}
+
 // Write a temporary .rdp file containing the connection settings and the
 // DPAPI-encrypted password ("password 51:b:" field).  This is identical to
 // the format mstsc.exe produces when you save credentials.  The file is
@@ -1687,12 +1742,6 @@ fn sta_thread(
             get_dispatch_sub(&disp, name).ok().map(|d| { eprintln!("[rdp] AdvancedSettings: {name}"); d })
         });
         if let Some(ref adv) = adv {
-            // ClearTextPassword is intentionally NOT set here.
-            // Setting it causes mstscax to bypass the NLA credential dialog
-            // (ATL becomes invisible) and attempt NLA silently — but with the
-            // in-process host this triggers discReason=0x204 (security data
-            // rejected by server).  Instead we rely on GENERIC CredManager +
-            // DISPID 18 injection (Tab+Ctrl+V+Enter) to authenticate.
             let _ = put_i4(adv, "RDPPort", params.port as i32);
             // NLA (CredSSP) is disabled for "rdp" and "tls" security modes.
             let use_nla = params.rdp_security != "rdp" && params.rdp_security != "tls";
@@ -1725,6 +1774,15 @@ fn sta_thread(
 
         // WarnAbout* suppression via COM (best-effort; registry writes above are primary).
         suppress_rdp_dialogs(&rdp_unk);
+
+        // Set password via IMsTscNonScriptable::ClearTextPassword so mstscax can
+        // perform NLA silently before Connect(), without showing the credential dialog.
+        // This is the proper COM API path — GENERIC CredManager is kept as a fallback
+        // and the DISPID 18 injection is kept in case the dialog appears anyway.
+        if let Some(ref pw) = params.password {
+            let com_ptr = rdp_unk.as_raw() as *mut std::ffi::c_void;
+            unsafe { ns_set_clear_text_password(com_ptr, pw); }
+        }
 
         // Install thread-local CBT hook to auto-dismiss any #32770 dialogs with
         // an IDYES button (redirect/security warnings) before the user sees them.
