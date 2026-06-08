@@ -1010,46 +1010,6 @@ fn get_i4(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
     }
 }
 
-// ── DPAPI password protection ─────────────────────────────────────────────────
-//
-// mstscax in NLA mode reads CRED_TYPE_GENERIC/TERMSRV credentials from Windows
-// Credential Manager.  The credential blob MUST be a DPAPI-encrypted UTF-16LE
-// password (same format as the "password 51:b:" field in .rdp files produced
-// by mstsc.exe).  If the blob is stored as cleartext UTF-16LE instead, mstscax
-// silently fails to decrypt it and falls back to showing the credential dialog
-// (DISPID 18) — this was the root cause of all NLA failures so far.
-fn dpapi_protect_password(password: &str) -> Option<Vec<u8>> {
-    use windows::Win32::Security::Cryptography::{
-        CryptProtectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
-    };
-    extern "system" { fn LocalFree(hmem: *mut core::ffi::c_void) -> *mut core::ffi::c_void; }
-
-    let pw_bytes: Vec<u8> = password
-        .encode_utf16()
-        .flat_map(|c| c.to_le_bytes())
-        .collect();
-
-    unsafe {
-        let mut input  = CRYPT_INTEGER_BLOB { cbData: pw_bytes.len() as u32, pbData: pw_bytes.as_ptr() as *mut u8 };
-        let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
-        let ok = CryptProtectData(
-            &mut input,
-            windows::core::PCWSTR::null(),
-            None, None, None,
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut output,
-        ).is_ok();
-        if ok && !output.pbData.is_null() {
-            let blob = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-            LocalFree(output.pbData as *mut _);
-            eprintln!("[rdp] dpapi_protect: {} plaintext bytes → {} encrypted bytes", pw_bytes.len(), blob.len());
-            Some(blob)
-        } else {
-            eprintln!("[rdp] dpapi_protect FAILED");
-            None
-        }
-    }
-}
 
 // Sets the RDP password directly on the mstscax COM object via
 // IMsTscNonScriptable::put_ClearTextPassword before Connect(), so mstscax
@@ -1113,7 +1073,7 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
     use windows::Win32::Security::Credentials::{
         CredWriteW, CredDeleteW,
         CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE,
-        CRED_TYPE_GENERIC,
+        CRED_TYPE_DOMAIN_PASSWORD,
     };
     use windows::core::PWSTR;
 
@@ -1141,23 +1101,19 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
         base_targets.push(format!("TERMSRV/{}:{}", host, port));
     }
 
-    // CRED_TYPE_GENERIC blob: DPAPI-encrypted UTF-16LE.
-    // mstscax reads this when building the NLA credential dialog, decrypting the
-    // blob with CryptUnprotectData to pre-fill the password field.  DOMAIN_PASSWORD
-    // is intentionally NOT stored: storing cleartext there caused CredSSP to attempt
-    // NLA silently (suppressing the credential dialog), which resulted in
-    // discReason=0x204 (security data too large) because mstscax sent the DPAPI
-    // blob unsanitised.  Keeping only GENERIC lets the credential dialog appear so
-    // our DISPID-18 injection can submit the correct password.
-    let pw_blob_dpapi: Vec<u8> = dpapi_protect_password(password)
-        .unwrap_or_else(|| password.encode_utf16().flat_map(|c| c.to_le_bytes()).collect());
+    // CRED_TYPE_DOMAIN_PASSWORD with plain UTF-16LE password — same as cmdkey /add.
+    // Windows handles DPAPI encryption internally for DOMAIN_PASSWORD credentials;
+    // mstscax/CredSSP reads these natively and performs silent NLA (ATL window stays
+    // invisible, no credential dialog).  CRED_TYPE_GENERIC with a DPAPI blob was the
+    // previous approach but mstscax sent the raw blob as the NLA password → 7943.
+    let pw_utf16: Vec<u8> = password.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
 
     for target in &base_targets {
         let mut target_wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
 
         unsafe {
-            let ok = CredDeleteW(PCWSTR(target_wide.as_ptr()), CRED_TYPE_GENERIC, Some(0)).is_ok();
-            if ok { eprintln!("[rdp] CredDeleteW {target} type=GENERIC cleared"); }
+            // Remove stale entries of either type to avoid CredSSP picking the wrong one.
+            let _ = CredDeleteW(PCWSTR(target_wide.as_ptr()), CRED_TYPE_DOMAIN_PASSWORD, Some(0));
         }
 
         let mut user_variants: Vec<String> = vec![user_plain.clone()];
@@ -1167,12 +1123,12 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
             let mut user_wide: Vec<u16> = user_str.encode_utf16().chain(Some(0)).collect();
             let cred = CREDENTIALW {
                 Flags: CRED_FLAGS(0),
-                Type: CRED_TYPE_GENERIC,
+                Type: CRED_TYPE_DOMAIN_PASSWORD,
                 TargetName: PWSTR(target_wide.as_mut_ptr()),
                 Comment: PWSTR::null(),
                 LastWritten: unsafe { std::mem::zeroed() },
-                CredentialBlobSize: pw_blob_dpapi.len() as u32,
-                CredentialBlob: pw_blob_dpapi.as_ptr() as *mut u8,
+                CredentialBlobSize: pw_utf16.len() as u32,
+                CredentialBlob: pw_utf16.as_ptr() as *mut u8,
                 Persist: CRED_PERSIST_LOCAL_MACHINE,
                 AttributeCount: 0,
                 Attributes: std::ptr::null_mut(),
@@ -1180,8 +1136,8 @@ fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, pas
                 UserName: PWSTR(user_wide.as_mut_ptr()),
             };
             let ok = unsafe { CredWriteW(&cred, 0).is_ok() };
-            eprintln!("[rdp] CredWriteW {target} user={user_str} type=GENERIC blob={} ok={ok}",
-                pw_blob_dpapi.len());
+            eprintln!("[rdp] CredWriteW {target} user={user_str} type=DOMAIN_PASSWORD bytes={} ok={ok}",
+                pw_utf16.len());
         }
     }
 }
@@ -1633,8 +1589,8 @@ fn sta_thread(
         let _ = put_bstr(&disp, "Server", &params.host);
         let _ = put_i4(&disp, "RDPPort", params.port as i32);
         // Use combined "DOMAIN\user" format for UserName — no separate Domain property.
-        // mstscax matches this exactly against the GENERIC CredManager entry stored
-        // as "DOMAIN\user", which lets it perform NLA silently (ATL stays invisible).
+        // mstscax matches this against the DOMAIN_PASSWORD CredManager entry (TERMSRV/<host>)
+        // and performs NLA silently without showing the credential dialog (ATL stays invisible).
         let combined_user = if domain_str.is_empty() {
             user_str.to_string()
         } else {
