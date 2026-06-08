@@ -11,9 +11,7 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use windows::core::*;
-use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
-use windows::Win32::System::Ole::*;
 use windows::Win32::System::Variant::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -218,49 +216,6 @@ unsafe fn try_clear_text_password(com_ptr: *mut std::ffi::c_void, password: &str
     put_hr >= 0
 }
 
-// ── IOleClientSite stub ───────────────────────────────────────────────────────
-
-#[repr(C)]
-struct SiteVtbl {
-    qi:          unsafe extern "system" fn(*mut SiteObj, *const GUID, *mut *mut std::ffi::c_void) -> HRESULT,
-    add_ref:     unsafe extern "system" fn(*mut SiteObj) -> u32,
-    release:     unsafe extern "system" fn(*mut SiteObj) -> u32,
-    save_object: unsafe extern "system" fn(*mut SiteObj) -> HRESULT,
-    get_moniker: unsafe extern "system" fn(*mut SiteObj, u32, u32, *mut *mut std::ffi::c_void) -> HRESULT,
-    get_container: unsafe extern "system" fn(*mut SiteObj, *mut *mut std::ffi::c_void) -> HRESULT,
-    show_object:  unsafe extern "system" fn(*mut SiteObj) -> HRESULT,
-    on_show:      unsafe extern "system" fn(*mut SiteObj, BOOL) -> HRESULT,
-    request_new_object_layout: unsafe extern "system" fn(*mut SiteObj) -> HRESULT,
-}
-struct SiteObj { vtbl: *const SiteVtbl }
-
-const IID_IOleClientSite: GUID = GUID::from_values(0x00000118,0x0000,0x0000,[0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46]);
-
-unsafe extern "system" fn site_qi(this: *mut SiteObj, riid: *const GUID, ppv: *mut *mut std::ffi::c_void) -> HRESULT {
-    if *riid == IID_IUNKNOWN || *riid == IID_IOleClientSite {
-        *ppv = this as _; HRESULT(0)
-    } else { *ppv = std::ptr::null_mut(); HRESULT(0x80004002u32 as i32) }
-}
-unsafe extern "system" fn site_add_ref(_: *mut SiteObj) -> u32 { 1 }
-unsafe extern "system" fn site_release(_: *mut SiteObj) -> u32 { 1 }
-unsafe extern "system" fn site_stub_hr(_: *mut SiteObj) -> HRESULT { HRESULT(0x80004001u32 as i32) }
-unsafe extern "system" fn site_get_moniker(_: *mut SiteObj, _: u32, _: u32, ppv: *mut *mut std::ffi::c_void) -> HRESULT
-    { *ppv = std::ptr::null_mut(); HRESULT(0x80004001u32 as i32) }
-unsafe extern "system" fn site_get_container(_: *mut SiteObj, ppv: *mut *mut std::ffi::c_void) -> HRESULT
-    { *ppv = std::ptr::null_mut(); HRESULT(0x80004001u32 as i32) }
-unsafe extern "system" fn site_on_show(_: *mut SiteObj, _: BOOL) -> HRESULT { HRESULT(0) }
-unsafe extern "system" fn site_ok(_: *mut SiteObj) -> HRESULT { HRESULT(0) }
-
-static SITE_VTBL: SiteVtbl = SiteVtbl {
-    qi: site_qi, add_ref: site_add_ref, release: site_release,
-    save_object: site_stub_hr,
-    get_moniker: site_get_moniker,
-    get_container: site_get_container,
-    show_object: site_ok,
-    on_show: site_on_show,
-    request_new_object_layout: site_stub_hr,
-};
-
 // ── main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -328,32 +283,22 @@ fn main() {
             }
         }
 
-        // Minimal IOleClientSite so DoVerb doesn't immediately fail
-        let mut site_obj = SiteObj { vtbl: &SITE_VTBL };
-        let site_ptr: *mut SiteObj = &mut site_obj;
-
         // Subscribe to events BEFORE Connect()
-        if let Ok(cpc) = rdp_unk.cast::<IConnectionPointContainer>() {
-            let try_iids = [IID_EVENTS_ALT];
-            'outer: for iid in &try_iids {
-                if let Ok(cp) = cpc.FindConnectionPoint(iid) {
-                    let sink = make_sink(connected.clone(), disc_reason.clone());
-                    if let Ok(cookie) = cp.Advise(&sink) {
-                        println!("[rdp_test] Advise ok cookie={cookie}");
-                        break 'outer;
-                    }
-                }
-            }
-            // Also try via enumeration
-            if let Ok(enum_cp) = cpc.EnumConnectionPoints() {
-                loop {
-                    let mut cp_arr = [None::<IConnectionPoint>];
-                    let mut fetched = 0u32;
-                    if enum_cp.Next(&mut cp_arr, &mut fetched as *mut u32).is_err() || fetched == 0 { break; }
-                    if let Some(ref cp) = cp_arr[0] {
+        eprintln!("[rdp_test] Casting to IConnectionPointContainer...");
+        match rdp_unk.cast::<IConnectionPointContainer>() {
+            Err(e) => eprintln!("[rdp_test] IConnectionPointContainer QI failed: {e}"),
+            Ok(cpc) => {
+                eprintln!("[rdp_test] IConnectionPointContainer ok");
+                eprintln!("[rdp_test] FindConnectionPoint IID_EVENTS_ALT...");
+                match cpc.FindConnectionPoint(&IID_EVENTS_ALT) {
+                    Err(e) => eprintln!("[rdp_test] FindConnectionPoint failed: {e}"),
+                    Ok(cp) => {
+                        eprintln!("[rdp_test] FindConnectionPoint ok — creating sink...");
                         let sink = make_sink(connected.clone(), disc_reason.clone());
-                        if cp.Advise(&sink).is_ok() {
-                            println!("[rdp_test] Advise ok (enumerated)");
+                        eprintln!("[rdp_test] Advise...");
+                        match cp.Advise(&sink) {
+                            Ok(cookie) => eprintln!("[rdp_test] Advise ok cookie={cookie}"),
+                            Err(e)     => eprintln!("[rdp_test] Advise failed: {e}"),
                         }
                     }
                 }
@@ -361,39 +306,39 @@ fn main() {
         }
 
         // Connect
+        eprintln!("[rdp_test] Calling Connect()...");
         match call_no_args(&disp, "Connect") {
-            Ok(()) => println!("[rdp_test] Connect() called"),
-            Err(e) => { println!("[rdp_test] Connect() FAILED: {e}"); return; }
+            Ok(()) => eprintln!("[rdp_test] Connect() called ok"),
+            Err(e) => { eprintln!("[rdp_test] Connect() FAILED: {e}"); return; }
         }
 
-        println!("[rdp_test] Waiting up to 30s for result...");
+        eprintln!("[rdp_test] Waiting up to 30s for result...");
         let start = std::time::Instant::now();
         let mut msg = MSG::default();
         loop {
             // Process COM/Win32 messages
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                TranslateMessage(&msg);
+                let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
 
             if connected.load(Ordering::SeqCst) {
-                println!("[rdp_test] ✅ SUCCESS: connected to {host}:{port} as {username}");
-                // Disconnect cleanly
+                println!("[rdp_test] SUCCESS: connected to {host}:{port} as {username}");
                 let _ = call_no_args(&disp, "Disconnect");
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 break;
             }
             if disc_reason.load(Ordering::SeqCst) != i32::MIN {
                 let r = disc_reason.load(Ordering::SeqCst);
-                println!("[rdp_test] ❌ FAILED: discReason=0x{:08X} ({})", r as u32, r);
+                println!("[rdp_test] FAILED: discReason=0x{:08X} ({})", r as u32, r);
                 if r as u32 == 0x1F07 {
-                    println!("[rdp_test]   → 7943 = NLA credentials rejected by server");
-                    println!("[rdp_test]     The username/password is WRONG or the account has no RDP access.");
+                    println!("[rdp_test]   -> 7943 = NLA credentials rejected by server");
+                    println!("[rdp_test]      The username/password is WRONG or the account has no RDP access.");
                 }
                 break;
             }
             if start.elapsed() > std::time::Duration::from_secs(30) {
-                println!("[rdp_test] ⏱ TIMEOUT — no connection result after 30s");
+                println!("[rdp_test] TIMEOUT -- no connection result after 30s");
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
