@@ -12,7 +12,7 @@ use windows::Win32::System::Variant::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::Security::Credentials::{
     CredWriteW, CredDeleteW, CREDENTIALW, CRED_FLAGS,
-    CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_DOMAIN_PASSWORD,
+    CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CRED_TYPE_DOMAIN_PASSWORD,
 };
 
 const CLSID_10: GUID = GUID::from_values(0xC0EFA91A,0xEEB7,0x41C7,[0x97,0xFA,0xF0,0xED,0x64,0x5E,0xFB,0x24]);
@@ -309,15 +309,21 @@ fn store_cred(host: &str, port: u16, user_plain: &str, password: &str) {
     } else {
         vec![format!("TERMSRV/{}", host), format!("TERMSRV/{}:{}", host, port)]
     };
+    // Store as GENERIC with plain UTF-16LE password (no DPAPI).
+    // mstscax COM reads GENERIC blobs raw and passes them directly to NLA/CredSSP.
+    // DOMAIN_PASSWORD is used by mstsc.exe (the full app); mstscax COM only suppresses
+    // its ATL credential dialog when it finds a GENERIC entry for the target.
     let pw_utf16: Vec<u8> = password.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
     for target in &targets {
         let mut target_w: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
         let mut user_w:   Vec<u16> = user_plain.encode_utf16().chain(Some(0)).collect();
         unsafe {
+            // Clear both types to avoid stale entries confusing CredSSP.
+            let _ = CredDeleteW(PCWSTR(target_w.as_ptr()), CRED_TYPE_GENERIC, Some(0));
             let _ = CredDeleteW(PCWSTR(target_w.as_ptr()), CRED_TYPE_DOMAIN_PASSWORD, Some(0));
             let cred = CREDENTIALW {
                 Flags: CRED_FLAGS(0),
-                Type: CRED_TYPE_DOMAIN_PASSWORD,
+                Type: CRED_TYPE_GENERIC,
                 TargetName: windows::core::PWSTR(target_w.as_mut_ptr()),
                 Comment: windows::core::PWSTR::null(),
                 LastWritten: std::mem::zeroed(),
@@ -330,7 +336,7 @@ fn store_cred(host: &str, port: u16, user_plain: &str, password: &str) {
                 UserName: windows::core::PWSTR(user_w.as_mut_ptr()),
             };
             let ok = CredWriteW(&cred, 0).is_ok();
-            eprintln!("[rdp_test] CredWriteW {target} user={user_plain} DOMAIN_PASSWORD ok={ok}");
+            eprintln!("[rdp_test] CredWriteW {target} user={user_plain} GENERIC/UTF-16LE ok={ok}");
         }
     }
 }
