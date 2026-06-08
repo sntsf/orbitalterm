@@ -27,7 +27,6 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::Variant::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, Ref, PCWSTR};
 
@@ -1002,8 +1001,7 @@ fn dpapi_protect_password(password: &str) -> Option<Vec<u8>> {
     use windows::Win32::Security::Cryptography::{
         CryptProtectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
     };
-    use windows::Win32::System::Memory::LocalFree;
-    use windows::Win32::Foundation::HLOCAL;
+    extern "system" { fn LocalFree(hmem: *mut core::ffi::c_void) -> *mut core::ffi::c_void; }
 
     let pw_bytes: Vec<u8> = password
         .encode_utf16()
@@ -1022,7 +1020,7 @@ fn dpapi_protect_password(password: &str) -> Option<Vec<u8>> {
         ).is_ok();
         if ok && !output.pbData.is_null() {
             let blob = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-            LocalFree(HLOCAL(output.pbData as *mut _));
+            LocalFree(output.pbData as *mut _);
             eprintln!("[rdp] dpapi_protect: {} plaintext bytes → {} encrypted bytes", pw_bytes.len(), blob.len());
             Some(blob)
         } else {
@@ -1126,7 +1124,7 @@ fn call_method_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core:
 // quoting issues). NLA/CredSSP picks these up automatically during Connect().
 fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, password: &str) {
     use windows::Win32::Security::Credentials::{
-        CredWriteW, CredDeleteW, CredReadW, CredFree,
+        CredWriteW, CredDeleteW,
         CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE,
         CRED_TYPE_DOMAIN_PASSWORD, CRED_TYPE_GENERIC,
     };
