@@ -662,13 +662,16 @@ unsafe extern "system" fn ev_sink_invoke(
                         };
                         const KF_UP: u32 = 2; // KEYEVENTF_KEYUP
 
-                        // The NLA credential dialog opens with keyboard focus on the
-                        // username field.  Tab moves focus forward to the password field.
-                        // Ctrl+V pastes the password.  Enter submits.
-                        // (Ctrl+A is intentionally absent — it selects the username text
-                        // and Ctrl+V would replace the username rather than the password.)
-                        let inputs: [INPUT; 8] = [
-                            ki(VK_TAB.0, 0),           // Tab down  → move focus: username → password
+                        // The mstscax NLA credential dialog has three fields when
+                        // Domain is set separately: [Username][Domain][Password].
+                        // Focus starts on Username.
+                        // Tab×2: Username → Domain → Password field.
+                        // Ctrl+V: paste password into Password field.
+                        // Enter: submit credentials.
+                        let inputs: [INPUT; 10] = [
+                            ki(VK_TAB.0, 0),           // Tab down  → username → domain
+                            ki(VK_TAB.0, KF_UP),       // Tab up
+                            ki(VK_TAB.0, 0),           // Tab down  → domain → password
                             ki(VK_TAB.0, KF_UP),       // Tab up
                             ki(VK_CONTROL.0, 0),       // Ctrl down
                             ki(VK_V.0, 0),             // V down    → Ctrl+V (paste into password)
@@ -678,7 +681,7 @@ unsafe extern "system" fn ev_sink_invoke(
                             ki(VK_RETURN.0, KF_UP),    // Enter up
                         ];
                         let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                        eprintln!("[rdp] SendInput: {sent}/{} events (Tab, Ctrl+V, Enter)", inputs.len());
+                        eprintln!("[rdp] SendInput: {sent}/{} events (Tab×2, Ctrl+V, Enter)", inputs.len());
 
                         if attached {
                             AttachThreadInput(our_tid, atl_tid, false);
@@ -1669,21 +1672,11 @@ fn sta_thread(
         // ── RDP properties ────────────────────────────────────────────────────
         let _ = put_bstr(&disp, "Server", &params.host);
         let _ = put_i4(&disp, "RDPPort", params.port as i32);
-        // Use "DOMAIN\username" in the UserName field and leave Domain empty.
-        // When Domain is set separately the credential dialog renders two distinct
-        // fields (username + domain), causing our Tab keystroke to land on the
-        // domain field rather than the password field → Ctrl+V pastes the password
-        // into domain → NLA sends wrong credentials → discReason=7943.
-        // Embedding the domain in UserName produces a single combined field so
-        // Tab moves directly from username to password as expected.
-        let combined_user = if !domain_str.is_empty() {
-            format!("{domain_str}\\{user_str}")
-        } else {
-            user_str.to_string()
-        };
-        let _ = put_bstr(&disp, "UserName", &combined_user);
-        // Domain intentionally left unset — it is encoded in UserName above.
-        eprintln!("[rdp] UserName={combined_user} (domain embedded)");
+        let _ = put_bstr(&disp, "UserName", user_str);
+        if !domain_str.is_empty() {
+            let _ = put_bstr(&disp, "Domain", domain_str);
+        }
+        eprintln!("[rdp] UserName={user_str} Domain={domain_str}");
         let _ = put_i4(&disp, "DesktopWidth", w);
         let _ = put_i4(&disp, "DesktopHeight", h);
         let _ = put_bool_prop(&disp, "FullScreen", false);
