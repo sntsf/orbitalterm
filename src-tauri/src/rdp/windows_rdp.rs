@@ -704,6 +704,30 @@ unsafe extern "system" fn ev_sink_invoke(
             inner.logged_in.store(true, Ordering::SeqCst);
             eprintln!("[rdp-event] OnLoginComplete — session ready");
         }
+        27 => {
+            // DISPID 27 = OnServiceMessageReceived(bstrMessage: BSTR).
+            // The server sends this before disconnecting for things like licensing
+            // errors, session limit notifications, or group policy messages.
+            // Read the BSTR from DISPPARAMS to log the exact message.
+            if !parms.is_null() {
+                #[repr(C)]
+                struct Dp { rgvarg: *const VarRaw, _named: *mut i32, c_args: u32, _c_named: u32 }
+                let dp = &*(parms as *const Dp);
+                if dp.c_args >= 1 {
+                    let v = &*dp.rgvarg;
+                    // VT_BSTR = 8
+                    if v.vt == 8 {
+                        let bstr = v.data.bstrVal;
+                        if !bstr.is_null() {
+                            let len = *bstr.cast::<u32>().offset(-1) / 2;
+                            let s = std::slice::from_raw_parts(bstr, len as usize);
+                            let msg = String::from_utf16_lossy(s);
+                            eprintln!("[rdp-event] OnServiceMessageReceived: {msg:?}");
+                        }
+                    }
+                }
+            }
+        }
         38 => {
             // DISPID 38 fires on newer mstscax builds immediately after OnLoginComplete
             // in some server configurations.  It does NOT mean the session is ending —
@@ -2009,6 +2033,7 @@ fn sta_thread(
                 eprintln!("[rdp] OnDisconnected event (ever_connected={ever_connected}) — closing session");
                 rdp_connected = false;
                 show_pending  = false;
+                if !cover_hwnd.is_invalid() { ShowWindow(cover_hwnd, SW_HIDE).ok(); }
                 let _ = ShowWindow(host_hwnd, SW_HIDE);
                 break 'outer;
             }
@@ -2060,6 +2085,7 @@ fn sta_thread(
                             eprintln!("[rdp] disconnect confirmed — exiting session loop");
                             rdp_connected = false;
                             show_pending  = false;
+                            if !cover_hwnd.is_invalid() { ShowWindow(cover_hwnd, SW_HIDE).ok(); }
                             let _ = ShowWindow(host_hwnd, SW_HIDE);
                             break 'outer;
                         }
@@ -2069,6 +2095,7 @@ fn sta_thread(
                     Ok(0) if !rdp_connected && !ever_connected => {
                         eprintln!("[rdp] ConnectionState=0 without login — connection failed");
                         show_pending = false;
+                        if !cover_hwnd.is_invalid() { ShowWindow(cover_hwnd, SW_HIDE).ok(); }
                         break 'outer;
                     }
                     Ok(_) => { dispatch_errors = 0; disconnect_polls = 0; }
@@ -2091,6 +2118,10 @@ fn sta_thread(
                     let (sx, sy) = canvas_to_screen(parent, rel_x, rel_y);
                     SetWindowPos(host_hwnd, None, sx, sy, 0, 0,
                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE).ok();
+                    if !cover_hwnd.is_invalid() {
+                        SetWindowPos(cover_hwnd, None, sx, sy, 0, 0,
+                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE).ok();
+                    }
                     last_parent_rect = cur;
                 }
             }
