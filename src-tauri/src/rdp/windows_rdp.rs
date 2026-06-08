@@ -1804,43 +1804,18 @@ fn sta_thread(
             }
         }
 
-        if let Err(e) = call_no_args(&disp, "Connect") {
-            let _ = result_tx.send(Err(format!("RDP Connect(): {e}")));
-            if !cover_hwnd.is_invalid() { DestroyWindow(cover_hwnd).ok(); }
-            DestroyWindow(host_hwnd).ok();
-            CoUninitialize();
-            return;
-        }
-
-        // Delete the temp .rdp file shortly after Connect() — mstscax has
-        // already read and parsed the settings synchronously by this point.
-        if let Some(path) = rdp_temp_path {
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(5));
-                if let Err(e) = std::fs::remove_file(&path) {
-                    eprintln!("[rdp] temp .rdp cleanup error: {e}");
-                } else {
-                    eprintln!("[rdp] temp .rdp file deleted");
-                }
-            });
-        }
-
         // ── COM connection point: subscribe to mstscax events ────────────────
-        // DISPID 3 (OnLoginComplete) and DISPID 4 (OnDisconnected) arrive
-        // synchronously on this STA thread during DispatchMessageW.
-        // All events in a session (connect → login → disconnect) can arrive in a
-        // single message-pump pass before the first 100ms polling tick fires, so
-        // ever_connected must be set from the event (DISPID 3), not only from polling.
+        // Subscribe BEFORE Connect() so DISPID 18 (cert warning / credential
+        // dialog) and other early events are received from the very first
+        // connection attempt.  Previously this block was after Connect() which
+        // caused DISPID 18 to be missed because the cert warning fires almost
+        // immediately after Connect() returns.
         let event_logged_in    = Arc::new(AtomicBool::new(false));
         let event_disconnected = Arc::new(AtomicBool::new(false));
         // Vec of (connection_point, advise_cookie) kept alive until after loop.
         let mut cp_registrations: Vec<(IConnectionPoint, u32)> = Vec::new();
 
         if let Ok(cpc) = rdp_unk.cast::<IConnectionPointContainer>() {
-            // Build the event sink once; it will be Advise-d to whichever
-            // connection point(s) mstscax exposes.  new_event_sink responds to
-            // QI for both the mstscax-specific CP IID and standard IDispatch,
-            // so Advise succeeds regardless of which IID mstscax checks.
             let sink_unk = new_event_sink(
                 event_logged_in.clone(),
                 event_disconnected.clone(),
@@ -1849,10 +1824,6 @@ fn sta_thread(
                 cover_hwnd.0 as isize,
             );
 
-            // Try the well-known DIID_IMsTscAxEvents IID first.
-            // If it fails (different mstscax version / connection point layout),
-            // enumerate all available connection points and subscribe to every one.
-            // Our Invoke only acts on DISPID 2 and 4, so extra CPs are harmless.
             let candidates: Vec<IConnectionPoint> =
                 match cpc.FindConnectionPoint(&IID_DMSRDPCLIENTEVENTS) {
                     Ok(cp) => {
@@ -1866,8 +1837,6 @@ fn sta_thread(
                             loop {
                                 let mut cp_arr = [None::<IConnectionPoint>; 1];
                                 let mut fetched: u32 = 0;
-                                // Next(slice, *mut u32) → HRESULT:
-                                //   S_OK(0) = more items; S_FALSE(1) = end; <0 = error
                                 let hr = enum_cp.Next(&mut cp_arr, &mut fetched);
                                 if fetched == 0 { break; }
                                 if let Some(cp) = cp_arr[0].take() {
@@ -1876,7 +1845,7 @@ fn sta_thread(
                                     }
                                     all.push(cp);
                                 }
-                                if hr.0 != 0 { break; } // S_FALSE(1) or error = end
+                                if hr.0 != 0 { break; }
                             }
                         } else {
                             eprintln!("[rdp] EnumConnectionPoints also failed");
@@ -1899,6 +1868,27 @@ fn sta_thread(
             }
         } else {
             eprintln!("[rdp] QI IConnectionPointContainer failed");
+        }
+
+        if let Err(e) = call_no_args(&disp, "Connect") {
+            let _ = result_tx.send(Err(format!("RDP Connect(): {e}")));
+            if !cover_hwnd.is_invalid() { DestroyWindow(cover_hwnd).ok(); }
+            DestroyWindow(host_hwnd).ok();
+            CoUninitialize();
+            return;
+        }
+
+        // Delete the temp .rdp file shortly after Connect() — mstscax has
+        // already read and parsed the settings synchronously by this point.
+        if let Some(path) = rdp_temp_path {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(5));
+                if let Err(e) = std::fs::remove_file(&path) {
+                    eprintln!("[rdp] temp .rdp cleanup error: {e}");
+                } else {
+                    eprintln!("[rdp] temp .rdp file deleted");
+                }
+            });
         }
 
         let (tx, rx) = mpsc::sync_channel::<ComCmd>(16);
