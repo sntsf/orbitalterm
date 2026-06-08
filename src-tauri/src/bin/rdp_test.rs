@@ -208,6 +208,19 @@ fn put_i32(disp: &IDispatch, name: &str, val: i32) {
     }
 }
 
+fn put_bool_prop(disp: &IDispatch, name: &str, val: bool) -> Result<()> {
+    let id = get_dispid(disp, name)?;
+    unsafe {
+        let mut var: VARIANT = std::mem::zeroed();
+        let r = &mut var as *mut VARIANT as *mut VarRaw;
+        (*r).vt = 11; (*r).data.i16_val = if val { -1i16 } else { 0i16 }; // VT_BOOL
+        let mut named = -3i32;
+        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
+            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
+            None, None, None)
+    }
+}
+
 fn get_i32_prop(disp: &IDispatch, name: &str) -> Option<i32> {
     let id = get_dispid(disp, name).ok()?;
     unsafe {
@@ -419,6 +432,13 @@ fn main() {
             put_i32(adv, "RDPPort", port as i32);
             put_i32(adv, "AuthenticationLevel", 0);
             put_i32(adv, "EnableCredSspSupport", 1);
+            // Suppress the credential dialog — mstscax must use the CredMgr entry silently.
+            // Without these, mstscax shows the ATL prompt even when a credential is stored.
+            let r1 = put_bool_prop(adv, "PromptForCredentials", false);
+            let r2 = put_bool_prop(adv, "PromptForCredentialsOnClient", false);
+            eprintln!("[rdp_test] PromptForCredentials hr=0x{:08X}  PromptForCredentialsOnClient hr=0x{:08X}",
+                r1.err().map(|e| e.code().0 as u32).unwrap_or(0),
+                r2.err().map(|e| e.code().0 as u32).unwrap_or(0));
         }
 
         // Do NOT use ClearTextPassword or IMsTscNonScriptable — we want to test
