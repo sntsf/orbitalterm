@@ -1669,11 +1669,21 @@ fn sta_thread(
         // ── RDP properties ────────────────────────────────────────────────────
         let _ = put_bstr(&disp, "Server", &params.host);
         let _ = put_i4(&disp, "RDPPort", params.port as i32);
-        let _ = put_bstr(&disp, "UserName", user_str);
-        if !domain_str.is_empty() {
-            let _ = put_bstr(&disp, "Domain", domain_str);
-        }
-        eprintln!("[rdp] UserName={user_str} Domain={domain_str}");
+        // Use "DOMAIN\username" in the UserName field and leave Domain empty.
+        // When Domain is set separately the credential dialog renders two distinct
+        // fields (username + domain), causing our Tab keystroke to land on the
+        // domain field rather than the password field → Ctrl+V pastes the password
+        // into domain → NLA sends wrong credentials → discReason=7943.
+        // Embedding the domain in UserName produces a single combined field so
+        // Tab moves directly from username to password as expected.
+        let combined_user = if !domain_str.is_empty() {
+            format!("{domain_str}\\{user_str}")
+        } else {
+            user_str.to_string()
+        };
+        let _ = put_bstr(&disp, "UserName", &combined_user);
+        // Domain intentionally left unset — it is encoded in UserName above.
+        eprintln!("[rdp] UserName={combined_user} (domain embedded)");
         let _ = put_i4(&disp, "DesktopWidth", w);
         let _ = put_i4(&disp, "DesktopHeight", h);
         let _ = put_bool_prop(&disp, "FullScreen", false);
