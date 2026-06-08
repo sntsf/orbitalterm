@@ -478,19 +478,59 @@ fn main() {
             put_i32(adv, "RDPPort", port as i32);
             put_i32(adv, "AuthenticationLevel", 0);
             put_i32(adv, "EnableCredSspSupport", 1);
-            // Suppress the credential dialog — mstscax must use the CredMgr entry silently.
-            // Without these, mstscax shows the ATL prompt even when a credential is stored.
+            // ClearTextPassword: set the password directly on the COM control.
+            let r_ctp = put_bstr(adv, "ClearTextPassword", password);
+            eprintln!("[rdp_test] AdvancedSettings.ClearTextPassword hr=0x{:08X}",
+                r_ctp.err().map(|e| e.code().0 as u32).unwrap_or(0));
+            // IDispatch path for PromptForCredentials (usually unavailable on newer builds).
             let r1 = put_bool_prop(adv, "PromptForCredentials", false);
             let r2 = put_bool_prop(adv, "PromptForCredentialsOnClient", false);
-            eprintln!("[rdp_test] PromptForCredentials hr=0x{:08X}  PromptForCredentialsOnClient hr=0x{:08X}",
+            eprintln!("[rdp_test] PromptForCredentials(IDisp) hr=0x{:08X}  PromptForCredentialsOnClient hr=0x{:08X}",
                 r1.err().map(|e| e.code().0 as u32).unwrap_or(0),
                 r2.err().map(|e| e.code().0 as u32).unwrap_or(0));
         }
 
-        // Do NOT use ClearTextPassword or IMsTscNonScriptable — we want to test
-        // that mstscax picks up the DOMAIN_PASSWORD credential silently.
-        eprintln!("[rdp_test] Skipping ClearTextPassword (testing CredMgr path)");
-        let _ = try_ns_clear_text_password; // suppress unused-fn warning
+        // ── IMsRdpClientNonScriptable3::PromptForCredentials=false (vtable path) ──
+        // IMsRdpClientNonScriptable3 (IID b3378d90) exposes put_PromptForCredentials
+        // at vtable[9]. This is separate from IMsTscNonScriptable (IID C539BD95).
+        // Setting this to false tells mstscax to use the stored credentials silently
+        // instead of showing its ATL credential dialog.
+        //
+        // Vtable layout (offsets from 0):
+        //  [0..2] IUnknown
+        //  [3]    NotifyRedirectDeviceChange  (IMsRdpClientNonScriptable)
+        //  [4]    SendKeys
+        //  [5]    put_UIParentWindowHandle    (IMsRdpClientNonScriptable2)
+        //  [6]    get_UIParentWindowHandle
+        //  [7]    put_ShowRedirectionWarningDialog  (IMsRdpClientNonScriptable3)
+        //  [8]    get_ShowRedirectionWarningDialog
+        //  [9]    put_PromptForCredentials    ← TARGET
+        //  [10]   get_PromptForCredentials
+        //  [11]   put_NegotiateSecurityLayer
+        //  [12]   get_NegotiateSecurityLayer
+        //  [13]   put_EnableCredSspSupport
+        //  [14]   get_EnableCredSspSupport
+        const IID_NS3: GUID = GUID::from_values(0xb3378d90,0x0728,0x45c7,[0x8e,0xd7,0xb6,0x15,0x9f,0xb9,0x22,0x19]);
+        // Also try NS4 and NS5 which extend NS3 with the same vtable layout.
+        const IID_NS4: GUID = GUID::from_values(0xf50fa8aa,0x1c7d,0x4f59,[0xb1,0x5c,0xa9,0x0c,0xac,0xae,0x1f,0xcb]);
+        const IID_NS5: GUID = GUID::from_values(0x4f6996d5,0xd7b1,0x412c,[0xb0,0xff,0x06,0x37,0x18,0x56,0x69,0x07]);
+        let ns3_ptr = raw_qi(raw_rdp, &IID_NS3)
+            .or_else(|| raw_qi(raw_rdp, &IID_NS4))
+            .or_else(|| raw_qi(raw_rdp, &IID_NS5));
+        match ns3_ptr {
+            Some(ns3) => {
+                let v: *const usize = *(ns3 as *const *const usize);
+                type PutBoolFn = unsafe extern "system" fn(*mut c_void, i16) -> i32;
+                let put_prompt: PutBoolFn = std::mem::transmute(*v.add(9));
+                let hr = put_prompt(ns3, 0i16); // VARIANT_FALSE = 0 → no credential prompt
+                eprintln!("[rdp_test] IMsRdpClientNonScriptable3::put_PromptForCredentials(false) hr=0x{hr:08X}");
+                raw_release(ns3);
+            }
+            None => eprintln!("[rdp_test] IMsRdpClientNonScriptable3/4/5: not available"),
+        }
+
+        // IMsTscNonScriptable (ClearTextPassword) — still try as belt-and-suspenders.
+        let _ = try_ns_clear_text_password(raw_rdp, password);
 
         // ── Connect ───────────────────────────────────────────────────────────
         eprintln!("[rdp_test] Connect()...");
