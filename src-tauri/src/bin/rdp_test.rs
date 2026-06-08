@@ -14,6 +14,9 @@ use windows::Win32::Security::Credentials::{
     CredWriteW, CredDeleteW, CREDENTIALW, CRED_FLAGS,
     CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CRED_TYPE_DOMAIN_PASSWORD,
 };
+use windows::Win32::Security::Cryptography::{
+    CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
+};
 
 const CLSID_10: GUID = GUID::from_values(0xC0EFA91A,0xEEB7,0x41C7,[0x97,0xFA,0xF0,0xED,0x64,0x5E,0xFB,0x24]);
 const CLSID_9:  GUID = GUID::from_values(0x8B918B82,0x7985,0x4C24,[0x89,0xDF,0xC3,0x3A,0xD2,0xBB,0xFB,0xCD]);
@@ -303,22 +306,59 @@ unsafe fn try_ns_clear_text_password(obj: *mut c_void, password: &str) -> bool {
 
 // ── Credential Manager ────────────────────────────────────────────────────────
 
+// DPAPI-encrypt a UTF-16LE password. mstscax reads the GENERIC credential blob
+// and calls CryptUnprotectData on it — the result must be the UTF-16LE password.
+fn dpapi_encrypt(password: &str) -> Option<Vec<u8>> {
+    extern "system" { fn LocalFree(p: *mut std::ffi::c_void) -> *mut std::ffi::c_void; }
+    let pw_bytes: Vec<u8> = password.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    unsafe {
+        let mut input  = CRYPT_INTEGER_BLOB { cbData: pw_bytes.len() as u32, pbData: pw_bytes.as_ptr() as *mut u8 };
+        let mut output = CRYPT_INTEGER_BLOB::default();
+        let ok = CryptProtectData(&mut input, PCWSTR::null(), None, None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut output).is_ok();
+        if ok && !output.pbData.is_null() {
+            let blob = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+            LocalFree(output.pbData as *mut _);
+            eprintln!("[rdp_test] dpapi_encrypt: {} plaintext bytes → {} blob bytes", pw_bytes.len(), blob.len());
+            // Verify round-trip: decrypt immediately to confirm mstscax can read it.
+            let mut enc = CRYPT_INTEGER_BLOB { cbData: blob.len() as u32, pbData: blob.as_ptr() as *mut u8 };
+            let mut dec = CRYPT_INTEGER_BLOB::default();
+            let vok = CryptUnprotectData(&mut enc, None, None, None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut dec).is_ok();
+            if vok && !dec.pbData.is_null() {
+                let plain = std::slice::from_raw_parts(dec.pbData, dec.cbData as usize).to_vec();
+                LocalFree(dec.pbData as *mut _);
+                // Re-encode expected to compare
+                let expected = pw_bytes.clone();
+                if plain == expected {
+                    eprintln!("[rdp_test] dpapi round-trip OK — blob decrypts correctly");
+                } else {
+                    eprintln!("[rdp_test] dpapi round-trip MISMATCH — decrypted {} bytes, expected {}", plain.len(), expected.len());
+                }
+            } else {
+                eprintln!("[rdp_test] dpapi round-trip DECRYPT FAILED");
+            }
+            Some(blob)
+        } else {
+            eprintln!("[rdp_test] dpapi_encrypt FAILED — falling back to plain UTF-16LE");
+            None
+        }
+    }
+}
+
 fn store_cred(host: &str, port: u16, user_plain: &str, password: &str) {
     let targets: Vec<String> = if port == 3389 {
         vec![format!("TERMSRV/{}", host)]
     } else {
         vec![format!("TERMSRV/{}", host), format!("TERMSRV/{}:{}", host, port)]
     };
-    // Store as GENERIC with plain UTF-16LE password (no DPAPI).
-    // mstscax COM reads GENERIC blobs raw and passes them directly to NLA/CredSSP.
-    // DOMAIN_PASSWORD is used by mstsc.exe (the full app); mstscax COM only suppresses
-    // its ATL credential dialog when it finds a GENERIC entry for the target.
+    // GENERIC with DPAPI-encrypted blob: mstscax finds this credential, calls
+    // CryptUnprotectData on the blob, and uses the resulting plaintext for NLA.
+    // This is what suppresses the mstscax credential dialog entirely.
     let pw_utf16: Vec<u8> = password.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    let blob = dpapi_encrypt(password).unwrap_or_else(|| pw_utf16.clone());
     for target in &targets {
         let mut target_w: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
         let mut user_w:   Vec<u16> = user_plain.encode_utf16().chain(Some(0)).collect();
         unsafe {
-            // Clear both types to avoid stale entries confusing CredSSP.
             let _ = CredDeleteW(PCWSTR(target_w.as_ptr()), CRED_TYPE_GENERIC, Some(0));
             let _ = CredDeleteW(PCWSTR(target_w.as_ptr()), CRED_TYPE_DOMAIN_PASSWORD, Some(0));
             let cred = CREDENTIALW {
@@ -327,8 +367,8 @@ fn store_cred(host: &str, port: u16, user_plain: &str, password: &str) {
                 TargetName: windows::core::PWSTR(target_w.as_mut_ptr()),
                 Comment: windows::core::PWSTR::null(),
                 LastWritten: std::mem::zeroed(),
-                CredentialBlobSize: pw_utf16.len() as u32,
-                CredentialBlob: pw_utf16.as_ptr() as *mut u8,
+                CredentialBlobSize: blob.len() as u32,
+                CredentialBlob: blob.as_ptr() as *mut u8,
                 Persist: CRED_PERSIST_LOCAL_MACHINE,
                 AttributeCount: 0,
                 Attributes: std::ptr::null_mut(),
@@ -336,7 +376,7 @@ fn store_cred(host: &str, port: u16, user_plain: &str, password: &str) {
                 UserName: windows::core::PWSTR(user_w.as_mut_ptr()),
             };
             let ok = CredWriteW(&cred, 0).is_ok();
-            eprintln!("[rdp_test] CredWriteW {target} user={user_plain} GENERIC/UTF-16LE ok={ok}");
+            eprintln!("[rdp_test] CredWriteW {target} user={user_plain} GENERIC/DPAPI blob={} ok={ok}", blob.len());
         }
     }
 }
