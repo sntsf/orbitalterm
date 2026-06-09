@@ -44,6 +44,12 @@ pub struct WindowsRdpSession {
 unsafe impl Send for WindowsRdpSession {}
 unsafe impl Sync for WindowsRdpSession {}
 
+impl Drop for WindowsRdpSession {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
 // ── Window class ──────────────────────────────────────────────────────────────
 
 fn register_host_class(hinstance: windows::Win32::Foundation::HINSTANCE) {

@@ -93,6 +93,9 @@ static class Native
     [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int nIndex, int v);
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int nIndex);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
 }
 
 // ── Main program ──────────────────────────────────────────────────────────────
@@ -282,6 +285,13 @@ public sealed class RdpHostForm : Form
         // Reparent into the Rust host WS_POPUP window if requested
         if (_parentHwnd != IntPtr.Zero)
         {
+            // Attach input queues so keyboard focus works across the process boundary.
+            // Without this, SetParent across processes breaks keyboard input delivery.
+            uint parentTid = Native.GetWindowThreadProcessId(_parentHwnd, out _);
+            uint myTid = Native.GetCurrentThreadId();
+            if (parentTid != 0 && parentTid != myTid)
+                Native.AttachThreadInput(parentTid, myTid, true);
+
             Native.SetParent(Handle, _parentHwnd);
             int style = Native.GetWindowLong(Handle, Native.GWL_STYLE);
             style &= ~Native.WS_POPUP;
