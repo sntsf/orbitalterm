@@ -376,8 +376,17 @@ namespace OrbitalRdpHost
 
             dynamic adv = _rdp.AdvancedSettings9;
             adv.RDPPort = port;
-            adv.AuthenticationLevel = 0;     // connect even if the cert can't be verified
+            // AuthenticationLevel MUST be 2 (not 0) when CredSSP/NLA is enabled:
+            // CredSSP performs server authentication as part of its TLS handshake,
+            // so AuthenticationLevel=0 ("don't authenticate the server") conflicts
+            // with it and the control cancels the connection itself → discReason
+            // 7943. Both mRemoteNG and the RDPinWpf reference host use level 2.
+            // Override with ORB_AUTHLEVEL if needed.
+            uint authLevel = 2;
+            { var s = Environment.GetEnvironmentVariable("ORB_AUTHLEVEL"); uint v; if (s != null && uint.TryParse(s, out v)) authLevel = v; }
+            adv.AuthenticationLevel = authLevel;
             adv.EnableCredSspSupport = true; // NLA
+            adv.EncryptionEnabled = 1;       // mRemoteNG sets this; harmless if default
             try { adv.SmartSizing = true; } catch { }
             try { adv.RedirectClipboard = true; } catch { }
             // Suppress the local-resource / clipboard redirection warning dialogs.
