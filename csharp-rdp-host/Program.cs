@@ -21,10 +21,6 @@ using System.Runtime.InteropServices.ComTypes;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-// Give the assembly full trust so AxHost can host the COM control.
-[assembly: System.Security.Permissions.SecurityPermission(
-    System.Security.PermissionState.Unrestricted)]
-
 // ── COM event interface (outgoing events from mstscax) ────────────────────────
 [ComVisible(true)]
 [Guid("336D5562-EFA8-482E-8CB3-C5C0FC7A7DB6")]
