@@ -72,6 +72,66 @@ namespace OrbitalRdpHost
         public struct RECT { public int Left, Top, Right, Bottom; }
     }
 
+    // Windows Credential Manager interop. We write the password as a GENERIC
+    // credential with the plaintext UTF-16LE blob (exactly what `cmdkey /generic`
+    // produces). NLA/CredSSP reads TERMSRV/<host> from here during Connect(), so
+    // login is silent and deterministic — it never depends on whatever stale
+    // credential might be left in the store from earlier experiments.
+    internal static class Cred
+    {
+        const uint CRED_TYPE_GENERIC = 1;
+        const uint CRED_TYPE_DOMAIN_PASSWORD = 2;
+        const uint CRED_PERSIST_LOCAL_MACHINE = 2;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct CREDENTIAL
+        {
+            public uint Flags;
+            public uint Type;
+            [MarshalAs(UnmanagedType.LPWStr)] public string TargetName;
+            [MarshalAs(UnmanagedType.LPWStr)] public string Comment;
+            public long LastWritten;
+            public uint CredentialBlobSize;
+            public IntPtr CredentialBlob;
+            public uint Persist;
+            public uint AttributeCount;
+            public IntPtr Attributes;
+            [MarshalAs(UnmanagedType.LPWStr)] public string TargetAlias;
+            [MarshalAs(UnmanagedType.LPWStr)] public string UserName;
+        }
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CredWriteW(ref CREDENTIAL credential, uint flags);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CredDeleteW(string target, uint type, uint flags);
+
+        public static bool Write(string target, string user, string password)
+        {
+            // Clear any stale entries (e.g. a bad DPAPI blob from earlier tests)
+            // so the GENERIC plaintext credential below is the only one CredSSP sees.
+            CredDeleteW(target, CRED_TYPE_GENERIC, 0);
+            CredDeleteW(target, CRED_TYPE_DOMAIN_PASSWORD, 0);
+
+            byte[] blob = System.Text.Encoding.Unicode.GetBytes(password);
+            IntPtr blobPtr = Marshal.AllocHGlobal(blob.Length == 0 ? 1 : blob.Length);
+            try
+            {
+                if (blob.Length > 0) Marshal.Copy(blob, 0, blobPtr, blob.Length);
+                var cred = new CREDENTIAL
+                {
+                    Type = CRED_TYPE_GENERIC,
+                    TargetName = target,
+                    CredentialBlobSize = (uint)blob.Length,
+                    CredentialBlob = blobPtr,
+                    Persist = CRED_PERSIST_LOCAL_MACHINE,
+                    UserName = user,
+                };
+                return CredWriteW(ref cred, 0);
+            }
+            finally { Marshal.FreeHGlobal(blobPtr); }
+        }
+    }
+
     internal static class Program
     {
         // Coclass CLSIDs (the same ones OrbitalTerm's Rust path uses).
@@ -126,7 +186,7 @@ namespace OrbitalRdpHost
             // Suppress the local-resource / clipboard redirection warning dialog
             // (the one introduced by KB5057577). Must be set before the control
             // activates and connects. HKCU — no elevation required.
-            SuppressRedirectionWarning();
+            SuppressRedirectionWarning(server);
 
             Application.EnableVisualStyles();
 
@@ -189,15 +249,19 @@ namespace OrbitalRdpHost
         // Reverts the post-KB5057577 redirection warning to the version that
         // honors the WarnAbout* control settings, so the "local resources /
         // clipboard" trust dialog no longer appears. HKCU = no elevation.
-        static void SuppressRedirectionWarning()
+        // The Policies\... path is GPO-locked on domain machines (access denied),
+        // so we pre-consent per server in the user's non-policy LocalDevices key,
+        // which is the same place the "Don't ask me again" checkbox writes to.
+        static void SuppressRedirectionWarning(string server)
         {
             try
             {
                 using (var k = Registry.CurrentUser.CreateSubKey(
-                    @"Software\Policies\Microsoft\Windows NT\Terminal Services\Client"))
+                    @"Software\Microsoft\Terminal Server Client\LocalDevices"))
                 {
-                    if (k != null)
-                        k.SetValue("RedirectionWarningDialogVersion", 1, RegistryValueKind.DWord);
+                    // Bitmask of consented redirected resources for this server.
+                    // 0x4D covers clipboard + the usual local resources.
+                    if (k != null) k.SetValue(server, unchecked((int)0x4D), RegistryValueKind.DWord);
                 }
             }
             catch (Exception ex) { Emit("WARN:registry " + ex.Message); }
@@ -205,6 +269,17 @@ namespace OrbitalRdpHost
 
         static void Configure(string server, int port, string user, string password)
         {
+            // Deterministic credential: write our own GENERIC plaintext entry to
+            // the Credential Manager so NLA reads the correct password during
+            // Connect(), regardless of any stale credential left in the store.
+            bool c1 = Cred.Write("TERMSRV/" + server, user, password);
+            Emit("INFO:CredWrite TERMSRV/" + server + " user=" + user + " ok=" + c1);
+            if (port != 3389)
+            {
+                bool c2 = Cred.Write("TERMSRV/" + server + ":" + port, user, password);
+                Emit("INFO:CredWrite TERMSRV/" + server + ":" + port + " ok=" + c2);
+            }
+
             _rdp = _rdpAx.Ocx; // live OCX, accessed via IDispatch through `dynamic`
             _rdp.Server = server;
             _rdp.UserName = user;
