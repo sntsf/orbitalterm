@@ -7,6 +7,12 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 
+# C# RDP helper build artifacts
+csharp-rdp-host/interop/
+csharp-rdp-host/*.exe
+csharp-rdp-host/*.dll
+csharp-rdp-host/*.pdb
+
 # Misc
 .DS_Store
 *.local
