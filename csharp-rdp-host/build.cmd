@@ -27,7 +27,7 @@ echo Using compiler: %CSC%
 
 "%CSC%" ^
     /nologo ^
-    /target:winexe ^
+    /target:exe ^
     /platform:x64 ^
     /optimize+ ^
     /out:OrbitalRdpHost.exe ^
