@@ -479,9 +479,8 @@ fn main() {
             put_i32(adv, "AuthenticationLevel", 0);
             put_i32(adv, "EnableCredSspSupport", 1);
             // ClearTextPassword: set the password directly on the COM control.
-            let r_ctp = put_bstr(adv, "ClearTextPassword", password);
-            eprintln!("[rdp_test] AdvancedSettings.ClearTextPassword hr=0x{:08X}",
-                r_ctp.err().map(|e| e.code().0 as u32).unwrap_or(0));
+            put_bstr(adv, "ClearTextPassword", password);
+            eprintln!("[rdp_test] AdvancedSettings.ClearTextPassword set");
             // IDispatch path for PromptForCredentials (usually unavailable on newer builds).
             let r1 = put_bool_prop(adv, "PromptForCredentials", false);
             let r2 = put_bool_prop(adv, "PromptForCredentialsOnClient", false);
