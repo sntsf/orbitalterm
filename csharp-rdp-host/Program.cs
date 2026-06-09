@@ -348,21 +348,40 @@ namespace OrbitalRdpHost
 
         static void Configure(string server, int port, string user, string password)
         {
-            // Clear any stored credential for this host so it cannot SHADOW the
-            // Domain/UserName/ClearTextPassword we inject below. mstscax consults
-            // the Credential Manager, and a stale TERMSRV/<host> entry (e.g. the
-            // old MUNDOMAIN\admin one from cmdkey) overrides our injected values —
-            // which is exactly why earlier runs behaved inconsistently. With the
-            // store empty, the control must use the credentials we inject.
+            // ── Credential strategy ───────────────────────────────────────────
+            // On this Windows build, injecting ClearTextPassword onto the hosted
+            // control is ignored (NLA never receives the password → discReason
+            // 7943). mstsc.exe instead pulls the password from the Credential
+            // Manager: you give it server + username and it reads TERMSRV/<host>.
+            // So by DEFAULT we replicate exactly what `cmdkey /generic` does — we
+            // store a GENERIC credential and let mstscax pull it through the normal
+            // CredSSP path, WITHOUT injecting ClearTextPassword.
+            //
+            // Env overrides for isolation:
+            //   ORB_NO_CRED=1   — don't write the credential (use a pre-existing
+            //                     cmdkey entry instead). Implies don't clear it.
+            //   ORB_INJECT=1    — also inject ClearTextPassword (old behavior).
+            //   ORB_CLEAR=1     — delete the stored credential first.
+            bool noCred  = Environment.GetEnvironmentVariable("ORB_NO_CRED") == "1";
+            bool inject  = Environment.GetEnvironmentVariable("ORB_INJECT")  == "1";
+            bool doClear = Environment.GetEnvironmentVariable("ORB_CLEAR")   == "1";
+
             string credTarget = port == 3389
                 ? "TERMSRV/" + server
                 : "TERMSRV/" + server + ":" + port;
-            Emit("INFO:CredClear " + credTarget + " " + Cred.Clear(credTarget));
+
+            if (doClear)
+                Emit("INFO:CredClear " + credTarget + " " + Cred.Clear(credTarget));
+
+            if (!noCred)
+                Emit("INFO:CredWrite " + credTarget + " user=" + user + " " +
+                     Cred.Write(credTarget, user, password));
+            else
+                Emit("INFO:CredWrite skipped (ORB_NO_CRED=1) — using pre-stored credential");
 
             // Split DOMAIN\user — the ActiveX control needs Domain and UserName
             // in SEPARATE properties. Unlike mstsc.exe, it does NOT parse a
-            // combined "domain\user" string: it would send the whole thing as the
-            // username with an empty domain, and NLA/CredSSP rejects it (7943).
+            // combined "domain\user" string.
             string domainPart = "";
             string userPart   = user;
             int bs = user.IndexOf('\\');
@@ -388,17 +407,25 @@ namespace OrbitalRdpHost
             try { adv.RedirectClipboard = true; } catch { }
             // Suppress the local-resource / clipboard redirection warning dialogs.
             try { adv.WarnAboutClipboardRedirection = false; } catch { }
-            // Scriptable password path (works under a proper OLE site like AxHost's).
-            try { adv.ClearTextPassword = password; } catch (Exception ex) { Emit("WARN:adv.ClearTextPassword " + ex.Message); }
 
-            // Non-scriptable password path — the canonical way to drive silent NLA.
-            try
+            // By default DO NOT inject the password — the stored credential drives
+            // NLA. Only inject when explicitly asked (ORB_INJECT=1), for comparison.
+            if (inject)
             {
-                var ns = _rdpAx.Ocx as IMsTscNonScriptable;
-                if (ns != null) ns.put_ClearTextPassword(password);
-                else Emit("WARN:IMsTscNonScriptable cast returned null");
+                try { adv.ClearTextPassword = password; Emit("INFO:ClearTextPassword injected (adv)"); }
+                catch (Exception ex) { Emit("WARN:adv.ClearTextPassword " + ex.Message); }
+                try
+                {
+                    var ns = _rdpAx.Ocx as IMsTscNonScriptable;
+                    if (ns != null) { ns.put_ClearTextPassword(password); Emit("INFO:ClearTextPassword injected (nonscriptable)"); }
+                    else Emit("WARN:IMsTscNonScriptable cast returned null");
+                }
+                catch (Exception ex) { Emit("WARN:nonscriptable " + ex.Message); }
             }
-            catch (Exception ex) { Emit("WARN:nonscriptable " + ex.Message); }
+            else
+            {
+                Emit("INFO:password injection skipped — relying on stored credential");
+            }
 
             try
             {
