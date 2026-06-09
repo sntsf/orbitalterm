@@ -157,10 +157,13 @@ namespace OrbitalRdpHost
             finally { Marshal.FreeHGlobal(blobPtr); }
         }
 
-        public static void DeleteStale(string target)
+        // Delete both GENERIC and DOMAIN_PASSWORD entries for the target so no
+        // stored credential can shadow the values we inject onto the control.
+        public static string Clear(string target)
         {
-            // Remove only DOMAIN_PASSWORD entries; we want to keep our GENERIC one.
-            CredDeleteW(target, CRED_TYPE_DOMAIN_PASSWORD, 0);
+            bool g = CredDeleteW(target, CRED_TYPE_GENERIC, 0);
+            bool d = CredDeleteW(target, CRED_TYPE_DOMAIN_PASSWORD, 0);
+            return "generic=" + g + " domain=" + d;
         }
     }
 
@@ -345,20 +348,37 @@ namespace OrbitalRdpHost
 
         static void Configure(string server, int port, string user, string password)
         {
-            // Write a GENERIC credential so mstscax finds it when it looks up
-            // TERMSRV/<host> in the Credential Manager (before checking
-            // ClearTextPassword). This is exactly what `cmdkey /generic` stores.
+            // Clear any stored credential for this host so it cannot SHADOW the
+            // Domain/UserName/ClearTextPassword we inject below. mstscax consults
+            // the Credential Manager, and a stale TERMSRV/<host> entry (e.g. the
+            // old MUNDOMAIN\admin one from cmdkey) overrides our injected values —
+            // which is exactly why earlier runs behaved inconsistently. With the
+            // store empty, the control must use the credentials we inject.
             string credTarget = port == 3389
                 ? "TERMSRV/" + server
                 : "TERMSRV/" + server + ":" + port;
-            Emit("INFO:CredWrite " + credTarget + " " + Cred.Write(credTarget, user, password));
-            // Remove any stale DOMAIN_PASSWORD entry that could shadow ours.
-            Cred.DeleteStale(credTarget);
+            Emit("INFO:CredClear " + credTarget + " " + Cred.Clear(credTarget));
+
+            // Split DOMAIN\user — the ActiveX control needs Domain and UserName
+            // in SEPARATE properties. Unlike mstsc.exe, it does NOT parse a
+            // combined "domain\user" string: it would send the whole thing as the
+            // username with an empty domain, and NLA/CredSSP rejects it (7943).
+            string domainPart = "";
+            string userPart   = user;
+            int bs = user.IndexOf('\\');
+            if (bs >= 0)
+            {
+                domainPart = user.Substring(0, bs);
+                userPart   = user.Substring(bs + 1);
+            }
+            // user@domain (UPN) form is left intact in UserName with empty Domain.
+            Emit("INFO:Domain=" + domainPart + " UserName=" + userPart);
 
             _rdp = _rdpAx.Ocx; // live OCX, accessed via IDispatch through `dynamic`
             AdviseEvents(_rdpAx.Ocx);
             _rdp.Server = server;
-            _rdp.UserName = user;
+            _rdp.Domain = domainPart;
+            _rdp.UserName = userPart;
 
             dynamic adv = _rdp.AdvancedSettings9;
             adv.RDPPort = port;
