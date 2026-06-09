@@ -18,25 +18,23 @@ and **still** could not suppress the NLA credential prompt on modern Windows:
 the correct OLE in-place site and message pump that production RDP apps rely on,
 which is what makes `ClearTextPassword` actually feed CredSSP/NLA.
 
-## Build
+## Build (zero install)
 
-Requires the **.NET 8 SDK** (`dotnet --version` should print 8.x).
+Targets **.NET Framework 4.x**, which ships with Windows 11 — no .NET SDK or
+Visual Studio needed. `build.cmd` uses the `csc.exe` that's already on the
+machine.
 
 ```powershell
 cd csharp-rdp-host
-dotnet build -c Release
+.\build.cmd
 ```
 
-Output: `bin/Release/net8.0-windows/OrbitalRdpHost.exe`
-
-> No .NET 8 SDK? Change `<TargetFramework>` in `OrbitalRdpHost.csproj` to `net48`
-> and build from a Developer Command Prompt with `msbuild -p:Configuration=Release`.
+Output: `csharp-rdp-host\OrbitalRdpHost.exe`
 
 ## Test (standalone — opens its own window)
 
 ```powershell
-cd bin/Release/net8.0-windows
-./OrbitalRdpHost.exe --server 10.240.0.10 --user "gmdsa\canv_asantos" --password "Hola1234**"
+.\OrbitalRdpHost.exe --server 10.240.0.10 --user "gmdsa\canv_asantos" --password "Hola1234**"
 ```
 
 ### What success looks like
@@ -57,7 +55,7 @@ us exactly which password path the control accepted or rejected.
 ## Embedded mode (used later by OrbitalTerm)
 
 ```powershell
-echo Hola1234** | ./OrbitalRdpHost.exe --parent <HWND> --server 10.240.0.10 --user "gmdsa\canv_asantos" --port 3389
+echo Hola1234** | .\OrbitalRdpHost.exe --parent <HWND> --server 10.240.0.10 --user "gmdsa\canv_asantos" --port 3389
 ```
 
 `--parent` is the decimal HWND of the host window to embed into; the password is

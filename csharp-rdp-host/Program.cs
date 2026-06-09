@@ -34,7 +34,7 @@ namespace OrbitalRdpHost
     internal sealed class RdpAxControl : AxHost
     {
         public RdpAxControl(string clsidNoBraces) : base(clsidNoBraces) { }
-        public object Ocx => GetOcx();
+        public object Ocx { get { return GetOcx(); } }
     }
 
     // IMsTscNonScriptable::put_ClearTextPassword is the first method after
@@ -200,7 +200,8 @@ namespace OrbitalRdpHost
             // Non-scriptable password path — the canonical way to drive silent NLA.
             try
             {
-                if (_rdpAx.Ocx is IMsTscNonScriptable ns) ns.put_ClearTextPassword(password);
+                var ns = _rdpAx.Ocx as IMsTscNonScriptable;
+                if (ns != null) ns.put_ClearTextPassword(password);
                 else Emit("WARN:IMsTscNonScriptable cast returned null");
             }
             catch (Exception ex) { Emit("WARN:nonscriptable " + ex.Message); }
@@ -235,7 +236,8 @@ namespace OrbitalRdpHost
 
         static void FitToParent()
         {
-            if (Native.GetClientRect(_parent, out var rc))
+            Native.RECT rc;
+            if (Native.GetClientRect(_parent, out rc))
             {
                 int w = rc.Right - rc.Left, h = rc.Bottom - rc.Top;
                 if (w > 0 && h > 0) _form.SetBounds(0, 0, w, h);
