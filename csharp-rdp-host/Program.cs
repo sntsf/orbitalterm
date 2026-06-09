@@ -215,15 +215,32 @@ namespace OrbitalRdpHost
             foreach (var kv in found)
                 Emit("INFO:available clsid=" + kv.Key + " name=\"" + kv.Value + "\"");
 
-            // Build the try-order: forced first, then any enumerated, then the
-            // known-good v10 CLSID as a final fallback.
+            // Preferred NON-redistributable controls, newest first. The
+            // "(redistributable)" variants — notably C0EFA91A (redist v11) — were
+            // self-cancelling with discReason 7943 on this Windows build; the plain
+            // "Microsoft RDP Client Control - version N" coclasses connect silently.
+            // v12 (1DF7C823) is confirmed working; the rest are fallbacks for other
+            // machines/Windows versions.
+            string[] preferred =
+            {
+                "1DF7C823-B2D4-4B54-975A-F2AC5D7CF8B8", // v12  (confirmed working)
+                "A0C63C30-F08D-4AB4-907C-34905D770C7D", // v11
+                "8B918B82-7985-4C24-89DF-C33AD2BBFBCD", // v10
+                "A3BC03A0-041D-42E3-AD22-882B7865C9C5", // v9   (mRemoteNG's choice)
+                "54d38bf7-b1ef-4479-9674-1bd6ea465258", // v8
+                "3F859AA3-C2D4-4FAA-B0E4-FD0C9C4E5E3A", // v13
+            };
+
+            // Build the try-order: forced first, then preferred ones present in the
+            // registry, then any other enumerated class as a last resort.
             var order = new System.Collections.Generic.List<string>();
-            if (!string.IsNullOrEmpty(forced)) order.Add(forced);
-            // Prefer the highest-named version that is NOT v10/v11 first? We don't
-            // trust the name->version mapping, so just try all enumerated, then v10.
-            foreach (var kv in found) if (!order.Contains(kv.Key)) order.Add(kv.Key);
-            const string V10 = "c0efa91a-eeb7-41c7-97fa-f0ed645efb24";
-            if (!order.Contains(V10)) order.Add(V10);
+            if (!string.IsNullOrEmpty(forced)) order.Add(forced.ToLowerInvariant());
+            foreach (var p in preferred)
+                if (found.ContainsKey(p) && !order.Contains(p.ToLowerInvariant()))
+                    order.Add(p.ToLowerInvariant());
+            foreach (var kv in found)
+                if (!order.Contains(kv.Key.ToLowerInvariant()))
+                    order.Add(kv.Key.ToLowerInvariant());
 
             foreach (var c in order)
             {
