@@ -30,6 +30,18 @@ if not defined AXIMP (
     )
   )
 )
+rem ── last-resort: recursive scan of Program Files (slow but thorough) ───────────
+if not defined AXIMP (
+  echo Searching for aximp.exe under Program Files ^(this can take a minute^)...
+  for /f "delims=" %%I in ('where /r "%ProgramFiles(x86)%" aximp.exe 2^>nul') do (
+    if not defined AXIMP set "AXIMP=%%I"
+  )
+)
+if not defined AXIMP (
+  for /f "delims=" %%I in ('where /r "%ProgramFiles%" aximp.exe 2^>nul') do (
+    if not defined AXIMP set "AXIMP=%%I"
+  )
+)
 if not defined AXIMP (
   echo ERROR: aximp.exe not found.
   echo   Install the Windows SDK or .NET Framework Developer Pack, or open a
