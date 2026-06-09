@@ -89,28 +89,78 @@ namespace OrbitalRdpHost
         public struct RECT { public int Left, Top, Right, Bottom; }
     }
 
-    // Windows Credential Manager interop. mstscax resolves stored credentials
-    // for TERMSRV/<host> BEFORE honoring the ClearTextPassword we set on the
-    // control, so a stale/bad entry overrides our password and breaks NLA. We
-    // therefore clear the store and let ClearTextPassword be the single source.
+    // Windows Credential Manager interop.
+    // mstscax resolves TERMSRV/<host> in the Credential Manager BEFORE it checks
+    // the ClearTextPassword we set on the control. A valid CRED_TYPE_GENERIC entry
+    // (identical to what `cmdkey /generic:TERMSRV/<host> /user:... /pass:...`
+    // stores) is what actually drives silent NLA — the control reads it, forwards
+    // the plaintext password to CredSSP, and NLA completes without any dialog.
+    // ClearTextPassword alone (with an empty CredMgr) gives discReason=7943.
     internal static class Cred
     {
-        const uint CRED_TYPE_GENERIC = 1;
-        const uint CRED_TYPE_DOMAIN_PASSWORD = 2;
+        const uint CRED_TYPE_GENERIC          = 1;
+        const uint CRED_TYPE_DOMAIN_PASSWORD  = 2;
+        const uint CRED_PERSIST_LOCAL_MACHINE = 2;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct CREDENTIAL
+        {
+            public uint   Flags;
+            public uint   Type;
+            public string TargetName;
+            public string Comment;
+            public long   LastWritten;
+            public uint   CredentialBlobSize;
+            public IntPtr CredentialBlob;
+            public uint   Persist;
+            public uint   AttributeCount;
+            public IntPtr Attributes;
+            public string TargetAlias;
+            public string UserName;
+        }
 
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CredDeleteW(string target, uint type, uint flags);
+        static extern bool CredWriteW(ref CREDENTIAL cred, uint flags);
 
-        // Deletes any stored credential for the target. mstscax resolves the
-        // Credential Manager BEFORE honoring ClearTextPassword, so a stale/bad
-        // entry (e.g. the DPAPI blob earlier rdp_test runs wrote) overrides the
-        // good password we set on the control and makes NLA fail. Clearing the
-        // store leaves ClearTextPassword as the single, authoritative source.
-        public static string Clear(string target)
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool CredDeleteW(string target, uint type, uint flags);
+
+        // Write a GENERIC credential — identical format to cmdkey /generic.
+        // The blob is plain UTF-16LE; Windows encrypts it at rest via DPAPI
+        // automatically. mstscax reads it back, decrypts, and uses it for NLA.
+        public static string Write(string target, string userName, string password)
         {
-            bool g = CredDeleteW(target, CRED_TYPE_GENERIC, 0);
-            bool d = CredDeleteW(target, CRED_TYPE_DOMAIN_PASSWORD, 0);
-            return "generic=" + g + " domain=" + d;
+            byte[] blob = System.Text.Encoding.Unicode.GetBytes(password);
+            IntPtr blobPtr = Marshal.AllocHGlobal(blob.Length);
+            try
+            {
+                Marshal.Copy(blob, 0, blobPtr, blob.Length);
+                var c = new CREDENTIAL
+                {
+                    Flags              = 0,
+                    Type               = CRED_TYPE_GENERIC,
+                    TargetName         = target,
+                    Comment            = null,
+                    LastWritten        = 0,
+                    CredentialBlobSize = (uint)blob.Length,
+                    CredentialBlob     = blobPtr,
+                    Persist            = CRED_PERSIST_LOCAL_MACHINE,
+                    AttributeCount     = 0,
+                    Attributes         = IntPtr.Zero,
+                    TargetAlias        = null,
+                    UserName           = userName,
+                };
+                bool ok = CredWriteW(ref c, 0);
+                int err = ok ? 0 : Marshal.GetLastWin32Error();
+                return "ok=" + ok + (ok ? "" : " err=" + err);
+            }
+            finally { Marshal.FreeHGlobal(blobPtr); }
+        }
+
+        public static void DeleteStale(string target)
+        {
+            // Remove only DOMAIN_PASSWORD entries; we want to keep our GENERIC one.
+            CredDeleteW(target, CRED_TYPE_DOMAIN_PASSWORD, 0);
         }
     }
 
@@ -295,13 +345,15 @@ namespace OrbitalRdpHost
 
         static void Configure(string server, int port, string user, string password)
         {
-            // Clear any stored credential for this host so it can't override the
-            // ClearTextPassword we set below (a stale DPAPI blob from earlier
-            // rdp_test runs is exactly what was breaking silent NLA).
-            Emit("INFO:CredClear TERMSRV/" + server + " " + Cred.Clear("TERMSRV/" + server));
-            if (port != 3389)
-                Emit("INFO:CredClear TERMSRV/" + server + ":" + port + " " +
-                     Cred.Clear("TERMSRV/" + server + ":" + port));
+            // Write a GENERIC credential so mstscax finds it when it looks up
+            // TERMSRV/<host> in the Credential Manager (before checking
+            // ClearTextPassword). This is exactly what `cmdkey /generic` stores.
+            string credTarget = port == 3389
+                ? "TERMSRV/" + server
+                : "TERMSRV/" + server + ":" + port;
+            Emit("INFO:CredWrite " + credTarget + " " + Cred.Write(credTarget, user, password));
+            // Remove any stale DOMAIN_PASSWORD entry that could shadow ours.
+            Cred.DeleteStale(credTarget);
 
             _rdp = _rdpAx.Ocx; // live OCX, accessed via IDispatch through `dynamic`
             AdviseEvents(_rdpAx.Ocx);
