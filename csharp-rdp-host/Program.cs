@@ -301,10 +301,8 @@ public sealed class RdpHostForm : Form
 
     void FocusRdpWindow()
     {
-        if (_ax == null || !_ax.IsHandleCreated) return;
-        IntPtr target = DeepestChild(_ax.Handle);
-        Emit("DBG:FocusRdpWindow target=0x" + target.ToString("X"));
-        Native.SetFocus(target);
+        if (_ax != null && _ax.IsHandleCreated)
+            Native.SetFocus(DeepestChild(_ax.Handle));
     }
 
     public RdpHostForm(string server, int port, string user, string domain,
@@ -364,9 +362,6 @@ public sealed class RdpHostForm : Form
             Controls.Add(_ax);
             _ax.CreateControl();
 
-            // Wire focus debugging and click-to-focus filter.
-            _ax.GotFocus  += (s, ev) => Emit("DBG:AxHost.GotFocus");
-            _ax.LostFocus += (s, ev) => Emit("DBG:AxHost.LostFocus");
             Application.AddMessageFilter(new ClickFocusFilter(this));
 
             _rdp = _ax.GetOcxObject();
@@ -435,9 +430,9 @@ public sealed class RdpHostForm : Form
         Emit("STATE:connected");
         // Route keyboard focus to the innermost mstscax child once the session is live.
         if (InvokeRequired)
-            BeginInvoke(new Action(() => { Emit("DBG:connected→FocusRdpWindow"); FocusRdpWindow(); }));
+            BeginInvoke(new Action(() => FocusRdpWindow()));
         else
-            { Emit("DBG:connected→FocusRdpWindow"); FocusRdpWindow(); }
+            FocusRdpWindow();
     }
 
     void HandleDisconnected(int reason)
@@ -455,11 +450,8 @@ public sealed class RdpHostForm : Form
     protected override void WndProc(ref Message m)
     {
         base.WndProc(ref m);
-        if (m.Msg == 0x0007 /* WM_SETFOCUS */ && _ax != null && _ax.IsHandleCreated)
-        {
-            Emit("DBG:Form.WM_SETFOCUS→FocusRdpWindow");
+        if (m.Msg == 0x0007 /* WM_SETFOCUS */)
             FocusRdpWindow();
-        }
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)

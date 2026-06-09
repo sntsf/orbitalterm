@@ -1,6 +1,5 @@
 export type ConnectionType = "ssh" | "rdp" | "vnc" | "ftp" | "sftp" | "browser";
 export type AuthType = "agent" | "password" | "key";
-export type RdpSecurity = "negotiate" | "nla" | "tls" | "rdp";
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "error";
 
 export interface Group {
@@ -21,7 +20,6 @@ export interface Connection {
   notes: string;
   description: string;
   domain: string;
-  rdp_admin: boolean;
   created_at: string;
   updated_at: string;
   sort_order: number;
@@ -29,8 +27,6 @@ export interface Connection {
   icon: string;
   url: string;
   custom_hosts: string;
-  rdp_security: RdpSecurity;
-  rdp_color_depth: number;
 }
 
 export interface Folder {
