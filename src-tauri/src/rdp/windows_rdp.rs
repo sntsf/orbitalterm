@@ -27,17 +27,17 @@ const HOST_CLASS: &str = "OrbRdpHostWnd";
 // ── Session handle ────────────────────────────────────────────────────────────
 
 pub struct WindowsRdpSession {
-    /// Signals the host loop to stop (hide + kill helper).
-    pub stop: Arc<AtomicBool>,
-    /// Handle of our WS_POPUP host window, stored as isize for Send.
-    pub host_hwnd: Arc<AtomicIsize>,
-    /// Current position/size relative to the parent canvas (for reposition).
-    pub rel_x:  Arc<AtomicIsize>,
-    pub rel_y:  Arc<AtomicIsize>,
-    pub width:  Arc<AtomicIsize>,
-    pub height: Arc<AtomicIsize>,
-    /// Current reference parent (for canvas_to_screen).
-    pub parent_hwnd: Arc<AtomicIsize>,
+    pub stop:          Arc<AtomicBool>,
+    pub host_hwnd:     Arc<AtomicIsize>,
+    pub parent_hwnd:   Arc<AtomicIsize>,
+    pub rel_x:         Arc<AtomicIsize>,
+    pub rel_y:         Arc<AtomicIsize>,
+    pub width:         Arc<AtomicIsize>,
+    pub height:        Arc<AtomicIsize>,
+    /// Desired visibility — written by show()/hide(), read by the host thread.
+    /// ShowWindow is always called from the host thread that owns the window.
+    pub wants_visible:      Arc<AtomicBool>,
+    pub reposition_pending: Arc<AtomicBool>,
 }
 
 // SAFETY: AtomicIsize/AtomicBool are Send+Sync; HWND is only accessed on the host thread.
@@ -255,11 +255,9 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
 
     // ── Host event loop ───────────────────────────────────────────────────────
     let parent = HWND(params.parent_hwnd as *mut _);
-    let rel_x  = params.x;
-    let rel_y  = params.y;
     let mut last_parent_rect = RECT::default();
     let mut ever_connected = false;
-    let mut visible = false;
+    let mut cur_visible = false; // tracks actual SW state so we only call ShowWindow on change
 
     unsafe {
         ShowWindow(host_hwnd, SW_HIDE);
@@ -279,18 +277,45 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
                 break;
             }
 
-            // Show window once connected
-            if session.connected.load(Ordering::SeqCst) && !visible {
-                visible = true;
+            // Auto-show on first connection by setting wants_visible.
+            // After that, wants_visible is driven entirely by show()/hide().
+            if session.connected.load(Ordering::SeqCst) && !ever_connected {
                 ever_connected = true;
-                ShowWindow(host_hwnd, SW_SHOW);
+                session.wants_visible.store(true, Ordering::SeqCst);
+            }
+
+            // Apply pending visibility change — always from this owner thread.
+            let wants = session.wants_visible.load(Ordering::SeqCst);
+            if wants != cur_visible {
+                cur_visible = wants;
+                if wants {
+                    ShowWindow(host_hwnd, SW_SHOW);
+                } else {
+                    ShowWindow(host_hwnd, SW_HIDE);
+                }
+            }
+
+            // Apply pending reposition — also from owner thread.
+            if session.reposition_pending.swap(false, Ordering::SeqCst) {
+                let x  = session.rel_x.load(Ordering::Relaxed) as i32;
+                let y  = session.rel_y.load(Ordering::Relaxed) as i32;
+                let w  = session.width.load(Ordering::Relaxed)  as i32;
+                let h  = session.height.load(Ordering::Relaxed) as i32;
+                let p  = HWND(session.parent_hwnd.load(Ordering::Relaxed) as *mut _);
+                let (sx, sy) = canvas_to_screen(p, x, y);
+                let _ = SetWindowPos(host_hwnd, None, sx, sy, w, h,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+                last_parent_rect = RECT::default(); // force re-check on next tick
             }
 
             // Follow parent window movement
+            let p = HWND(session.parent_hwnd.load(Ordering::Relaxed) as *mut _);
+            let rel_x = session.rel_x.load(Ordering::Relaxed) as i32;
+            let rel_y = session.rel_y.load(Ordering::Relaxed) as i32;
             let mut cur = RECT::default();
-            let _ = GetWindowRect(parent, &mut cur);
+            let _ = GetWindowRect(p, &mut cur);
             if cur.left != last_parent_rect.left || cur.top != last_parent_rect.top {
-                let (sx, sy) = canvas_to_screen(parent, rel_x, rel_y);
+                let (sx, sy) = canvas_to_screen(p, rel_x, rel_y);
                 let _ = SetWindowPos(host_hwnd, None, sx, sy, 0, 0,
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
                 last_parent_rect = cur;
@@ -317,10 +342,12 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
 // ── Shared atomics (between host thread and public API) ───────────────────────
 
 struct SessionShared {
-    connected:   Arc<AtomicBool>,
-    finished:    Arc<AtomicBool>,
-    stop:        Arc<AtomicBool>,
-    host_hwnd:   Arc<AtomicIsize>,
+    connected:          Arc<AtomicBool>,
+    finished:           Arc<AtomicBool>,
+    stop:               Arc<AtomicBool>,
+    host_hwnd:          Arc<AtomicIsize>,
+    wants_visible:      Arc<AtomicBool>,
+    reposition_pending: Arc<AtomicBool>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -343,20 +370,24 @@ pub fn launch(
     color_depth: i32,
 ) -> Result<WindowsRdpSession, String> {
     let shared = Arc::new(SessionShared {
-        connected: Arc::new(AtomicBool::new(false)),
-        finished:  Arc::new(AtomicBool::new(false)),
-        stop:      Arc::new(AtomicBool::new(false)),
-        host_hwnd: Arc::new(AtomicIsize::new(0)),
+        connected:          Arc::new(AtomicBool::new(false)),
+        finished:           Arc::new(AtomicBool::new(false)),
+        stop:               Arc::new(AtomicBool::new(false)),
+        host_hwnd:          Arc::new(AtomicIsize::new(0)),
+        wants_visible:      Arc::new(AtomicBool::new(false)),
+        reposition_pending: Arc::new(AtomicBool::new(false)),
     });
 
     let session = WindowsRdpSession {
-        stop:        Arc::clone(&shared.stop),
-        host_hwnd:   Arc::clone(&shared.host_hwnd),
-        parent_hwnd: Arc::new(AtomicIsize::new(parent_hwnd.0 as isize)),
-        rel_x:       Arc::new(AtomicIsize::new(x as isize)),
-        rel_y:       Arc::new(AtomicIsize::new(y as isize)),
-        width:       Arc::new(AtomicIsize::new(width as isize)),
-        height:      Arc::new(AtomicIsize::new(height as isize)),
+        stop:               Arc::clone(&shared.stop),
+        host_hwnd:          Arc::clone(&shared.host_hwnd),
+        parent_hwnd:        Arc::new(AtomicIsize::new(parent_hwnd.0 as isize)),
+        rel_x:              Arc::new(AtomicIsize::new(x as isize)),
+        rel_y:              Arc::new(AtomicIsize::new(y as isize)),
+        width:              Arc::new(AtomicIsize::new(width as isize)),
+        height:             Arc::new(AtomicIsize::new(height as isize)),
+        wants_visible:      Arc::clone(&shared.wants_visible),
+        reposition_pending: Arc::clone(&shared.reposition_pending),
     };
 
     let params = LaunchParams {
@@ -385,27 +416,15 @@ pub fn reposition(session: &WindowsRdpSession, x: i32, y: i32, width: i32, heigh
     session.rel_y.store(y as isize, Ordering::Relaxed);
     session.width.store(width as isize, Ordering::Relaxed);
     session.height.store(height as isize, Ordering::Relaxed);
-
-    let hwnd_raw = session.host_hwnd.load(Ordering::Relaxed);
-    if hwnd_raw == 0 { return; }
-    let host = HWND(hwnd_raw as *mut _);
-    let parent = HWND(session.parent_hwnd.load(Ordering::Relaxed) as *mut _);
-    let (sx, sy) = canvas_to_screen(parent, x, y);
-    unsafe {
-        let _ = SetWindowPos(host, None, sx, sy, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
-    }
+    session.reposition_pending.store(true, Ordering::SeqCst);
 }
 
 pub fn show(session: &WindowsRdpSession) {
-    let hwnd_raw = session.host_hwnd.load(Ordering::Relaxed);
-    if hwnd_raw == 0 { return; }
-    unsafe { ShowWindow(HWND(hwnd_raw as *mut _), SW_SHOW); }
+    session.wants_visible.store(true, Ordering::SeqCst);
 }
 
 pub fn hide(session: &WindowsRdpSession) {
-    let hwnd_raw = session.host_hwnd.load(Ordering::Relaxed);
-    if hwnd_raw == 0 { return; }
-    unsafe { ShowWindow(HWND(hwnd_raw as *mut _), SW_HIDE); }
+    session.wants_visible.store(false, Ordering::SeqCst);
 }
 
 pub fn reparent(session: &WindowsRdpSession, new_parent: HWND, rel_x: i32, rel_y: i32, width: i32, height: i32) {
