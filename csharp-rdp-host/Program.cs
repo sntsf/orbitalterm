@@ -338,7 +338,8 @@ public sealed class RdpHostForm : Form
         {
             // Attach input queues so keyboard focus works across the process boundary.
             // Without this, SetParent across processes breaks keyboard input delivery.
-            uint parentTid = Native.GetWindowThreadProcessId(_parentHwnd, out _);
+            uint parentPid;
+            uint parentTid = Native.GetWindowThreadProcessId(_parentHwnd, out parentPid);
             uint myTid = Native.GetCurrentThreadId();
             if (parentTid != 0 && parentTid != myTid)
                 Native.AttachThreadInput(parentTid, myTid, true);
