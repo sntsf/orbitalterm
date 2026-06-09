@@ -72,69 +72,28 @@ namespace OrbitalRdpHost
         public struct RECT { public int Left, Top, Right, Bottom; }
     }
 
-    // Windows Credential Manager interop. We write the password as a GENERIC
-    // credential with the plaintext UTF-16LE blob (exactly what `cmdkey /generic`
-    // produces). NLA/CredSSP reads TERMSRV/<host> from here during Connect(), so
-    // login is silent and deterministic — it never depends on whatever stale
-    // credential might be left in the store from earlier experiments.
+    // Windows Credential Manager interop. mstscax resolves stored credentials
+    // for TERMSRV/<host> BEFORE honoring the ClearTextPassword we set on the
+    // control, so a stale/bad entry overrides our password and breaks NLA. We
+    // therefore clear the store and let ClearTextPassword be the single source.
     internal static class Cred
     {
         const uint CRED_TYPE_GENERIC = 1;
         const uint CRED_TYPE_DOMAIN_PASSWORD = 2;
-        const uint CRED_PERSIST_LOCAL_MACHINE = 2;
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct CREDENTIAL
-        {
-            public uint Flags;
-            public uint Type;
-            [MarshalAs(UnmanagedType.LPWStr)] public string TargetName;
-            [MarshalAs(UnmanagedType.LPWStr)] public string Comment;
-            public long LastWritten;
-            public uint CredentialBlobSize;
-            public IntPtr CredentialBlob;
-            public uint Persist;
-            public uint AttributeCount;
-            public IntPtr Attributes;
-            [MarshalAs(UnmanagedType.LPWStr)] public string TargetAlias;
-            [MarshalAs(UnmanagedType.LPWStr)] public string UserName;
-        }
 
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CredWriteW(ref CREDENTIAL credential, uint flags);
+        private static extern bool CredDeleteW(string target, uint type, uint flags);
 
-        // Writes BOTH a GENERIC and a DOMAIN_PASSWORD credential for the target,
-        // each with the plaintext UTF-16LE password. DOMAIN_PASSWORD is the type
-        // mstsc.exe stores when you tick "remember me" and is what makes NLA
-        // silent; GENERIC mirrors `cmdkey /generic`. Writing both (and not
-        // deleting anything) overwrites any bad DPAPI blob from earlier tests
-        // while keeping a working "remember me" entry intact.
-        public static string Write(string target, string user, string password)
+        // Deletes any stored credential for the target. mstscax resolves the
+        // Credential Manager BEFORE honoring ClearTextPassword, so a stale/bad
+        // entry (e.g. the DPAPI blob earlier rdp_test runs wrote) overrides the
+        // good password we set on the control and makes NLA fail. Clearing the
+        // store leaves ClearTextPassword as the single, authoritative source.
+        public static string Clear(string target)
         {
-            byte[] blob = System.Text.Encoding.Unicode.GetBytes(password);
-            bool g = WriteOne(target, user, blob, CRED_TYPE_GENERIC);
-            bool d = WriteOne(target, user, blob, CRED_TYPE_DOMAIN_PASSWORD);
+            bool g = CredDeleteW(target, CRED_TYPE_GENERIC, 0);
+            bool d = CredDeleteW(target, CRED_TYPE_DOMAIN_PASSWORD, 0);
             return "generic=" + g + " domain=" + d;
-        }
-
-        private static bool WriteOne(string target, string user, byte[] blob, uint type)
-        {
-            IntPtr blobPtr = Marshal.AllocHGlobal(blob.Length == 0 ? 1 : blob.Length);
-            try
-            {
-                if (blob.Length > 0) Marshal.Copy(blob, 0, blobPtr, blob.Length);
-                var cred = new CREDENTIAL
-                {
-                    Type = type,
-                    TargetName = target,
-                    CredentialBlobSize = (uint)blob.Length,
-                    CredentialBlob = blobPtr,
-                    Persist = CRED_PERSIST_LOCAL_MACHINE,
-                    UserName = user,
-                };
-                return CredWriteW(ref cred, 0);
-            }
-            finally { Marshal.FreeHGlobal(blobPtr); }
         }
     }
 
@@ -275,14 +234,13 @@ namespace OrbitalRdpHost
 
         static void Configure(string server, int port, string user, string password)
         {
-            // Deterministic credential: write our own plaintext entries to the
-            // Credential Manager so NLA reads the correct password during Connect(),
-            // regardless of any stale credential left in the store.
-            Emit("INFO:CredWrite TERMSRV/" + server + " user=" + user + " " +
-                 Cred.Write("TERMSRV/" + server, user, password));
+            // Clear any stored credential for this host so it can't override the
+            // ClearTextPassword we set below (a stale DPAPI blob from earlier
+            // rdp_test runs is exactly what was breaking silent NLA).
+            Emit("INFO:CredClear TERMSRV/" + server + " " + Cred.Clear("TERMSRV/" + server));
             if (port != 3389)
-                Emit("INFO:CredWrite TERMSRV/" + server + ":" + port + " " +
-                     Cred.Write("TERMSRV/" + server + ":" + port, user, password));
+                Emit("INFO:CredClear TERMSRV/" + server + ":" + port + " " +
+                     Cred.Clear("TERMSRV/" + server + ":" + port));
 
             _rdp = _rdpAx.Ocx; // live OCX, accessed via IDispatch through `dynamic`
             _rdp.Server = server;
