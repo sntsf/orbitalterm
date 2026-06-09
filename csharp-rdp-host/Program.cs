@@ -195,16 +195,23 @@ namespace OrbitalRdpHost
 
             public void OnDisconnected(int discReason)
             {
-                string desc = "";
+                Emit("EVENT:OnDisconnected discReason=" + discReason +
+                     " (0x" + discReason.ToString("X") + ")");
+
+                // Read each diagnostic separately so one failure doesn't hide the
+                // rest. ExtendedDisconnectReason + GetErrorDescription give the
+                // human-readable cause (NLA rejected, cert, licensing, network…).
+                int ext = -1;
+                try { ext = (int)_rdp.ExtendedDisconnectReason; Emit("INFO:ExtendedDisconnectReason=" + ext); }
+                catch (Exception e) { Emit("WARN:ExtendedDisconnectReason " + e.Message); }
+
                 try
                 {
-                    int ext = 0;
-                    try { ext = (int)_rdp.ExtendedDisconnectReason; } catch { }
-                    desc = (string)_rdp.GetErrorDescription((uint)discReason, (uint)ext);
+                    string desc = (string)_rdp.GetErrorDescription((uint)discReason, (uint)(ext < 0 ? 0 : ext));
+                    Emit("INFO:ErrorDescription=" + desc);
                 }
-                catch { }
-                Emit("EVENT:OnDisconnected discReason=" + discReason +
-                     " (0x" + discReason.ToString("X") + ") " + desc);
+                catch (Exception e) { Emit("WARN:GetErrorDescription " + e.Message); }
+
                 try { _form.BeginInvoke((Action)(() => Application.Exit())); } catch { Application.Exit(); }
             }
         }
