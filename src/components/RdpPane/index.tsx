@@ -39,60 +39,63 @@ interface RdpPaneProps {
 
 interface WindowsViewerProps {
   sessionId: string;
+  tabId: string;
   transferred?: boolean;
 }
 
 // Renders a transparent placeholder that tracks its own position and drives
 // the native WS_POPUP window to stay in sync. Disconnect detection is handled
 // by RdpPane directly so the listener is registered once and never re-created.
-function WindowsEmbeddedViewer({ sessionId, transferred }: WindowsViewerProps) {
+function WindowsEmbeddedViewer({ sessionId, tabId, transferred }: WindowsViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const reparentedRef = useRef(false);
+  const { activeTabId } = useAppStore();
 
+  // Show/hide by watching the active tab from the store.
+  // ResizeObserver is NOT used for visibility because it does not fire reliably
+  // when a parent element is toggled between display:block and display:none.
+  useEffect(() => {
+    const isActive = activeTabId === tabId;
+    if (isActive) {
+      rdpWindowsVisibility(sessionId, true).catch(() => {});
+      // Reposition after the browser has resolved layout for the now-visible element.
+      requestAnimationFrame(() => {
+        const el = containerRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        if (transferred && !reparentedRef.current) {
+          reparentedRef.current = true;
+          rdpWindowsReparent(sessionId, Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height))
+            .catch((e) => console.error("[WinViewer] reparent failed:", e));
+        } else {
+          rdpWindowsReposition(sessionId, Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)).catch(() => {});
+        }
+      });
+    } else {
+      rdpWindowsVisibility(sessionId, false).catch(() => {});
+    }
+  }, [activeTabId, tabId, sessionId, transferred]);
+
+  // Reposition on window resize while this tab is active.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    let lastVisible = false;
 
     const sync = () => {
       const rect = el.getBoundingClientRect();
-      const visible = rect.width > 0 && rect.height > 0;
-      if (visible) {
-        if (!lastVisible && transferred) {
-          console.log("[WinViewer] reparenting session", sessionId, rect.left, rect.top, rect.width, rect.height);
-          rdpWindowsReparent(
-            sessionId,
-            Math.round(rect.left),
-            Math.round(rect.top),
-            Math.round(rect.width),
-            Math.round(rect.height),
-          ).catch((e) => console.error("[WinViewer] reparent failed:", e));
-        } else {
-          rdpWindowsReposition(
-            sessionId,
-            Math.round(rect.left),
-            Math.round(rect.top),
-            Math.round(rect.width),
-            Math.round(rect.height),
-          ).catch(() => {});
-          if (!lastVisible) {
-            rdpWindowsVisibility(sessionId, true).catch(() => {});
-          }
-        }
-      } else if (lastVisible) {
-        rdpWindowsVisibility(sessionId, false).catch(() => {});
+      if (rect.width > 0 && rect.height > 0) {
+        rdpWindowsReposition(sessionId, Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)).catch(() => {});
       }
-      lastVisible = visible;
     };
 
     const ro = new ResizeObserver(sync);
     ro.observe(el);
     window.addEventListener("resize", sync);
-    sync();
 
     return () => {
       ro.disconnect();
       window.removeEventListener("resize", sync);
-      rdpWindowsVisibility(sessionId, false).catch(() => {});
     };
   }, [sessionId]);
 
@@ -453,6 +456,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
     return (
       <WindowsEmbeddedViewer
         sessionId={sessionIdRef.current}
+        tabId={tab.id}
         transferred={!!tab.session_id}
       />
     );
