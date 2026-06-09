@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::Emitter;
-use windows::Win32::Foundation::{HWND, LRESULT, RECT};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -122,6 +122,8 @@ struct LaunchParams {
     password:   Option<String>,
     x: i32, y: i32, width: i32, height: i32,
     admin_mode: bool,
+    rdp_security: String,
+    _color_depth: i32,
 }
 
 // ── Host thread ───────────────────────────────────────────────────────────────
@@ -146,7 +148,7 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
     // Create WS_POPUP host window (must exist before spawning helper so we have an HWND)
     let host_hwnd = unsafe {
         let hmod = GetModuleHandleW(None).unwrap_or_default();
-        register_host_class(hmod.into());
+        register_host_class(HINSTANCE(hmod.0));
 
         let class_name: Vec<u16> = HOST_CLASS.encode_utf16().chain(std::iter::once(0)).collect();
         let parent = HWND(params.parent_hwnd as *mut _);
@@ -158,8 +160,8 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
             windows::core::PCWSTR(std::ptr::null()),
             WS_POPUP | WS_VISIBLE,
             sx, sy, params.width, params.height,
-            parent, // owner (not parent — keeps it above DComp)
-            None, hmod.into(), None,
+            Some(parent), // owner (not parent — keeps it above DComp)
+            None, Some(HINSTANCE(hmod.0)), None,
         ).unwrap_or(HWND(std::ptr::null_mut()))
     };
 
@@ -178,7 +180,8 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
        .arg("--port").arg(params.port.to_string())
        .arg("--user").arg(&user_arg)
        .arg("--width").arg(params.width.to_string())
-       .arg("--height").arg(params.height.to_string());
+       .arg("--height").arg(params.height.to_string())
+       .arg("--security").arg(&params.rdp_security);
     if params.admin_mode { cmd.arg("--admin"); }
     cmd.stdin(Stdio::piped())
        .stdout(Stdio::piped())
@@ -305,6 +308,8 @@ pub fn launch(
     width: i32,
     height: i32,
     admin_mode: bool,
+    rdp_security: &str,
+    color_depth: i32,
 ) -> Result<WindowsRdpSession, String> {
     let shared = Arc::new(SessionShared {
         connected: Arc::new(AtomicBool::new(false)),
@@ -334,6 +339,8 @@ pub fn launch(
         password: password.map(str::to_string),
         x, y, width, height,
         admin_mode,
+        rdp_security: rdp_security.to_string(),
+        _color_depth: color_depth,
     };
 
     let shared_thread = Arc::clone(&shared);

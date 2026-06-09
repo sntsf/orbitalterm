@@ -105,7 +105,7 @@ static class Program
         Application.SetCompatibleTextRenderingDefault(false);
 
         // Parse arguments
-        string server = null, user = null, domain = "", password = "";
+        string server = null, user = null, domain = "", password = "", security = "";
         IntPtr parentHwnd = IntPtr.Zero;
         bool adminMode = false;
         int port = 3389, width = 1280, height = 800;
@@ -120,7 +120,8 @@ static class Program
                     case "--port":   port   = int.Parse(args[++i]); break;
                     case "--width":  width  = int.Parse(args[++i]); break;
                     case "--height": height = int.Parse(args[++i]); break;
-                    case "--parent": parentHwnd = new IntPtr(long.Parse(args[++i])); break;
+                    case "--parent":   parentHwnd = new IntPtr(long.Parse(args[++i])); break;
+                    case "--security": security  = args[++i]; break;
                     case "--user":
                         string raw = args[++i];
                         if (raw.Contains("\\"))
