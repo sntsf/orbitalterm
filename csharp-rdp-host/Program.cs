@@ -26,11 +26,28 @@
 using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
 namespace OrbitalRdpHost
 {
+    // The RDP control's outgoing event interface (IMsTscAxEvents). We implement
+    // it as a managed IDispatch sink so we receive the REAL disconnect reason
+    // code (discReason) — ExtendedDisconnectReason alone reports 0 and tells us
+    // nothing. Only the events we care about are declared, by DISPID.
+    [ComVisible(true)]
+    [Guid("336D5562-EFA8-482E-8CB3-C5C0FC7A7DB6")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
+    public interface IMsTscAxEvents
+    {
+        [DispId(2)]  void OnConnected();
+        [DispId(3)]  void OnLoginComplete();
+        [DispId(4)]  void OnDisconnected(int discReason);
+        [DispId(10)] void OnFatalError(int errorCode);
+        [DispId(11)] void OnWarning(int warningCode);
+    }
+
     // Hosts an ActiveX control by CLSID with a full WinForms OLE site.
     internal sealed class RdpAxControl : AxHost
     {
@@ -108,8 +125,36 @@ namespace OrbitalRdpHost
         static Form _form;
         static IntPtr _parent = IntPtr.Zero;
         static int _lastState = -999;
+        static IConnectionPoint _cp;
+        static int _cookie;
 
         static void Emit(string line) { Console.Out.WriteLine(line); Console.Out.Flush(); }
+
+        // Managed sink for the control's IMsTscAxEvents. Reports the real
+        // disconnect reason and a human-readable description so we finally know
+        // WHY a connection drops (NLA rejected, account locked, network, cert…).
+        sealed class EventSink : IMsTscAxEvents
+        {
+            public void OnConnected() { Emit("EVENT:OnConnected"); }
+            public void OnLoginComplete() { Emit("EVENT:OnLoginComplete"); }
+            public void OnFatalError(int errorCode) { Emit("EVENT:OnFatalError code=" + errorCode); }
+            public void OnWarning(int warningCode) { Emit("EVENT:OnWarning code=" + warningCode); }
+
+            public void OnDisconnected(int discReason)
+            {
+                string desc = "";
+                try
+                {
+                    int ext = 0;
+                    try { ext = (int)_rdp.ExtendedDisconnectReason; } catch { }
+                    desc = (string)_rdp.GetErrorDescription((uint)discReason, (uint)ext);
+                }
+                catch { }
+                Emit("EVENT:OnDisconnected discReason=" + discReason +
+                     " (0x" + discReason.ToString("X") + ") " + desc);
+                try { _form.BeginInvoke((Action)(() => Application.Exit())); } catch { Application.Exit(); }
+            }
+        }
 
         [STAThread]
         static int Main(string[] args)
@@ -232,6 +277,22 @@ namespace OrbitalRdpHost
             catch (Exception ex) { Emit("WARN:registry " + ex.Message); }
         }
 
+        // Subscribe our managed sink to the control's IMsTscAxEvents connection
+        // point so we receive OnDisconnected(discReason), OnLogonError, etc.
+        static void AdviseEvents(object ocx)
+        {
+            try
+            {
+                var cpc = ocx as IConnectionPointContainer;
+                if (cpc == null) { Emit("WARN:no IConnectionPointContainer"); return; }
+                Guid iid = typeof(IMsTscAxEvents).GUID;
+                cpc.FindConnectionPoint(ref iid, out _cp);
+                _cp.Advise(new EventSink(), out _cookie);
+                Emit("INFO:events advised cookie=" + _cookie);
+            }
+            catch (Exception ex) { Emit("WARN:advise " + ex.Message); }
+        }
+
         static void Configure(string server, int port, string user, string password)
         {
             // Clear any stored credential for this host so it can't override the
@@ -243,6 +304,7 @@ namespace OrbitalRdpHost
                      Cred.Clear("TERMSRV/" + server + ":" + port));
 
             _rdp = _rdpAx.Ocx; // live OCX, accessed via IDispatch through `dynamic`
+            AdviseEvents(_rdpAx.Ocx);
             _rdp.Server = server;
             _rdp.UserName = user;
 
