@@ -87,21 +87,36 @@ fn find_helper_exe() -> Option<std::path::PathBuf> {
         let pb = std::path::PathBuf::from(p);
         if pb.exists() { return Some(pb); }
     }
-    // 2. Alongside our own exe
+    // 2. Alongside our own exe (packaged: <app>/OrbitalRdpHost.exe)
     if let Ok(mut p) = std::env::current_exe() {
         p.pop();
         p.push("OrbitalRdpHost.exe");
         if p.exists() { return Some(p); }
     }
-    // 3. Tauri resources dir (packaged app)
+    // 3. Tauri resources dir (packaged: <app>/resources/OrbitalRdpHost.exe)
     if let Ok(mut p) = std::env::current_exe() {
         p.pop();
         p.push("resources");
         p.push("OrbitalRdpHost.exe");
         if p.exists() { return Some(p); }
     }
-    // 4. Dev layout: csharp-rdp-host/ sibling of src-tauri/
+    // 4. Dev: exe is at src-tauri/target/debug/orbitalterm.exe → go up 3 dirs
+    if let Ok(mut p) = std::env::current_exe() {
+        p.pop(); p.pop(); p.pop(); // debug/ → target/ → src-tauri/
+        p.pop();                    // src-tauri/ → project root
+        p.push("csharp-rdp-host");
+        p.push("OrbitalRdpHost.exe");
+        if p.exists() { return Some(p); }
+    }
+    // 5. CWD is project root (tauri dev from root)
     if let Ok(mut p) = std::env::current_dir() {
+        p.push("csharp-rdp-host");
+        p.push("OrbitalRdpHost.exe");
+        if p.exists() { return Some(p); }
+    }
+    // 6. CWD is src-tauri/ → go up one
+    if let Ok(mut p) = std::env::current_dir() {
+        p.pop();
         p.push("csharp-rdp-host");
         p.push("OrbitalRdpHost.exe");
         if p.exists() { return Some(p); }
