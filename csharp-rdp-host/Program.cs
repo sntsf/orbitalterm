@@ -102,24 +102,30 @@ namespace OrbitalRdpHost
 
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool CredWriteW(ref CREDENTIAL credential, uint flags);
-        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CredDeleteW(string target, uint type, uint flags);
 
-        public static bool Write(string target, string user, string password)
+        // Writes BOTH a GENERIC and a DOMAIN_PASSWORD credential for the target,
+        // each with the plaintext UTF-16LE password. DOMAIN_PASSWORD is the type
+        // mstsc.exe stores when you tick "remember me" and is what makes NLA
+        // silent; GENERIC mirrors `cmdkey /generic`. Writing both (and not
+        // deleting anything) overwrites any bad DPAPI blob from earlier tests
+        // while keeping a working "remember me" entry intact.
+        public static string Write(string target, string user, string password)
         {
-            // Clear any stale entries (e.g. a bad DPAPI blob from earlier tests)
-            // so the GENERIC plaintext credential below is the only one CredSSP sees.
-            CredDeleteW(target, CRED_TYPE_GENERIC, 0);
-            CredDeleteW(target, CRED_TYPE_DOMAIN_PASSWORD, 0);
-
             byte[] blob = System.Text.Encoding.Unicode.GetBytes(password);
+            bool g = WriteOne(target, user, blob, CRED_TYPE_GENERIC);
+            bool d = WriteOne(target, user, blob, CRED_TYPE_DOMAIN_PASSWORD);
+            return "generic=" + g + " domain=" + d;
+        }
+
+        private static bool WriteOne(string target, string user, byte[] blob, uint type)
+        {
             IntPtr blobPtr = Marshal.AllocHGlobal(blob.Length == 0 ? 1 : blob.Length);
             try
             {
                 if (blob.Length > 0) Marshal.Copy(blob, 0, blobPtr, blob.Length);
                 var cred = new CREDENTIAL
                 {
-                    Type = CRED_TYPE_GENERIC,
+                    Type = type,
                     TargetName = target,
                     CredentialBlobSize = (uint)blob.Length,
                     CredentialBlob = blobPtr,
@@ -269,16 +275,14 @@ namespace OrbitalRdpHost
 
         static void Configure(string server, int port, string user, string password)
         {
-            // Deterministic credential: write our own GENERIC plaintext entry to
-            // the Credential Manager so NLA reads the correct password during
-            // Connect(), regardless of any stale credential left in the store.
-            bool c1 = Cred.Write("TERMSRV/" + server, user, password);
-            Emit("INFO:CredWrite TERMSRV/" + server + " user=" + user + " ok=" + c1);
+            // Deterministic credential: write our own plaintext entries to the
+            // Credential Manager so NLA reads the correct password during Connect(),
+            // regardless of any stale credential left in the store.
+            Emit("INFO:CredWrite TERMSRV/" + server + " user=" + user + " " +
+                 Cred.Write("TERMSRV/" + server, user, password));
             if (port != 3389)
-            {
-                bool c2 = Cred.Write("TERMSRV/" + server + ":" + port, user, password);
-                Emit("INFO:CredWrite TERMSRV/" + server + ":" + port + " ok=" + c2);
-            }
+                Emit("INFO:CredWrite TERMSRV/" + server + ":" + port + " " +
+                     Cred.Write("TERMSRV/" + server + ":" + port, user, password));
 
             _rdp = _rdpAx.Ocx; // live OCX, accessed via IDispatch through `dynamic`
             _rdp.Server = server;
