@@ -17,6 +17,55 @@ use windows::Win32::Security::Credentials::{
 use windows::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
 };
+use windows::Win32::System::Registry::{
+    RegGetValueW, HKEY, HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
+};
+
+// ── Diagnostic: check RDP client policies that force a credential prompt ───────
+//
+// Corporate GPOs commonly set these and they OVERRIDE any stored credential,
+// forcing mstscax to always show its prompt no matter what we do:
+//   fPromptForPassword=1  → "Always prompt for password upon connection"
+//   DisablePasswordSaving=1 → blocks reading saved credentials
+//   AllowDefaultCredentials=0 (CredSSP delegation) → blocks silent NLA
+fn read_policy_dword(root: HKEY, subkey: &str, value: &str) -> Option<u32> {
+    let sk: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+    let vn: Vec<u16> = value.encode_utf16().chain(Some(0)).collect();
+    let mut data: u32 = 0;
+    let mut size: u32 = 4;
+    let rc = unsafe {
+        RegGetValueW(root, PCWSTR(sk.as_ptr()), PCWSTR(vn.as_ptr()), RRF_RT_REG_DWORD,
+            None, Some(&mut data as *mut u32 as *mut c_void), Some(&mut size))
+    };
+    if rc.is_ok() { Some(data) } else { None }
+}
+
+fn check_policies() {
+    eprintln!("[rdp_test] ── Policy diagnostics ─────────────────────────────");
+    let checks: &[(&str, HKEY, &str, &str)] = &[
+        ("fPromptForPassword (force prompt)", HKEY_LOCAL_MACHINE,
+            "SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services", "fPromptForPassword"),
+        ("DisablePasswordSaving (HKLM)", HKEY_LOCAL_MACHINE,
+            "SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services", "DisablePasswordSaving"),
+        ("DisablePasswordSaving (HKCU)", HKEY_CURRENT_USER,
+            "SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services", "DisablePasswordSaving"),
+        ("AllowSavedCredentialsWhenNTLMOnly", HKEY_LOCAL_MACHINE,
+            "SOFTWARE\\Policies\\Microsoft\\Windows\\CredentialsDelegation", "AllowSavedCredentialsWhenNTLMOnly"),
+        ("ConcatenateDefaults_AllowSavedNTLMOnly", HKEY_LOCAL_MACHINE,
+            "SOFTWARE\\Policies\\Microsoft\\Windows\\CredentialsDelegation", "ConcatenateDefaults_AllowSavedNTLMOnly"),
+        ("AllowSavedCredentials", HKEY_LOCAL_MACHINE,
+            "SOFTWARE\\Policies\\Microsoft\\Windows\\CredentialsDelegation", "AllowSavedCredentials"),
+    ];
+    for (label, root, sk, vn) in checks {
+        match read_policy_dword(*root, sk, vn) {
+            Some(v) => eprintln!("[rdp_test]   {label} = {v}"),
+            None    => eprintln!("[rdp_test]   {label} = (not set)"),
+        }
+    }
+    eprintln!("[rdp_test] ───────────────────────────────────────────────────");
+    eprintln!("[rdp_test] If fPromptForPassword=1 or DisablePasswordSaving=1, the");
+    eprintln!("[rdp_test] client is FORCED to prompt — no stored credential works.");
+}
 
 const CLSID_10: GUID = GUID::from_values(0xC0EFA91A,0xEEB7,0x41C7,[0x97,0xFA,0xF0,0xED,0x64,0x5E,0xFB,0x24]);
 const CLSID_9:  GUID = GUID::from_values(0x8B918B82,0x7985,0x4C24,[0x89,0xDF,0xC3,0x3A,0xD2,0xBB,0xFB,0xCD]);
@@ -407,6 +456,8 @@ fn main() {
     eprintln!("[rdp_test] host={host}:{port}  user={user_str}  domain={domain_str}");
     eprintln!("[rdp_test] password length: {} chars", password.len());
 
+    check_policies();
+
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
@@ -458,9 +509,14 @@ fn main() {
         }
 
         // ── Store credential in Windows Credential Manager ────────────────────
-        // Uses CRED_TYPE_DOMAIN_PASSWORD with plain UTF-16LE — same as cmdkey.
-        // mstscax/CredSSP finds it by TERMSRV/<host> and performs silent NLA.
-        store_cred(host, port, &combined_user, password);
+        // If ORB_NOSTORE is set, DON'T write a credential — this lets us test
+        // whether mstscax reads an EXISTING cmdkey credential on this machine
+        // (isolates "our blob format" from "policy forces prompt").
+        if std::env::var("ORB_NOSTORE").is_ok() {
+            eprintln!("[rdp_test] ORB_NOSTORE set — NOT writing credential (relying on cmdkey)");
+        } else {
+            store_cred(host, port, &combined_user, password);
+        }
 
         // ── RDP properties via IDispatch ──────────────────────────────────────
         let disp: IDispatch = rdp_unk.cast().expect("IDispatch");
