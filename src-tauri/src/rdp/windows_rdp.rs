@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::Emitter;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -72,14 +72,20 @@ unsafe extern "system" fn host_wnd_proc(
 // ── Screen positioning ────────────────────────────────────────────────────────
 
 fn canvas_to_screen(parent: HWND, rel_x: i32, rel_y: i32) -> (i32, i32) {
-    // getBoundingClientRect() in the browser returns coordinates relative to the
-    // WebView2 client area. ClientToScreen converts client-area coords to screen
-    // coords correctly, unlike GetWindowRect which includes the non-client area
-    // (title bar, borders) causing an offset that covers the tab bar.
+    // getBoundingClientRect() returns coords relative to the WebView2 client area.
+    // We must convert from client-area origin to screen by accounting for the
+    // non-client area (title bar + borders). GetWindowRect gives the outer bounds;
+    // GetClientRect gives the client size (always 0-based). The difference is the
+    // non-client offsets on each side.
     unsafe {
-        let mut pt = POINT { x: rel_x, y: rel_y };
-        let _ = ClientToScreen(parent, &mut pt);
-        (pt.x, pt.y)
+        let mut wr = RECT::default();
+        let mut cr = RECT::default();
+        let _ = GetWindowRect(parent, &mut wr);
+        let _ = GetClientRect(parent, &mut cr);
+        // Horizontal border is symmetric; vertical non-client area = title + top border.
+        let nc_x = ((wr.right - wr.left) - cr.right) / 2;
+        let nc_y = ((wr.bottom - wr.top) - cr.bottom - nc_x).max(0);
+        (wr.left + nc_x + rel_x, wr.top + nc_y + rel_y)
     }
 }
 
