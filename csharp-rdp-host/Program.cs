@@ -355,56 +355,24 @@ namespace OrbitalRdpHost
 
         static void Configure(string server, int port, string user, string password)
         {
-            // ── Credential strategy ───────────────────────────────────────────
-            // On this Windows build, injecting ClearTextPassword onto the hosted
-            // control is ignored (NLA never receives the password → discReason
-            // 7943). mstsc.exe instead pulls the password from the Credential
-            // Manager: you give it server + username and it reads TERMSRV/<host>.
-            // So by DEFAULT we replicate exactly what `cmdkey /generic` does — we
-            // store a GENERIC credential and let mstscax pull it through the normal
-            // CredSSP path, WITHOUT injecting ClearTextPassword.
+            // This is the ORIGINAL configuration from f336320 — the version that
+            // connected silently. Everything we added afterward (domain split,
+            // CredWrite, CredClear) regressed it, so we are back to exactly this:
+            // combined "DOMAIN\user" in UserName, inject ClearTextPassword, and do
+            // NOT touch the Credential Manager.
             //
-            // Env overrides for isolation:
-            //   ORB_NO_CRED=1   — don't write the credential (use a pre-existing
-            //                     cmdkey entry instead). Implies don't clear it.
-            //   ORB_INJECT=1    — also inject ClearTextPassword (old behavior).
-            //   ORB_CLEAR=1     — delete the stored credential first.
-            bool noCred  = Environment.GetEnvironmentVariable("ORB_NO_CRED") == "1";
-            bool inject  = Environment.GetEnvironmentVariable("ORB_INJECT")  == "1";
-            bool doClear = Environment.GetEnvironmentVariable("ORB_CLEAR")   == "1";
-
-            string credTarget = port == 3389
-                ? "TERMSRV/" + server
-                : "TERMSRV/" + server + ":" + port;
-
-            if (doClear)
-                Emit("INFO:CredClear " + credTarget + " " + Cred.Clear(credTarget));
-
-            if (!noCred)
-                Emit("INFO:CredWrite " + credTarget + " user=" + user + " " +
-                     Cred.Write(credTarget, user, password));
-            else
-                Emit("INFO:CredWrite skipped (ORB_NO_CRED=1) — using pre-stored credential");
-
-            // Split DOMAIN\user — the ActiveX control needs Domain and UserName
-            // in SEPARATE properties. Unlike mstsc.exe, it does NOT parse a
-            // combined "domain\user" string.
-            string domainPart = "";
-            string userPart   = user;
-            int bs = user.IndexOf('\\');
-            if (bs >= 0)
+            // ORB_CLEAR=1 lets you wipe any credential WE polluted into the store
+            // during the failed experiments, so the run starts from a clean state.
+            if (Environment.GetEnvironmentVariable("ORB_CLEAR") == "1")
             {
-                domainPart = user.Substring(0, bs);
-                userPart   = user.Substring(bs + 1);
+                string t = port == 3389 ? "TERMSRV/" + server : "TERMSRV/" + server + ":" + port;
+                Emit("INFO:CredClear " + t + " " + Cred.Clear(t));
             }
-            // user@domain (UPN) form is left intact in UserName with empty Domain.
-            Emit("INFO:Domain=" + domainPart + " UserName=" + userPart);
 
             _rdp = _rdpAx.Ocx; // live OCX, accessed via IDispatch through `dynamic`
             AdviseEvents(_rdpAx.Ocx);
             _rdp.Server = server;
-            _rdp.Domain = domainPart;
-            _rdp.UserName = userPart;
+            _rdp.UserName = user; // combined DOMAIN\user, exactly like the original
 
             dynamic adv = _rdp.AdvancedSettings9;
             adv.RDPPort = port;
@@ -414,25 +382,18 @@ namespace OrbitalRdpHost
             try { adv.RedirectClipboard = true; } catch { }
             // Suppress the local-resource / clipboard redirection warning dialogs.
             try { adv.WarnAboutClipboardRedirection = false; } catch { }
+            // Scriptable password path (works under a proper OLE site like AxHost's).
+            try { adv.ClearTextPassword = password; Emit("INFO:ClearTextPassword injected (adv)"); }
+            catch (Exception ex) { Emit("WARN:adv.ClearTextPassword " + ex.Message); }
 
-            // By default DO NOT inject the password — the stored credential drives
-            // NLA. Only inject when explicitly asked (ORB_INJECT=1), for comparison.
-            if (inject)
+            // Non-scriptable password path — the canonical way to drive silent NLA.
+            try
             {
-                try { adv.ClearTextPassword = password; Emit("INFO:ClearTextPassword injected (adv)"); }
-                catch (Exception ex) { Emit("WARN:adv.ClearTextPassword " + ex.Message); }
-                try
-                {
-                    var ns = _rdpAx.Ocx as IMsTscNonScriptable;
-                    if (ns != null) { ns.put_ClearTextPassword(password); Emit("INFO:ClearTextPassword injected (nonscriptable)"); }
-                    else Emit("WARN:IMsTscNonScriptable cast returned null");
-                }
-                catch (Exception ex) { Emit("WARN:nonscriptable " + ex.Message); }
+                var ns = _rdpAx.Ocx as IMsTscNonScriptable;
+                if (ns != null) { ns.put_ClearTextPassword(password); Emit("INFO:ClearTextPassword injected (nonscriptable)"); }
+                else Emit("WARN:IMsTscNonScriptable cast returned null");
             }
-            else
-            {
-                Emit("INFO:password injection skipped — relying on stored credential");
-            }
+            catch (Exception ex) { Emit("WARN:nonscriptable " + ex.Message); }
 
             try
             {
