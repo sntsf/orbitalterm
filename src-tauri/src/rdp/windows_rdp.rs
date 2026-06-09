@@ -298,12 +298,17 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
                 cur_visible = wants;
                 if wants {
                     ShowWindow(host_hwnd, SW_SHOW);
-                    // Move keyboard focus to the WinForms child so the user can type immediately.
-                    if let Ok(child) = GetWindow(host_hwnd, GW_CHILD) {
-                        if !child.0.is_null() { let _ = SetFocus(Some(child)); }
-                    }
+                    // Transfer the foreground to the RDP popup so the OS routes keyboard
+                    // input to its thread.  SetFocus alone doesn't work from a non-foreground
+                    // thread; SetForegroundWindow is required first.  This process owns the
+                    // Tauri window (the current foreground), so the call is allowed.
+                    // WM_SETFOCUS will be delivered to host_wnd_proc which cascades to the
+                    // WinForms child; the C# WndProc then focuses the deepest mstscax child.
+                    let _ = SetForegroundWindow(host_hwnd);
                 } else {
                     ShowWindow(host_hwnd, SW_HIDE);
+                    // Return keyboard focus to the Tauri parent window.
+                    let _ = SetForegroundWindow(parent);
                 }
             }
 

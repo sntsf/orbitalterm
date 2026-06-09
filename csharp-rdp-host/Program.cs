@@ -125,6 +125,9 @@ static class Native
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+    public const uint GW_CHILD = 5;
 }
 
 // ── Main program ──────────────────────────────────────────────────────────────
@@ -285,6 +288,25 @@ public sealed class RdpHostForm : Form
 
     static void Emit(string s) { Console.Out.WriteLine(s); Console.Out.Flush(); }
 
+    // Walk the window tree to find the innermost child.  mstscax.dll nests several
+    // windows inside the AxHost; keyboard input must go to the deepest one.
+    static IntPtr DeepestChild(IntPtr h)
+    {
+        for (;;) {
+            IntPtr c = Native.GetWindow(h, Native.GW_CHILD);
+            if (c == IntPtr.Zero) return h;
+            h = c;
+        }
+    }
+
+    void FocusRdpWindow()
+    {
+        if (_ax == null || !_ax.IsHandleCreated) return;
+        IntPtr target = DeepestChild(_ax.Handle);
+        Emit("DBG:FocusRdpWindow target=0x" + target.ToString("X"));
+        Native.SetFocus(target);
+    }
+
     public RdpHostForm(string server, int port, string user, string domain,
                        string password, IntPtr parentHwnd, bool adminMode,
                        int width, int height, string clsid)
@@ -344,7 +366,7 @@ public sealed class RdpHostForm : Form
             // Wire focus debugging and click-to-focus filter.
             _ax.GotFocus  += (s, ev) => Emit("DBG:AxHost.GotFocus");
             _ax.LostFocus += (s, ev) => Emit("DBG:AxHost.LostFocus");
-            Application.AddMessageFilter(new ClickFocusFilter(_ax));
+            Application.AddMessageFilter(new ClickFocusFilter(this));
 
             _rdp = _ax.GetOcxObject();
             if (_rdp == null) throw new Exception("GetOcx() returned null");
@@ -410,11 +432,11 @@ public sealed class RdpHostForm : Form
     void HandleConnected()
     {
         Emit("STATE:connected");
-        // Route keyboard focus to the RDP control once the session is live.
+        // Route keyboard focus to the innermost mstscax child once the session is live.
         if (InvokeRequired)
-            BeginInvoke(new Action(() => { if (_ax != null) { Emit("DBG:connected→_ax.Focus"); _ax.Focus(); } }));
+            BeginInvoke(new Action(() => { Emit("DBG:connected→FocusRdpWindow"); FocusRdpWindow(); }));
         else
-            { if (_ax != null) { Emit("DBG:connected→_ax.Focus"); _ax.Focus(); } }
+            { Emit("DBG:connected→FocusRdpWindow"); FocusRdpWindow(); }
     }
 
     void HandleDisconnected(int reason)
@@ -426,14 +448,16 @@ public sealed class RdpHostForm : Form
             Close();
     }
 
-    // Cascade WM_SETFOCUS down to the RDP ActiveX control so the user can type.
+    // Cascade WM_SETFOCUS down to the innermost mstscax.dll child window so the
+    // user can type.  SetFocus on AxHost alone is not enough — the keyboard input
+    // window is a grandchild (or deeper) created by mstscax internally.
     protected override void WndProc(ref Message m)
     {
         base.WndProc(ref m);
-        if (m.Msg == 0x0007 /* WM_SETFOCUS */ && _ax != null)
+        if (m.Msg == 0x0007 /* WM_SETFOCUS */ && _ax != null && _ax.IsHandleCreated)
         {
-            Emit("DBG:Form.WM_SETFOCUS→_ax.Focus");
-            _ax.Focus();
+            Emit("DBG:Form.WM_SETFOCUS→FocusRdpWindow");
+            FocusRdpWindow();
         }
     }
 
