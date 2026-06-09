@@ -264,10 +264,12 @@ export function RdpPane({ tab }: RdpPaneProps) {
   const [status, setStatus] = useState<"connecting" | "connected" | "error">("connecting");
   const [errorMsg, setErrorMsg] = useState("");
   const [embedded, setEmbedded] = useState(false);
-  const [nativeWindow, setNativeWindow] = useState(false); // true = Windows mstsc reparented
+  const [nativeWindow, setNativeWindow] = useState(false);
+  useEffect(() => { nativeWindowRef.current = nativeWindow; }, [nativeWindow]);
   const [frameSize, setFrameSize] = useState({ width: 1280, height: 800 });
   const sessionIdRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const nativeWindowRef = useRef(false);
   // Generation counter: incremented each time a new connect() is initiated
   // (including by the useEffect cleanup on unmount/re-mount). Any in-flight
   // connect() that finds its generation outdated discards the session it
@@ -385,6 +387,16 @@ export function RdpPane({ tab }: RdpPaneProps) {
       if (sid) {
         if (skipDisconnectSessions.has(sid)) {
           skipDisconnectSessions.delete(sid);
+        } else if (nativeWindowRef.current) {
+          // Windows embedded RDP: check whether this is a tab switch (tab still
+          // in store) or a tab close (tab removed). On switch, hide but keep the
+          // session alive so switching back restores without reconnecting.
+          const tabStillOpen = useAppStore.getState().tabs.some((t) => t.id === tab.id);
+          if (tabStillOpen) {
+            rdpWindowsVisibility(sid, false).catch(() => {});
+          } else {
+            disconnectRdp(sid).catch(console.error);
+          }
         } else {
           disconnectRdp(sid).catch(console.error);
         }
