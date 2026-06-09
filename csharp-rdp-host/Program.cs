@@ -27,6 +27,7 @@ using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace OrbitalRdpHost
 {
@@ -122,6 +123,11 @@ namespace OrbitalRdpHost
             string combinedUser =
                 (string.IsNullOrEmpty(domain) || user.Contains("\\")) ? user : domain + "\\" + user;
 
+            // Suppress the local-resource / clipboard redirection warning dialog
+            // (the one introduced by KB5057577). Must be set before the control
+            // activates and connects. HKCU — no elevation required.
+            SuppressRedirectionWarning();
+
             Application.EnableVisualStyles();
 
             bool embedded = _parent != IntPtr.Zero;
@@ -178,6 +184,23 @@ namespace OrbitalRdpHost
                 catch { /* try next */ }
             }
             return CLSID_CLIENT10;
+        }
+
+        // Reverts the post-KB5057577 redirection warning to the version that
+        // honors the WarnAbout* control settings, so the "local resources /
+        // clipboard" trust dialog no longer appears. HKCU = no elevation.
+        static void SuppressRedirectionWarning()
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.CreateSubKey(
+                    @"Software\Policies\Microsoft\Windows NT\Terminal Services\Client"))
+                {
+                    if (k != null)
+                        k.SetValue("RedirectionWarningDialogVersion", 1, RegistryValueKind.DWord);
+                }
+            }
+            catch (Exception ex) { Emit("WARN:registry " + ex.Message); }
         }
 
         static void Configure(string server, int port, string user, string password)
