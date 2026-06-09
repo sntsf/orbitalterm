@@ -1,22 +1,46 @@
 @echo off
-rem ── OrbitalRdpHost build (zero install) ───────────────────────────────────────
-rem Compiles with the C# compiler that ships with .NET Framework 4.x, present on
-rem every Windows 11 machine. No .NET SDK, Visual Studio, or aximp required.
-setlocal
+:: Build OrbitalRdpHost.exe using the .NET Framework C# compiler (no SDK needed)
+::
+:: Searches for csc.exe in common .NET Framework locations.
+:: Output: OrbitalRdpHost.exe in this directory.
 
-set "CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-if not exist "%CSC%" set "CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe"
-if not exist "%CSC%" (
-  echo ERROR: csc.exe not found. .NET Framework 4.x should ship with Windows 11.
-  exit /b 1
+setlocal enabledelayedexpansion
+
+set "CSC="
+for %%d in (
+    "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319"
+    "%WINDIR%\Microsoft.NET\Framework\v4.0.30319"
+    "%WINDIR%\Microsoft.NET\Framework64\v3.5"
+    "%WINDIR%\Microsoft.NET\Framework\v3.5"
+) do (
+    if exist "%%~d\csc.exe" (
+        set "CSC=%%~d\csc.exe"
+        goto :found
+    )
 )
 
-echo Using %CSC%
-"%CSC%" /nologo /target:exe /platform:x64 /out:OrbitalRdpHost.exe ^
-  /r:System.dll /r:System.Core.dll /r:System.Drawing.dll ^
-  /r:System.Windows.Forms.dll /r:Microsoft.CSharp.dll ^
-  Program.cs
+echo ERROR: csc.exe not found. .NET Framework 4.x must be installed.
+exit /b 1
 
-if errorlevel 1 ( echo BUILD FAILED & exit /b 1 )
-echo BUILD OK: %CD%\OrbitalRdpHost.exe
-endlocal
+:found
+echo Using compiler: %CSC%
+
+"%CSC%" ^
+    /nologo ^
+    /target:winexe ^
+    /platform:x64 ^
+    /optimize+ ^
+    /out:OrbitalRdpHost.exe ^
+    /r:System.dll ^
+    /r:System.Core.dll ^
+    /r:System.Drawing.dll ^
+    /r:System.Windows.Forms.dll ^
+    /r:Microsoft.CSharp.dll ^
+    Program.cs
+
+if %ERRORLEVEL% neq 0 (
+    echo BUILD FAILED
+    exit /b %ERRORLEVEL%
+)
+
+echo BUILD OK: OrbitalRdpHost.exe

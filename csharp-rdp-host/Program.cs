@@ -1,404 +1,402 @@
-// OrbitalRdpHost — RDP ActiveX host (no SDK tools required).
-//
-// Hosts the MsRdpClient ActiveX control via WinForms AxHost. Builds with only
-// csc.exe (ships with .NET Framework 4.x on Windows 11) — no aximp/tlbimp/SDK.
-//
-// mRemoteNG (which connects silently on this machine) hosts the *version 9*
-// control; ours was defaulting to version 10 (CLSID C0EFA91A…), which appears to
-// self-cancel (discReason 7943) on this Windows build. We therefore prefer v9 and
-// expose ORB_VER=9|10|11 to test each.
+// OrbitalRdpHost.exe — minimal WinForms RDP host for OrbitalTerm
 //
 // Usage:
-//   OrbitalRdpHost.exe --server H --user "DOMAIN\user" --password "pass"
-//                      [--port N] [--parent HWND]
+//   OrbitalRdpHost.exe --server <host> --port <port> --user <user[@domain]|\domain\user>
+//                      [--parent <HWND>] [--admin] [--width <w>] [--height <h>]
 //
-// Status is printed to stdout, one event per line, flushed immediately.
+// Password is read from stdin (first line).
+// State changes are emitted on stdout:
+//   STATE:connecting  STATE:connected  EVENT:OnLoginComplete
+//   STATE:disconnected:<discReason>   ERROR:<msg>
 
 using System;
 using System.Drawing;
+using System.IO;
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-namespace OrbitalRdpHost
+[assembly: System.Security.Permissions.SecurityPermission(
+    System.Security.PermissionState.Unrestricted)]
+
+static class Program
 {
-    // IMsTscAxEvents — the control's outgoing event interface. Declared as an
-    // IDispatch sink; the runtime routes each event to the method whose DispId
-    // matches. We listen to the credential/auth-relevant ones so a failure is
-    // explained (OnLogonError, OnFatalError) instead of a bare disconnect code.
-    [ComVisible(true)]
-    [Guid("336D5562-EFA8-482E-8CB3-C5C0FC7A7DB6")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
-    public interface IMsTscAxEvents
+    // ── Win32 ─────────────────────────────────────────────────────────────────
+    [DllImport("user32.dll")] static extern IntPtr SetParent(IntPtr hWnd, IntPtr hParent);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after,
+        int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] static extern long SetWindowLong(IntPtr h, int nIndex, long v);
+    [DllImport("user32.dll")] static extern long GetWindowLong(IntPtr h, int nIndex);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+
+    const int GWL_STYLE = -16;
+    const long WS_CHILD = 0x40000000L;
+    const long WS_POPUP = 0x80000000L;
+    const long WS_CAPTION = 0x00C00000L;
+    const long WS_THICKFRAME = 0x00040000L;
+    const uint SWP_FRAMECHANGED = 0x0020;
+    const uint SWP_NOZORDER = 0x0004;
+    const uint SWP_NOACTIVATE = 0x0010;
+    const int SW_SHOW = 5;
+
+    // ── Entry ─────────────────────────────────────────────────────────────────
+    [STAThread]
+    static int Main(string[] args)
     {
-        [DispId(1)]  void OnConnecting();
-        [DispId(2)]  void OnConnected();
-        [DispId(3)]  void OnLoginComplete();
-        [DispId(4)]  void OnDisconnected(int discReason);
-        [DispId(10)] void OnFatalError(int errorCode);
-        [DispId(11)] void OnWarning(int warningCode);
-        [DispId(18)] void OnAuthenticationWarningDisplayed();
-        [DispId(23)] void OnLogonError(int lError);
-    }
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
 
-    internal sealed class RdpAxControl : AxHost
-    {
-        public RdpAxControl(string clsidNoBraces) : base(clsidNoBraces) { }
-        public object Ocx { get { return GetOcx(); } }
-    }
-
-    [ComImport]
-    [Guid("C1E6743A-41C1-4A74-832A-0DD06C1C7A0E")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    internal interface IMsTscNonScriptable
-    {
-        void put_ClearTextPassword([MarshalAs(UnmanagedType.BStr)] string pass);
-    }
-
-    internal static class Native
-    {
-        public const int GWL_STYLE = -16;
-        public const long WS_CHILD = 0x40000000L;
-        public const long WS_POPUP = 0x80000000L;
-        public const long WS_CAPTION = 0x00C00000L;
-        public const long WS_THICKFRAME = 0x00040000L;
-
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-        [DllImport("user32.dll")]
-        public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
-        [DllImport("user32.dll")]
-        public static extern bool IsWindow(IntPtr hWnd);
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct RECT { public int Left, Top, Right, Bottom; }
-    }
-
-    internal static class Program
-    {
-        static RdpAxControl _rdpAx;
-        static dynamic _rdp;
-        static Form _form;
-        static IntPtr _parent = IntPtr.Zero;
-        static int _lastState = -999;
-        static IConnectionPoint _cp;
-        static int _cookie;
-
-        static void Emit(string line) { Console.Out.WriteLine(line); Console.Out.Flush(); }
-
-        sealed class EventSink : IMsTscAxEvents
+        var opts = ParseArgs(args);
+        if (opts.Server == null)
         {
-            public void OnConnecting()    { Emit("EVENT:OnConnecting"); }
-            public void OnConnected()     { Emit("EVENT:OnConnected"); }
-            public void OnLoginComplete() { Emit("EVENT:OnLoginComplete"); }
-            public void OnFatalError(int errorCode) { Emit("EVENT:OnFatalError code=" + errorCode); }
-            public void OnWarning(int warningCode)  { Emit("EVENT:OnWarning code=" + warningCode); }
-            public void OnAuthenticationWarningDisplayed() { Emit("EVENT:OnAuthenticationWarningDisplayed"); }
-            public void OnLogonError(int lError)    { Emit("EVENT:OnLogonError lError=" + lError); }
-
-            public void OnDisconnected(int discReason)
-            {
-                Emit("EVENT:OnDisconnected discReason=" + discReason +
-                     " (0x" + discReason.ToString("X") + ")");
-                int ext = -1;
-                try { ext = (int)_rdp.ExtendedDisconnectReason; Emit("INFO:ExtendedDisconnectReason=" + ext); }
-                catch (Exception e) { Emit("WARN:ExtendedDisconnectReason " + e.Message); }
-                try
-                {
-                    string desc = (string)_rdp.GetErrorDescription((uint)discReason, (uint)(ext < 0 ? 0 : ext));
-                    Emit("INFO:ErrorDescription=" + desc);
-                }
-                catch (Exception e) { Emit("WARN:GetErrorDescription " + e.Message); }
-                try { _form.BeginInvoke((Action)(() => Application.Exit())); } catch { Application.Exit(); }
-            }
+            Console.Error.WriteLine("Usage: OrbitalRdpHost --server <host> --port <port> --user <user>");
+            return 1;
         }
 
-        [STAThread]
-        static int Main(string[] args)
+        // Read password from stdin (non-blocking — if none given, use empty string)
+        string password = "";
+        try
         {
-            string server = null, user = null, domain = "", password = null;
-            int port = 3389;
+            // Set stdin to non-blocking so we don't hang if no password is piped
+            using var cts = new System.Threading.CancellationTokenSource(500);
+            var t = Task_ReadLine(cts.Token);
+            t.Wait(600);
+            if (t.IsCompleted && t.Result != null) password = t.Result;
+        }
+        catch { /* no password provided */ }
 
-            for (int i = 0; i < args.Length; i++)
-            {
-                switch (args[i])
-                {
-                    case "--parent":   _parent = new IntPtr(long.Parse(args[++i])); break;
-                    case "--server":   server = args[++i]; break;
-                    case "--port":     port = int.Parse(args[++i]); break;
-                    case "--user":     user = args[++i]; break;
-                    case "--domain":   domain = args[++i]; break;
-                    case "--password": password = args[++i]; break;
-                }
-            }
-
-            if (password == null)
-            {
-                try { password = Console.In.ReadLine() ?? ""; } catch { password = ""; }
-            }
-
-            if (string.IsNullOrEmpty(server) || string.IsNullOrEmpty(user))
-            {
-                Console.Error.WriteLine(
-                    "usage: OrbitalRdpHost --server <host> --user <DOMAIN\\\\user> " +
-                    "[--port N] [--domain D] [--parent HWND] [--password P]");
-                return 2;
-            }
-
-            // Split DOMAIN\user into separate parts (mRemoteNG style).
-            string userName = user, dom = domain;
-            int bs = user.IndexOf('\\');
-            if (bs >= 0) { dom = user.Substring(0, bs); userName = user.Substring(bs + 1); }
-
-            SuppressRedirectionWarning(server);
-            Application.EnableVisualStyles();
-
-            bool embedded = _parent != IntPtr.Zero;
-            _form = new Form
-            {
-                Text = "OrbitalRdpHost",
-                FormBorderStyle = embedded ? FormBorderStyle.None : FormBorderStyle.Sizable,
-                ShowInTaskbar = !embedded,
-                StartPosition = FormStartPosition.Manual,
-                Width = 1280,
-                Height = 800,
-                BackColor = Color.Black,
-            };
-
-            string clsid = PickClsid();
-            if (clsid == null) { Emit("ERROR:no MsRdpClient control could be created"); return 3; }
-            Emit("INFO:using clsid=" + clsid);
-            _rdpAx = new RdpAxControl(clsid) { Dock = DockStyle.Fill };
-            _form.Controls.Add(_rdpAx);
-
-            string srv = server; int prt = port; string usr = userName; string dm = dom; string pwd = password;
-            _form.Shown += (s, e) =>
-            {
-                try
-                {
-                    if (embedded && Native.IsWindow(_parent)) EmbedInParent();
-                    Configure(srv, prt, usr, dm, pwd);
-                    Emit("STATE:connecting");
-                    _rdp.Connect();
-                    StartPolling();
-                }
-                catch (Exception ex)
-                {
-                    Emit("ERROR:" + ex.Message);
-                    Application.Exit();
-                }
-            };
-
-            Application.Run(_form);
-            return 0;
+        string clsid = PickClsid();
+        if (clsid == null)
+        {
+            Console.WriteLine("ERROR:no mstscax.dll control found in registry");
+            return 2;
         }
 
-        // The NotSafeForScripting coclasses have NO ProgIDs — only CLSIDs. So we
-        // enumerate the registry for every COM class backed by mstscax.dll, print
-        // them (CLSID + friendly name), and pick one. ORB_CLSID forces a specific
-        // CLSID so we can test each control version (mRemoteNG hosts v9).
-        static string PickClsid()
+        // Suppress KB5057577 clipboard/redirection warning dialog
+        SuppressRedirectWarning(opts.Server);
+
+        var form = new RdpForm(opts, clsid, password);
+        Application.Run(form);
+        return 0;
+    }
+
+    // Simple async stdin readline so we can timeout
+    static System.Threading.Tasks.Task<string> Task_ReadLine(System.Threading.CancellationToken ct)
+        => System.Threading.Tasks.Task.Run(() => Console.ReadLine(), ct);
+
+    // ── Argument parsing ──────────────────────────────────────────────────────
+    class Options
+    {
+        public string Server;
+        public int Port = 3389;
+        public string User;
+        public string Domain;
+        public IntPtr ParentHwnd = IntPtr.Zero;
+        public bool AdminMode;
+        public int Width = 1280;
+        public int Height = 800;
+    }
+
+    static Options ParseArgs(string[] args)
+    {
+        var o = new Options();
+        for (int i = 0; i < args.Length - 1; i++)
         {
-            string forced = Environment.GetEnvironmentVariable("ORB_CLSID");
-            if (!string.IsNullOrEmpty(forced))
+            switch (args[i].ToLower())
             {
-                forced = forced.Trim('{', '}');
-                Emit("INFO:ORB_CLSID forced=" + forced);
-            }
-
-            var found = EnumerateMstscaxClasses();   // (clsid -> name)
-            foreach (var kv in found)
-                Emit("INFO:available clsid=" + kv.Key + " name=\"" + kv.Value + "\"");
-
-            // Preferred NON-redistributable controls, newest first. The
-            // "(redistributable)" variants — notably C0EFA91A (redist v11) — were
-            // self-cancelling with discReason 7943 on this Windows build; the plain
-            // "Microsoft RDP Client Control - version N" coclasses connect silently.
-            // v12 (1DF7C823) is confirmed working; the rest are fallbacks for other
-            // machines/Windows versions.
-            string[] preferred =
-            {
-                "1DF7C823-B2D4-4B54-975A-F2AC5D7CF8B8", // v12  (confirmed working)
-                "A0C63C30-F08D-4AB4-907C-34905D770C7D", // v11
-                "8B918B82-7985-4C24-89DF-C33AD2BBFBCD", // v10
-                "A3BC03A0-041D-42E3-AD22-882B7865C9C5", // v9   (mRemoteNG's choice)
-                "54d38bf7-b1ef-4479-9674-1bd6ea465258", // v8
-                "3F859AA3-C2D4-4FAA-B0E4-FD0C9C4E5E3A", // v13
-            };
-
-            // Build the try-order: forced first, then preferred ones present in the
-            // registry, then any other enumerated class as a last resort.
-            var order = new System.Collections.Generic.List<string>();
-            if (!string.IsNullOrEmpty(forced)) order.Add(forced.ToLowerInvariant());
-            foreach (var p in preferred)
-                if (found.ContainsKey(p) && !order.Contains(p.ToLowerInvariant()))
-                    order.Add(p.ToLowerInvariant());
-            foreach (var kv in found)
-                if (!order.Contains(kv.Key.ToLowerInvariant()))
-                    order.Add(kv.Key.ToLowerInvariant());
-
-            foreach (var c in order)
-            {
-                try
-                {
-                    Type t = Type.GetTypeFromCLSID(new Guid(c), false);
-                    if (t == null) continue;
-                    object o = Activator.CreateInstance(t);
-                    if (o != null) Marshal.ReleaseComObject(o);
-                    return c;
-                }
-                catch (Exception ex) { Emit("WARN:create " + c + " failed: " + ex.Message); }
-            }
-            return null;
-        }
-
-        // Scan HKCR\CLSID for classes whose InprocServer32 is mstscax.dll.
-        static System.Collections.Generic.Dictionary<string, string> EnumerateMstscaxClasses()
-        {
-            var result = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            try
-            {
-                using (var root = Registry.ClassesRoot.OpenSubKey("CLSID"))
-                {
-                    if (root == null) return result;
-                    foreach (var sub in root.GetSubKeyNames())
+                case "--server": o.Server = args[++i]; break;
+                case "--port":   o.Port   = int.Parse(args[++i]); break;
+                case "--user":
+                    string raw = args[++i];
+                    // domain\user  or  user@domain  or  plain user
+                    if (raw.Contains("\\"))
                     {
-                        if (sub.Length < 2 || sub[0] != '{') continue;
-                        try
-                        {
-                            using (var k = root.OpenSubKey(sub))
-                            {
-                                if (k == null) continue;
-                                using (var ip = k.OpenSubKey("InprocServer32"))
-                                {
-                                    if (ip == null) continue;
-                                    string dll = ip.GetValue(null) as string;
-                                    if (string.IsNullOrEmpty(dll)) continue;
-                                    if (dll.IndexOf("mstscax.dll", StringComparison.OrdinalIgnoreCase) < 0) continue;
-                                    string name = k.GetValue(null) as string ?? "";
-                                    result[sub.Trim('{', '}')] = name;
-                                }
-                            }
-                        }
-                        catch { /* skip unreadable keys */ }
+                        var parts = raw.Split(new[] { '\\' }, 2);
+                        o.Domain = parts[0];
+                        o.User   = parts[1];
                     }
-                }
-            }
-            catch (Exception ex) { Emit("WARN:enum " + ex.Message); }
-            return result;
-        }
-
-        static void SuppressRedirectionWarning(string server)
-        {
-            try
-            {
-                using (var k = Registry.CurrentUser.CreateSubKey(
-                    @"Software\Microsoft\Terminal Server Client\LocalDevices"))
-                {
-                    if (k != null) k.SetValue(server, unchecked((int)0x4D), RegistryValueKind.DWord);
-                }
-            }
-            catch (Exception ex) { Emit("WARN:registry " + ex.Message); }
-        }
-
-        static void AdviseEvents(object ocx)
-        {
-            try
-            {
-                var cpc = ocx as IConnectionPointContainer;
-                if (cpc == null) { Emit("WARN:no IConnectionPointContainer"); return; }
-                Guid iid = typeof(IMsTscAxEvents).GUID;
-                cpc.FindConnectionPoint(ref iid, out _cp);
-                _cp.Advise(new EventSink(), out _cookie);
-                Emit("INFO:events advised cookie=" + _cookie);
-            }
-            catch (Exception ex) { Emit("WARN:advise " + ex.Message); }
-        }
-
-        static void Configure(string server, int port, string userName, string domain, string password)
-        {
-            _rdp = _rdpAx.Ocx;
-            AdviseEvents(_rdpAx.Ocx);
-            _rdp.Server   = server;
-            _rdp.UserName = userName;
-            _rdp.Domain   = domain;
-            Emit("INFO:Server=" + server + " Domain=" + domain + " UserName=" + userName);
-
-            dynamic adv = _rdp.AdvancedSettings9;
-            adv.RDPPort = port;
-            adv.EnableCredSspSupport = true;
-            adv.AuthenticationLevel  = 2;
-            try { adv.EncryptionEnabled = 1; } catch { }
-            try { adv.SmartSizing = true; } catch { }
-            try { adv.RedirectClipboard = true; } catch { }
-            try { adv.WarnAboutClipboardRedirection = false; } catch { }
-
-            try { adv.ClearTextPassword = password; Emit("INFO:ClearTextPassword set (adv)"); }
-            catch (Exception ex) { Emit("WARN:adv.ClearTextPassword " + ex.Message); }
-
-            try
-            {
-                var ns = _rdpAx.Ocx as IMsTscNonScriptable;
-                if (ns != null) { ns.put_ClearTextPassword(password); Emit("INFO:ClearTextPassword set (nonscriptable)"); }
-                else Emit("WARN:IMsTscNonScriptable cast returned null");
-            }
-            catch (Exception ex) { Emit("WARN:nonscriptable " + ex.Message); }
-
-            try
-            {
-                _rdp.DesktopWidth  = Math.Max(800, _form.ClientSize.Width);
-                _rdp.DesktopHeight = Math.Max(600, _form.ClientSize.Height);
-            }
-            catch { }
-        }
-
-        static void EmbedInParent()
-        {
-            int style = Native.GetWindowLong(_form.Handle, Native.GWL_STYLE);
-            long s = ((long)(uint)style | Native.WS_CHILD)
-                     & ~Native.WS_POPUP & ~Native.WS_CAPTION & ~Native.WS_THICKFRAME;
-            Native.SetWindowLong(_form.Handle, Native.GWL_STYLE, unchecked((int)s));
-            Native.SetParent(_form.Handle, _parent);
-            FitToParent();
-
-            var t = new Timer { Interval = 150 };
-            t.Tick += (s2, e2) =>
-            {
-                if (!Native.IsWindow(_parent)) { Application.Exit(); return; }
-                FitToParent();
-            };
-            t.Start();
-        }
-
-        static void FitToParent()
-        {
-            Native.RECT rc;
-            if (Native.GetClientRect(_parent, out rc))
-            {
-                int w = rc.Right - rc.Left, h = rc.Bottom - rc.Top;
-                if (w > 0 && h > 0) _form.SetBounds(0, 0, w, h);
+                    else if (raw.Contains("@"))
+                    {
+                        var parts = raw.Split('@');
+                        o.User   = parts[0];
+                        o.Domain = parts[1];
+                    }
+                    else
+                    {
+                        o.User = raw;
+                    }
+                    break;
+                case "--parent":
+                    o.ParentHwnd = new IntPtr(long.Parse(args[++i]));
+                    break;
+                case "--width":  o.Width  = int.Parse(args[++i]); break;
+                case "--height": o.Height = int.Parse(args[++i]); break;
+                case "--admin":  o.AdminMode = true; break;
             }
         }
+        // last arg without a value could be --admin
+        if (args.Length > 0 && args[args.Length - 1].ToLower() == "--admin")
+            o.AdminMode = true;
+        return o;
+    }
 
-        static void StartPolling()
+    // ── CLSID selection ───────────────────────────────────────────────────────
+    // Enumerate HKCR\CLSID for entries whose InprocServer32 points to mstscax.dll.
+    // The NotSafeForScripting coclasses have no ProgID, so ProgID lookup always fails.
+    static string PickClsid()
+    {
+        // Allow override for testing / compatibility
+        string env = Environment.GetEnvironmentVariable("ORB_CLSID");
+        if (!string.IsNullOrEmpty(env)) return env;
+
+        // Ordered list: non-redistributable variants work; redistributable ones
+        // (e.g. C0EFA91A = redist-v11) self-cancel with discReason=7943.
+        string[] preferred = {
+            "1DF7C823-B2D4-4B54-975A-F2AC5D7CF8B8", // v12 — confirmed working
+            "A0C63C30-F08D-4AB4-907C-34905D770C7D", // v11
+            "8B918B82-7985-4C24-89DF-C33AD2BBFBCD", // v10
+            "A3BC03A0-041D-42E3-AD22-882B7865C9C5", // v9
+            "54D38BF7-B1EF-4479-9674-1BD6EA465258", // v8
+            "3F859AA3-C2D4-4FAA-B0E4-FD0C9C4E5E3A", // v13
+        };
+
+        // Find which of these are actually registered on this machine
+        using var hkcr = Registry.ClassesRoot.OpenSubKey("CLSID", false);
+        if (hkcr == null) return null;
+
+        foreach (string clsid in preferred)
         {
-            var t = new Timer { Interval = 250 };
-            t.Tick += (s, e) =>
-            {
-                int state;
-                try { state = (int)_rdp.Connected; } catch { state = -1; }
-                if (state == _lastState) return;
-                _lastState = state;
-                if (state == 2) Emit("STATE:connecting");
-                else if (state == 1) Emit("STATE:connected");
-                else if (state == 0) { Emit("STATE:disconnected"); t.Stop(); Application.Exit(); }
-            };
-            t.Start();
+            string keyPath = "{" + clsid + "}\\InprocServer32";
+            using var k = hkcr.OpenSubKey(keyPath, false);
+            if (k == null) continue;
+            string path = k.GetValue(null) as string ?? "";
+            if (path.IndexOf("mstscax.dll", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "{" + clsid + "}";
         }
+
+        // Fallback: scan all CLSIDs for mstscax.dll
+        foreach (string name in hkcr.GetSubKeyNames())
+        {
+            using var k = hkcr.OpenSubKey(name + "\\InprocServer32", false);
+            if (k == null) continue;
+            string path = k.GetValue(null) as string ?? "";
+            if (path.IndexOf("mstscax.dll", StringComparison.OrdinalIgnoreCase) >= 0)
+                return name; // already has braces from registry
+        }
+
+        return null;
+    }
+
+    // ── KB5057577 clipboard warning suppression ───────────────────────────────
+    static void SuppressRedirectWarning(string server)
+    {
+        try
+        {
+            string key = @"SOFTWARE\Microsoft\Terminal Server Client\LocalDevices";
+            using var k = Registry.CurrentUser.CreateSubKey(key, true);
+            k?.SetValue(server, 0x4D, RegistryValueKind.DWord);
+        }
+        catch { /* best-effort */ }
+    }
+}
+
+// ── RDP host form ─────────────────────────────────────────────────────────────
+class RdpForm : Form
+{
+    // COM interface IIDs
+    static readonly Guid IID_IMsTscNonScriptable = new Guid("c1e6743a-41c1-4a74-832a-0dd06c1c7a0e");
+
+    readonly Program.Options _opts;
+    readonly string _clsid;
+    readonly string _password;
+    AxRdpHost _ax;
+
+    public RdpForm(Program.Options opts, string clsid, string password)
+    {
+        _opts     = opts;
+        _clsid    = clsid;
+        _password = password;
+
+        Text            = "OrbitalRdpHost";
+        FormBorderStyle = FormBorderStyle.None;
+        ClientSize      = new Size(opts.Width, opts.Height);
+        BackColor       = Color.Black;
+        ShowInTaskbar   = opts.ParentHwnd == IntPtr.Zero;
+
+        Load += OnLoad;
+    }
+
+    void OnLoad(object sender, EventArgs e)
+    {
+        // Reparent into the Rust WS_POPUP host window if requested
+        if (_opts.ParentHwnd != IntPtr.Zero)
+        {
+            Program.SetParent(Handle, _opts.ParentHwnd);
+            long style = Program.GetWindowLong(Handle, Program.GWL_STYLE);
+            style &= ~Program.WS_POPUP;
+            style &= ~Program.WS_CAPTION;
+            style &= ~Program.WS_THICKFRAME;
+            style |= Program.WS_CHILD;
+            Program.SetWindowLong(Handle, Program.GWL_STYLE, style);
+            Program.SetWindowPos(Handle, IntPtr.Zero, 0, 0,
+                _opts.Width, _opts.Height,
+                Program.SWP_FRAMECHANGED | Program.SWP_NOZORDER | Program.SWP_NOACTIVATE);
+            Program.ShowWindow(Handle, Program.SW_SHOW);
+        }
+
+        try
+        {
+            _ax = new AxRdpHost(_clsid, _opts, _password, Handle, OnConnected, OnDisconnected);
+            _ax.Dock     = DockStyle.Fill;
+            _ax.TabIndex = 0;
+            Controls.Add(_ax);
+            _ax.CreateControl();
+            _ax.Connect();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("ERROR:" + ex.Message);
+            Close();
+        }
+    }
+
+    void OnConnected()
+    {
+        Console.WriteLine("STATE:connected");
+        Console.Out.Flush();
+    }
+
+    void OnDisconnected(int reason)
+    {
+        Console.WriteLine("STATE:disconnected:" + reason);
+        Console.Out.Flush();
+        BeginInvoke(new Action(() => Close()));
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        base.OnFormClosed(e);
+        _ax?.Dispose();
+    }
+}
+
+// ── AxHost wrapper ────────────────────────────────────────────────────────────
+// Inheriting AxHost is the only way to get a full OLE in-place site that lets
+// ClearTextPassword and IMsTscNonScriptable work (plain CreateInstance does not
+// provide an IOleClientSite, so the control refuses to accept credentials).
+class AxRdpHost : AxHost
+{
+    static readonly Guid IID_IMsTscNonScriptable = new Guid("c1e6743a-41c1-4a74-832a-0dd06c1c7a0e");
+
+    readonly string _clsid;
+    readonly Program.Options _opts;
+    readonly string _password;
+    readonly IntPtr _formHwnd;
+    readonly Action _onConnected;
+    readonly Action<int> _onDisconnected;
+
+    dynamic _rdp; // late-bound IDispatch; avoids dependency on typed interop
+
+    public AxRdpHost(string clsid, Program.Options opts, string password,
+                     IntPtr formHwnd, Action onConnected, Action<int> onDisconnected)
+        : base(clsid)
+    {
+        _clsid         = clsid;
+        _opts          = opts;
+        _password      = password;
+        _formHwnd      = formHwnd;
+        _onConnected   = onConnected;
+        _onDisconnected = onDisconnected;
+    }
+
+    public void Connect()
+    {
+        _rdp = GetOcx();
+        if (_rdp == null)
+            throw new InvalidOperationException("GetOcx() returned null — control not created");
+
+        // Server & credentials
+        _rdp.Server   = _opts.Server;
+        _rdp.Domain   = _opts.Domain ?? "";
+        _rdp.UserName = _opts.User   ?? "";
+
+        // Password injection via AdvancedSettings (NLA / CredSSP path)
+        try { _rdp.AdvancedSettings9.ClearTextPassword = _password; } catch { }
+        try { _rdp.AdvancedSettings8.ClearTextPassword = _password; } catch { }
+        try { _rdp.AdvancedSettings7.ClearTextPassword = _password; } catch { }
+        try { _rdp.AdvancedSettings2.ClearTextPassword = _password; } catch { }
+
+        // Password injection via IMsTscNonScriptable (legacy / RDP security path)
+        try
+        {
+            var ns = Marshal.GetComInterfaceForObject(_rdp, typeof(object));
+            // We can't use typed IID query without interop DLL, so try dynamic property
+            _rdp.ClearTextPassword = _password;
+        }
+        catch { }
+
+        // Security settings
+        try { _rdp.AdvancedSettings9.AuthenticationLevel      = 2; } catch { }
+        try { _rdp.AdvancedSettings9.EnableCredSspSupport     = true; } catch { }
+        try { _rdp.AdvancedSettings9.EncryptionEnabled        = 1; } catch { }
+        try { _rdp.AdvancedSettings9.NegotiateSecurityLayer   = true; } catch { }
+
+        // Port
+        try { _rdp.AdvancedSettings9.RDPPort = _opts.Port; } catch
+        {
+            try { _rdp.AdvancedSettings2.RDPPort = _opts.Port; } catch { }
+        }
+
+        // Desktop size
+        try { _rdp.DesktopWidth  = _opts.Width;  } catch { }
+        try { _rdp.DesktopHeight = _opts.Height; } catch { }
+
+        // Admin/console mode
+        if (_opts.AdminMode)
+            try { _rdp.AdvancedSettings9.ConnectToAdministerServer = true; } catch { }
+
+        // Hook events
+        try
+        {
+            _rdp.OnConnected     += new EventHandler(HandleConnected);
+            _rdp.OnDisconnected  += new EventHandler<dynamic>(HandleDisconnected);
+            _rdp.OnLoginComplete += new EventHandler(HandleLoginComplete);
+        }
+        catch { /* some versions use different event signatures — best-effort */ }
+
+        Console.WriteLine("STATE:connecting");
+        Console.Out.Flush();
+
+        _rdp.Connect();
+    }
+
+    void HandleConnected(object sender, EventArgs e)
+    {
+        _onConnected();
+    }
+
+    void HandleLoginComplete(object sender, EventArgs e)
+    {
+        Console.WriteLine("EVENT:OnLoginComplete");
+        Console.Out.Flush();
+    }
+
+    void HandleDisconnected(object sender, dynamic e)
+    {
+        int reason = 0;
+        try { reason = (int)e.discReason; } catch { }
+        _onDisconnected(reason);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && _rdp != null)
+        {
+            try { _rdp.Disconnect(); } catch { }
+            Marshal.ReleaseComObject(_rdp);
+            _rdp = null;
+        }
+        base.Dispose(disposing);
     }
 }

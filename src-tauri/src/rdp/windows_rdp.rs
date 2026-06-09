@@ -1,2059 +1,292 @@
 #![cfg(target_os = "windows")]
 
-//! Embedded RDP on Windows via COM in-process hosting of mstscax.dll.
-//! No mstsc.exe process is launched — identical to mRemoteNG's approach.
+//! Embedded RDP on Windows by spawning OrbitalRdpHost.exe (C# WinForms + mstscax ActiveX).
 //!
 //! ## Z-order and WebView2
-//! WebView2 renders via DirectComposition (DComp). Traditional WS_CHILD windows
-//! exist in the Win32 z-order which lies BELOW the DComp layer — they appear
-//! as black rectangles regardless of HWND_TOP. The fix is to use a WS_POPUP
-//! window (not WS_CHILD) owned by the Tauri window so it floats above the DComp
-//! layer while still allowing other applications to be brought to the foreground.
-//!
-//! ## Reparenting and deadlocks
-//! SetWindowLongPtrW(GWLP_HWNDPARENT) sends a synchronous cross-thread Win32
-//! message that deadlocks the COM STA thread. We therefore never call it after
-//! creation. Tearout/dock-back just updates the tracked parent variable so
-//! canvas_to_screen() uses the correct reference window for positioning.
+//! WebView2 renders via DirectComposition (DComp). Traditional WS_CHILD windows exist in the
+//! Win32 z-order which lies BELOW the DComp layer — they appear as black rectangles. The fix is
+//! a WS_POPUP window owned by the Tauri window so it floats above DComp while still allowing
+//! other apps to come to the foreground. OrbitalRdpHost.exe reparents its own window into this
+//! host popup via --parent <HWND>.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::sync::{Arc, mpsc};
+use std::io::Write;
+use std::os::windows::process::CommandExt;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::Emitter;
-use windows::Win32::Foundation::{E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::HBRUSH;
-use windows::Win32::System::Com::*;
+use windows::Win32::Foundation::{HWND, LRESULT, RECT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Ole::*;
-use windows::Win32::System::Variant::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, Ref, PCWSTR};
 
-// IID of the DMsRdpClientEvents / IMsTscAxEvents outbound dispatch interface.
-// This is the connection-point IID passed to IConnectionPointContainer::FindConnectionPoint.
-// Defined in the Windows SDK as DIID_IMsTscAxEvents (mstsclib.h).
-const IID_DMSRDPCLIENTEVENTS: GUID = GUID::from_values(
-    0x209D4C07, 0x9325, 0x11D1,
-    [0xA9, 0xE5, 0x00, 0xC0, 0x4F, 0xC9, 0x9C, 0x1D],
-);
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const HOST_CLASS: &str = "OrbRdpHostWnd";
 
-// ── Manual COM event sink ─────────────────────────────────────────────────────
-//
-// mstscax::IConnectionPoint::Advise internally calls
-//   QueryInterface(pUnkSink, cp_iid, &ppv)
-// before storing the pointer.  The standard #[implement(IDispatch)] responds
-// YES only to IID_IUnknown and IID_IDispatch; it does NOT respond to the
-// actual CP IID {336D5562-EFA8-482E-8CB3-C5C0FC7A7DB6} that this version of
-// mstscax exposes → CONNECT_E_CANNOTCONNECT (0x80040202).
-//
-// Fix: build the COM object manually so QueryInterface responds YES to:
-//   • IID_IUnknown        (00000000-…)
-//   • IID_IDispatch       (00020400-…)
-//   • {336D5562-…}        actual CP IID enumerated at runtime
-//   • {209D4C07-…}        DIID_IMsTscAxEvents (standard IID, used on newer Windows)
-//
-// All four IIDs share the same IDispatch vtable layout (the events interface is
-// dispatch-based), so returning `this` for every successful QI is safe.
-// mstscax delivers OnConnected (DISPID 2) and OnDisconnected (DISPID 4) through
-// IDispatch::Invoke once Advise succeeds.
-
-const IID_IUNKNOWN_S: GUID = GUID::from_values(
-    0x00000000, 0x0000, 0x0000,
-    [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
-);
-const IID_IDISPATCH_S: GUID = GUID::from_values(
-    0x00020400, 0x0000, 0x0000,
-    [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
-);
-// CP IID that this mstscax.dll version actually exposes (enumerated at runtime).
-const IID_MSTSCAX_EVENTS: GUID = GUID::from_values(
-    0x336D5562, 0xEFA8, 0x482E,
-    [0x8C, 0xB3, 0xC5, 0xC0, 0xFC, 0x7A, 0x7D, 0xB6],
-);
-
-// ── CBT hook: auto-dismiss mstscax dialog windows ────────────────────────────
-//
-// mstscax creates Win32 dialogs (#32770) on the STA thread for:
-//   • Certificate security warnings (untrusted cert)
-//   • Clipboard / device-redirection security warnings (post-KB5057577)
-//
-// We install a WH_CBT thread-local hook before calling Connect() so that
-// HCBT_ACTIVATE fires synchronously when any dialog is about to gain focus.
-// We use DM_GETDEFID to find the default button (the "Accept/Allow/Connect" one)
-// and post WM_COMMAND to it so the dialog's own message loop dismisses it.
-
-static RDP_AUTO_DISMISS_HOOK: AtomicIsize = AtomicIsize::new(0);
-
-// ── Cross-thread dialog watcher ───────────────────────────────────────────────
-//
-// The CBT thread hook only catches dialogs on the STA thread.  mstscax may
-// create clipboard/credential warning dialogs on worker threads.  This watcher
-// polls EnumWindows (all threads, our process) every 150 ms and auto-dismisses
-// any visible #32770 dialog with a default button.
-//
-// WATCHER_PID is set to our process ID before the watcher thread starts and
-// cleared when it exits so the EnumWindows callback can filter safely.
-
-static WATCHER_PID: AtomicU32 = AtomicU32::new(0);
-// HWND of the dialog we already sent a dismiss to.  We skip re-dismissing
-// this HWND until it actually closes, avoiding a spam loop caused by the
-// asynchronous gap between PostMessage and the dialog's message loop.
-static WATCHER_PENDING: AtomicIsize = AtomicIsize::new(0);
-// OrbRdpHostWnd HWND so the watcher thread can scan its child windows for the
-// mstscax credential dialog (rendered as a child, not a top-level window).
-static WATCHER_HOST_HWND: AtomicIsize = AtomicIsize::new(0);
-// Set to true once the Windows session login succeeds (DISPID 3 / OnLoginComplete).
-// The watcher stops auto-dismissing cross-process credential/security dialogs after
-// this point: any dialog visible after login is a server-side or user-facing prompt
-// that should not be silently dismissed (e.g. "session limit exceeded" warnings).
-static WATCHER_SESSION_LIVE: AtomicBool = AtomicBool::new(false);
-
-// Finds the ATL child window (class "ATL:…") and checks UIMainClass visibility.
-// Used by the credential-injection thread to locate the window that receives
-// keyboard input and to detect whether the session is already established.
-struct FindRdpChildResult {
-    atl_hwnd:        HWND,
-    ui_main_visible: bool,
-}
-unsafe extern "system" fn find_rdp_child_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let r = &mut *(lparam.0 as *mut FindRdpChildResult);
-    let mut cls = [0u16; 64];
-    let n = GetClassNameW(hwnd, &mut cls) as usize;
-    let name = String::from_utf16_lossy(&cls[..n]);
-    if name.starts_with("ATL:") && r.atl_hwnd.is_invalid() {
-        r.atl_hwnd = hwnd;
-    } else if name == "UIMainClass" {
-        r.ui_main_visible = IsWindowVisible(hwnd).as_bool();
-    }
-    BOOL(1)
-}
-
-unsafe extern "system" fn watcher_dismiss_cb(hwnd: HWND, _: LPARAM) -> BOOL {
-    let our_pid = WATCHER_PID.load(Ordering::Relaxed);
-    if our_pid == 0 { return BOOL(0); }
-
-    let mut pid = 0u32;
-    GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    if pid != our_pid { return BOOL(1); }
-    if !IsWindowVisible(hwnd).as_bool() { return BOOL(1); }
-
-    let mut cls = [0u16; 16];
-    GetClassNameW(hwnd, &mut cls);
-    // "#32770" in UTF-16: [35, 51, 50, 55, 55, 48, 0]
-    if !(cls[0] == 35 && cls[1] == 51 && cls[2] == 50
-        && cls[3] == 55 && cls[4] == 55 && cls[5] == 48 && cls[6] == 0)
-    {
-        return BOOL(1);
-    }
-
-    // Skip a dialog we've already dismissed — wait for it to actually close.
-    if WATCHER_PENDING.load(Ordering::Relaxed) == hwnd.0 as isize {
-        return BOOL(1);
-    }
-
-    let mut title = [0u16; 256];
-    GetWindowTextW(hwnd, &mut title);
-    let title_s = String::from_utf16_lossy(&title);
-    let title_trimmed = title_s.trim_end_matches('\0');
-    eprintln!("[rdp] watcher: visible dialog '{title_trimmed}'");
-
-    // Log buttons for diagnosis
-    unsafe extern "system" fn log_btn_w(child: HWND, _: LPARAM) -> BOOL {
-        let mut cls2 = [0u16; 32];
-        GetClassNameW(child, &mut cls2);
-        if String::from_utf16_lossy(&cls2).trim_end_matches('\0').eq_ignore_ascii_case("Button") {
-            let mut t = [0u16; 64];
-            let n = GetWindowTextW(child, &mut t);
-            let text = if n > 0 { String::from_utf16_lossy(&t[..n as usize]) } else { String::new() };
-            eprintln!("[rdp] watcher btn id={}: '{text}'", GetDlgCtrlID(child));
-        }
-        BOOL(1)
-    }
-    EnumChildWindows(Some(hwnd), Some(log_btn_w), LPARAM(0));
-
-    // Before clicking Connect, ensure every redirect-permission checkbox is
-    // checked (BS_CHECKBOX/BS_AUTOCHECKBOX) so clipboard/drive redirections
-    // are actually enabled for the session (KB5057577 dialog).
-    unsafe extern "system" fn check_all_checkboxes(child: HWND, _: LPARAM) -> BOOL {
-        let mut cls2 = [0u16; 32];
-        GetClassNameW(child, &mut cls2);
-        if !String::from_utf16_lossy(&cls2).trim_end_matches('\0').eq_ignore_ascii_case("Button") {
-            return BOOL(1);
-        }
-        let style = GetWindowLongW(child, GWL_STYLE) as u32;
-        // BS_CHECKBOX=2, BS_AUTOCHECKBOX=3, BS_3STATE=5, BS_AUTO3STATE=6
-        let bt = style & 0xF;
-        if bt == 2 || bt == 3 || bt == 5 || bt == 6 {
-            PostMessageW(Some(child), BM_SETCHECK, WPARAM(1 /* BST_CHECKED */), LPARAM(0)).ok();
-        }
-        BOOL(1)
-    }
-    EnumChildWindows(Some(hwnd), Some(check_all_checkboxes), LPARAM(0));
-
-    // Determine which button to click: DM_GETDEFID first, then IDOK fallback.
-    let r = SendMessageW(hwnd, 0x400u32, Some(WPARAM(0)), Some(LPARAM(0)));
-    let hi = ((r.0 as usize) >> 16) & 0xFFFF;
-    let lo = (r.0 as usize) & 0xFFFF;
-    let btn_id: i32 = if hi == 0xDC00 && lo > 0 { lo as i32 }
-                      else if GetDlgItem(Some(hwnd), 1).is_ok() { 1 }
-                      else { 0 };
-
-    if btn_id > 0 {
-        if let Ok(btn) = GetDlgItem(Some(hwnd), btn_id) {
-            // Mark pending BEFORE clicking so subsequent polls skip this HWND.
-            WATCHER_PENDING.store(hwnd.0 as isize, Ordering::Relaxed);
-            // BM_CLICK (0x00F5) on the button HWND simulates a full click;
-            // more reliable for custom mstscax dialogs than WM_COMMAND on parent.
-            PostMessageW(Some(btn), BM_CLICK, WPARAM(0), LPARAM(0)).ok();
-            eprintln!("[rdp] watcher: dismissed '{title_trimmed}' btn_id={btn_id}");
-        }
-    } else {
-        eprintln!("[rdp] watcher: WARN no dismiss button for '{title_trimmed}'");
-    }
-    BOOL(1)
-}
-
-// Log ALL visible titled windows in our process so we can identify the class
-// of any dialog that isn't #32770 (e.g. credential prompts, Xaml hosts).
-unsafe extern "system" fn watcher_scan_cb(hwnd: HWND, _: LPARAM) -> BOOL {
-    let our_pid = WATCHER_PID.load(Ordering::Relaxed);
-    if our_pid == 0 { return BOOL(0); }
-
-    let mut pid = 0u32;
-    GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    if pid != our_pid { return BOOL(1); }
-    if !IsWindowVisible(hwnd).as_bool() { return BOOL(1); }
-
-    let mut title = [0u16; 256];
-    let n = GetWindowTextW(hwnd, &mut title);
-    if n == 0 { return BOOL(1); }
-    let title_s = String::from_utf16_lossy(&title[..n as usize]);
-
-    let mut cls = [0u16; 64];
-    GetClassNameW(hwnd, &mut cls);
-    let cls_s = String::from_utf16_lossy(&cls);
-    let cls_trimmed = cls_s.trim_end_matches('\0');
-
-    // Skip the host popup window and the main Tauri app window.
-    if cls_trimmed == "OrbRdpHostWnd" || cls_trimmed == "Chrome_WidgetWin_1" {
-        return BOOL(1);
-    }
-
-    eprintln!("[rdp] watcher-scan: class='{cls_trimmed}' title='{title_s}'");
-    BOOL(1)
-}
-
-// Scan child windows of the mstscax host HWND to find any credential dialog
-// that mstscax renders as a child window (not a top-level window, so invisible
-// to EnumWindows).  Logs all children for diagnosis; also auto-dismisses any
-// #32770 child (standard Win32 dialog) exactly like watcher_dismiss_cb.
-unsafe extern "system" fn watcher_host_child_cb(hwnd: HWND, _: LPARAM) -> BOOL {
-    let mut cls = [0u16; 64];
-    GetClassNameW(hwnd, &mut cls);
-    let cls_s = String::from_utf16_lossy(&cls);
-    let cls_trimmed = cls_s.trim_end_matches('\0');
-
-    let mut title = [0u16; 256];
-    let n = GetWindowTextW(hwnd, &mut title);
-    let title_s = if n > 0 { String::from_utf16_lossy(&title[..n as usize]) } else { String::new() };
-
-    let visible = IsWindowVisible(hwnd).as_bool();
-    eprintln!("[rdp] host-child: class='{cls_trimmed}' title='{title_s}' visible={visible}");
-
-    // If this child is a standard Win32 dialog, try to auto-dismiss it exactly
-    // as the top-level watcher does (checkboxes + default button).
-    if cls[0] == 35 && cls[1] == 51 && cls[2] == 50
-        && cls[3] == 55 && cls[4] == 55 && cls[5] == 48 && cls[6] == 0
-        && visible
-        && WATCHER_PENDING.load(Ordering::Relaxed) != hwnd.0 as isize
-    {
-        eprintln!("[rdp] host-child: dismissing #32770 child '{title_s}'");
-        unsafe extern "system" fn check_cb(child: HWND, _: LPARAM) -> BOOL {
-            let style = GetWindowLongW(child, GWL_STYLE) as u32;
-            let bt = style & 0xF;
-            if bt == 2 || bt == 3 || bt == 5 || bt == 6 {
-                PostMessageW(Some(child), BM_SETCHECK, WPARAM(1), LPARAM(0)).ok();
-            }
-            BOOL(1)
-        }
-        EnumChildWindows(Some(hwnd), Some(check_cb), LPARAM(0));
-        let r = SendMessageW(hwnd, 0x400u32, Some(WPARAM(0)), Some(LPARAM(0)));
-        let hi = ((r.0 as usize) >> 16) & 0xFFFF;
-        let lo = (r.0 as usize) & 0xFFFF;
-        let btn_id: i32 = if hi == 0xDC00 && lo > 0 { lo as i32 }
-                          else if GetDlgItem(Some(hwnd), 1).is_ok() { 1 }
-                          else { 0 };
-        if btn_id > 0 {
-            if let Ok(btn) = GetDlgItem(Some(hwnd), btn_id) {
-                WATCHER_PENDING.store(hwnd.0 as isize, Ordering::Relaxed);
-                PostMessageW(Some(btn), BM_CLICK, WPARAM(0), LPARAM(0)).ok();
-            }
-        }
-    }
-    BOOL(1)
-}
-
-// Cross-process credential dialog watcher.
-// The Windows credential prompt that mstscax spawns during NLA may appear in
-// a separate process (CredentialUIBroker / svchost) and thus won't be visible
-// in our per-PID EnumWindows pass.  This callback has NO pid filter; it
-// matches any visible #32770 whose title contains known credential/security
-// keywords and auto-dismisses it with IDOK so the session proceeds silently.
-unsafe extern "system" fn watcher_cred_cb(hwnd: HWND, _: LPARAM) -> BOOL {
-    if WATCHER_PID.load(Ordering::Relaxed) == 0 { return BOOL(0); }
-    // Once the session is live, stop auto-dismissing credential/security dialogs.
-    // Post-login server-side prompts (session limit, group policy notices, etc.)
-    // must not be silently dismissed — doing so can cause an immediate disconnect.
-    if WATCHER_SESSION_LIVE.load(Ordering::Relaxed) { return BOOL(1); }
-    if !IsWindowVisible(hwnd).as_bool() { return BOOL(1); }
-
-    let mut cls = [0u16; 16];
-    GetClassNameW(hwnd, &mut cls);
-    if !(cls[0] == 35 && cls[1] == 51 && cls[2] == 50
-        && cls[3] == 55 && cls[4] == 55 && cls[5] == 48 && cls[6] == 0)
-    {
-        return BOOL(1);
-    }
-
-    let mut title = [0u16; 256];
-    let n = GetWindowTextW(hwnd, &mut title);
-    if n == 0 { return BOOL(1); }
-    let title_s = String::from_utf16_lossy(&title[..n as usize]).to_ascii_lowercase();
-
-    // Only act on windows that look like RDP/credential dialogs.
-    let relevant = title_s.contains("seguridad de windows")
-        || title_s.contains("windows security")
-        || title_s.contains("escritorio remoto")
-        || title_s.contains("remote desktop")
-        || title_s.contains("credential")
-        || title_s.contains("credencial");
-    if !relevant { return BOOL(1); }
-
-    // Skip if we already sent a dismiss to this HWND (shared WATCHER_PENDING slot).
-    if WATCHER_PENDING.load(Ordering::Relaxed) == hwnd.0 as isize {
-        return BOOL(1);
-    }
-
-    let mut title_display = [0u16; 256];
-    let nd = GetWindowTextW(hwnd, &mut title_display);
-    let title_d = String::from_utf16_lossy(&title_display[..nd as usize]);
-    eprintln!("[rdp] watcher-cred: cross-process dialog '{title_d}'");
-
-    // Log buttons for diagnosis
-    unsafe extern "system" fn log_cb(child: HWND, _: LPARAM) -> BOOL {
-        let mut cls2 = [0u16; 32];
-        GetClassNameW(child, &mut cls2);
-        if String::from_utf16_lossy(&cls2).trim_end_matches('\0').eq_ignore_ascii_case("Button") {
-            let mut t = [0u16; 64];
-            let n = GetWindowTextW(child, &mut t);
-            let text = if n > 0 { String::from_utf16_lossy(&t[..n as usize]) } else { String::new() };
-            eprintln!("[rdp] watcher-cred btn id={}: '{text}'", GetDlgCtrlID(child));
-        }
-        BOOL(1)
-    }
-    EnumChildWindows(Some(hwnd), Some(log_cb), LPARAM(0));
-
-    // Dismiss via IDOK (1); use the same check-all-checkboxes approach.
-    if let Ok(btn) = GetDlgItem(Some(hwnd), 1) {
-        WATCHER_PENDING.store(hwnd.0 as isize, Ordering::Relaxed);
-        PostMessageW(Some(btn), BM_CLICK, WPARAM(0), LPARAM(0)).ok();
-        eprintln!("[rdp] watcher-cred: dismissed '{title_d}' via IDOK(1)");
-    }
-    BOOL(1)
-}
-
-unsafe extern "system" fn log_and_find_btn(child: HWND, _: LPARAM) -> BOOL {
-    let mut cls = [0u16; 32];
-    GetClassNameW(child, &mut cls);
-    let cls_s = String::from_utf16_lossy(&cls);
-    if cls_s.trim_end_matches('\0').eq_ignore_ascii_case("Button") {
-        let mut txt = [0u16; 64];
-        let n = GetWindowTextW(child, &mut txt);
-        let text = if n > 0 { String::from_utf16_lossy(&txt[..n as usize]) } else { String::new() };
-        let id = GetDlgCtrlID(child);
-        eprintln!("[rdp] dialog btn id={id}: '{text}'");
-    }
-    BOOL(1)
-}
-
-unsafe extern "system" fn rdp_auto_dismiss_proc(
-    ncode: i32, wparam: WPARAM, lparam: LPARAM,
-) -> LRESULT {
-    // HCBT_ACTIVATE (5) fires just before a window gains focus.
-    if ncode == 5 {
-        let hwnd = HWND(wparam.0 as *mut _);
-        let mut cls = [0u16; 16];
-        GetClassNameW(hwnd, &mut cls);
-        // "#32770" in UTF-16: [35, 51, 50, 55, 55, 48, 0]
-        if cls[0] == 35 && cls[1] == 51 && cls[2] == 50
-            && cls[3] == 55 && cls[4] == 55 && cls[5] == 48 && cls[6] == 0
-        {
-            let mut title = [0u16; 256];
-            GetWindowTextW(hwnd, &mut title);
-            let title_s = String::from_utf16_lossy(&title);
-            let title_trimmed = title_s.trim_end_matches('\0');
-            eprintln!("[rdp] HCBT_ACTIVATE dialog: '{title_trimmed}'");
-
-            // Log all buttons so we know the layout.
-            EnumChildWindows(Some(hwnd), Some(log_and_find_btn), LPARAM(0));
-
-            // Strategy 1: DM_GETDEFID (WM_USER+0 = 0x400) returns the default button ID.
-            // The default button is always "Accept/Allow/Connect" in warning dialogs.
-            // DC_HASDEFID = 0xDC00 in the high word signals a valid default button.
-            let r = SendMessageW(hwnd, 0x400u32, Some(WPARAM(0)), Some(LPARAM(0)));
-            let hi = ((r.0 as usize) >> 16) & 0xFFFF;
-            let lo = (r.0 as usize) & 0xFFFF;
-            if hi == 0xDC00 && lo > 0 {
-                let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(lo), LPARAM(0));
-                eprintln!("[rdp] auto-dismissed via DM_GETDEFID id={lo}: '{title_trimmed}'");
-            } else if GetDlgItem(Some(hwnd), 6).is_ok() {
-                // Fallback: IDYES (6)
-                let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(6), LPARAM(0));
-                eprintln!("[rdp] auto-dismissed via IDYES(6): '{title_trimmed}'");
-            } else if GetDlgItem(Some(hwnd), 1).is_ok() {
-                // Fallback: IDOK (1) — only if DM_GETDEFID didn't work
-                let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(1), LPARAM(0));
-                eprintln!("[rdp] auto-dismissed via IDOK(1): '{title_trimmed}'");
-            } else {
-                eprintln!("[rdp] WARN: could not find dismiss button for '{title_trimmed}'");
-            }
-        }
-    }
-    let hook = HHOOK(RDP_AUTO_DISMISS_HOOK.load(Ordering::Relaxed) as *mut _);
-    CallNextHookEx(Some(hook), ncode, wparam, lparam)
-}
-
-// IDispatch vtable layout (IUnknown × 3 + IDispatch × 4 = 7 entries).
-#[repr(C)]
-struct EvSinkVtbl {
-    qi:      unsafe extern "system" fn(*mut EvSinkInner, *const GUID, *mut *mut core::ffi::c_void) -> i32,
-    addref:  unsafe extern "system" fn(*mut EvSinkInner) -> u32,
-    release: unsafe extern "system" fn(*mut EvSinkInner) -> u32,
-    gtc:     unsafe extern "system" fn(*mut EvSinkInner, *mut u32) -> i32,
-    gti:     unsafe extern "system" fn(*mut EvSinkInner, u32, u32, *mut *mut core::ffi::c_void) -> i32,
-    gidn:    unsafe extern "system" fn(*mut EvSinkInner, *const GUID, *const *const u16, u32, u32, *mut i32) -> i32,
-    invoke:  unsafe extern "system" fn(*mut EvSinkInner, i32, *const GUID, u32, u16, *const core::ffi::c_void, *mut core::ffi::c_void, *mut core::ffi::c_void, *mut u32) -> i32,
-}
-
-#[repr(C)]
-struct EvSinkInner {
-    vtbl:          *const EvSinkVtbl,
-    ref_count:     AtomicU32,
-    logged_in:     Arc<AtomicBool>, // DISPID 3 = OnLoginComplete
-    disconnected:  Arc<AtomicBool>, // DISPID 4 = OnDisconnected
-    password:      Option<String>,  // for injection on DISPID 18
-    host_hwnd_raw: isize,           // OrbRdpHostWnd for finding ATL child
-    cover_hwnd_raw: isize,          // cover window hidden when credential dialog appears
-}
-
-// SAFETY: only ever accessed on the COM STA thread; Arc fields are Send+Sync.
-unsafe impl Sync for EvSinkVtbl {}
-unsafe impl Send for EvSinkInner {}
-unsafe impl Sync for EvSinkInner {}
-
-static EV_SINK_VTBL: EvSinkVtbl = EvSinkVtbl {
-    qi:      ev_sink_qi,
-    addref:  ev_sink_addref,
-    release: ev_sink_release,
-    gtc:     ev_sink_gtc,
-    gti:     ev_sink_gti,
-    gidn:    ev_sink_gidn,
-    invoke:  ev_sink_invoke,
-};
-
-unsafe extern "system" fn ev_sink_qi(
-    this: *mut EvSinkInner, iid: *const GUID, ppv: *mut *mut core::ffi::c_void,
-) -> i32 {
-    // Accept any IID that shares this vtable layout (IDispatch-based interfaces).
-    if *iid == IID_IUNKNOWN_S
-        || *iid == IID_IDISPATCH_S
-        || *iid == IID_MSTSCAX_EVENTS
-        || *iid == IID_DMSRDPCLIENTEVENTS
-    {
-        *ppv = this as *mut _;
-        ev_sink_addref(this);
-        0 // S_OK
-    } else {
-        *ppv = core::ptr::null_mut();
-        -2147467262i32 // E_NOINTERFACE (0x80004002)
-    }
-}
-
-unsafe extern "system" fn ev_sink_addref(this: *mut EvSinkInner) -> u32 {
-    (*this).ref_count.fetch_add(1, Ordering::SeqCst) + 1
-}
-
-unsafe extern "system" fn ev_sink_release(this: *mut EvSinkInner) -> u32 {
-    let prev = (*this).ref_count.fetch_sub(1, Ordering::SeqCst);
-    if prev == 1 {
-        drop(Box::from_raw(this));
-    }
-    prev - 1
-}
-
-unsafe extern "system" fn ev_sink_gtc(_: *mut EvSinkInner, pct: *mut u32) -> i32 {
-    *pct = 0; 0
-}
-unsafe extern "system" fn ev_sink_gti(
-    _: *mut EvSinkInner, _: u32, _: u32, _: *mut *mut core::ffi::c_void,
-) -> i32 {
-    -2147467263i32 // E_NOTIMPL
-}
-unsafe extern "system" fn ev_sink_gidn(
-    _: *mut EvSinkInner, _: *const GUID, _: *const *const u16,
-    _: u32, _: u32, _: *mut i32,
-) -> i32 {
-    -2147467263i32 // E_NOTIMPL
-}
-
-unsafe extern "system" fn ev_sink_invoke(
-    this: *mut EvSinkInner,
-    dispid: i32,
-    _: *const GUID, _: u32, _: u16,
-    parms: *const core::ffi::c_void, _: *mut core::ffi::c_void,
-    _: *mut core::ffi::c_void, _: *mut u32,
-) -> i32 {
-    let inner = &*this;
-    eprintln!("[rdp-event] DISPID {dispid}");
-    match dispid {
-        18 => {
-            // DISPID 18 fires when the mstscax credential dialog is ready for input.
-            // The dialog lives inside the ATL control window (class ATL:…) and is
-            // rendered via DirectX — no Win32 child edit controls exist to fill with
-            // WM_SETTEXT.  The only reliable path is SendInput.
-            //
-            // With the cover-window approach the ATL credential field already has
-            // keyboard focus (mstscax focused it as part of the in-place activation).
-            // We must NOT call SetForegroundWindow(host_hwnd) here: doing so moves
-            // focus from the ATL password field to the WS_POPUP parent, causing
-            // SendInput keystrokes to land on the wrong window and auth to fail.
-            //
-            // We spawn a thread so we do not block the COM STA message pump.
-            eprintln!("[rdp-event] DISPID 18 — credential dialog visible; injecting password");
-            // Hide the cover window now so the mstscax credential dialog is reachable.
-            // If auto-injection succeeds the cover was already hidden; if it fails the
-            // user can see and interact with the credential prompt directly.
-            let cover_raw = inner.cover_hwnd_raw;
-            if cover_raw != 0 {
-                ShowWindow(HWND(cover_raw as *mut _), SW_HIDE).ok();
-                eprintln!("[rdp] cover hidden for credential dialog");
-            }
-            if let Some(ref pw) = &inner.password {
-                let pw_clone = pw.clone();
-                let host_hwnd_raw = inner.host_hwnd_raw;
-                std::thread::spawn(move || unsafe {
-                    use windows::Win32::System::DataExchange::{
-                        OpenClipboard, EmptyClipboard, SetClipboardData, CloseClipboard,
-                    };
-                    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-                    use windows::Win32::Foundation::HANDLE;
-                    use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
-                    // CF_UNICODETEXT = 13 (standard Windows clipboard format constant)
-                    const CF_UNICODETEXT: u32 = 13;
-
-                    // Wait for the credential UI to finish rendering.
-                    // 1200 ms is needed on slower systems; the retry loop below
-                    // extends this further if the ATL window is not yet visible.
-                    std::thread::sleep(Duration::from_millis(1200));
-
-                    let host = HWND(host_hwnd_raw as *mut _);
-
-                    // Retry finding a VISIBLE ATL child window up to 6 times
-                    // (300 ms apart = up to 1.8 s additional wait) to handle slow
-                    // credential-dialog render on first connection attempts.
-                    // The ATL window may exist but be invisible while mstscax is
-                    // still initialising the DirectX credential surface.
-                    let mut atl = HWND(core::ptr::null_mut());
-                    for attempt in 0u32..=6 {
-                        let mut child_res = FindRdpChildResult {
-                            atl_hwnd: HWND(core::ptr::null_mut()),
-                            ui_main_visible: false,
-                        };
-                        EnumChildWindows(Some(host), Some(find_rdp_child_cb),
-                            LPARAM(&mut child_res as *mut _ as isize));
-
-                        if child_res.ui_main_visible {
-                            eprintln!("[rdp] session established before injection — skipping");
-                            return;
-                        }
-                        if !child_res.atl_hwnd.is_invalid() {
-                            let vis = IsWindowVisible(child_res.atl_hwnd).as_bool();
-                            eprintln!("[rdp] ATL hwnd found on attempt {attempt} visible={vis}");
-                            if vis {
-                                atl = child_res.atl_hwnd;
-                                break;
-                            }
-                        } else {
-                            eprintln!("[rdp] ATL hwnd not found on attempt {attempt}");
-                        }
-                        if attempt < 6 {
-                            std::thread::sleep(Duration::from_millis(300));
-                        }
-                    }
-                    if atl.is_invalid() {
-                        eprintln!("[rdp] ATL window not visible after retries — cannot inject");
-                        return;
-                    }
-
-                    // Use clipboard paste instead of KEYEVENTF_UNICODE to inject the
-                    // password.  KEYEVENTF_UNICODE (VK_PACKET) is unreliable for
-                    // non-ASCII characters (e.g. £, €) in the mstscax ATL DirectX
-                    // credential UI — the field may receive some characters but silently
-                    // drop others, producing a truncated or corrupted password.
-                    // Ctrl+V paste uses the clipboard data mechanism which is encoding-
-                    // agnostic and works for any Unicode password.
-                    let wide: Vec<u16> = pw_clone.encode_utf16().chain(Some(0u16)).collect();
-                    let byte_len = wide.len() * std::mem::size_of::<u16>();
-                    let mut clipboard_ok = false;
-                    if let Ok(hglob) = GlobalAlloc(GMEM_MOVEABLE, byte_len) {
-                        let ptr = GlobalLock(hglob);
-                        if !ptr.is_null() {
-                            std::ptr::copy_nonoverlapping(
-                                wide.as_ptr() as *const u8, ptr as *mut u8, byte_len,
-                            );
-                            let _ = GlobalUnlock(hglob);
-                        }
-                        if OpenClipboard(None).is_ok() {
-                            let _ = EmptyClipboard();
-                            // After SetClipboardData the clipboard owns hglob; don't GlobalFree it.
-                            if SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hglob.0 as *mut _))).is_ok() {
-                                clipboard_ok = true;
-                                eprintln!("[rdp] clipboard loaded with password ({} chars)", pw_clone.chars().count());
-                            } else {
-                                eprintln!("[rdp] SetClipboardData failed; falling back to key events");
-                            }
-                            let _ = CloseClipboard();
-                        }
-                    }
-
-                    use windows::Win32::UI::Input::KeyboardAndMouse::{
-                        SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-                        KEYBD_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL, VK_RETURN, VK_TAB, VK_V,
-                    };
-                    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-
-                    if clipboard_ok {
-                        // The cover-window keeps keyboard focus on the ATL control while
-                        // the credential dialog loads.  Use AttachThreadInput + SetFocus
-                        // as a belt-and-suspenders measure in case focus drifted, but do
-                        // NOT call SetForegroundWindow — that moves focus to the WS_POPUP
-                        // parent instead of the ATL child, causing SendInput to miss.
-                        let our_tid = GetCurrentThreadId();
-                        let atl_tid = GetWindowThreadProcessId(atl, None);
-                        let attached = AttachThreadInput(our_tid, atl_tid, true).as_bool();
-                        eprintln!("[rdp] AttachThreadInput -> {attached}");
-                        if attached {
-                            SetFocus(Some(atl)).ok();
-                            std::thread::sleep(Duration::from_millis(80));
-                        }
-
-                        let ki = |vk: u16, flags: u32| INPUT {
-                            r#type: INPUT_KEYBOARD,
-                            Anonymous: INPUT_0 {
-                                ki: KEYBDINPUT {
-                                    wVk: VIRTUAL_KEY(vk),
-                                    wScan: 0,
-                                    dwFlags: KEYBD_EVENT_FLAGS(flags),
-                                    time: 0,
-                                    dwExtraInfo: 0,
-                                },
-                            },
-                        };
-                        const KF_UP: u32 = 2; // KEYEVENTF_KEYUP
-
-                        // When UserName and Domain are pre-filled via COM, the
-                        // mstscax NLA credential dialog places focus directly on
-                        // the Password field (username/domain are non-editable).
-                        // No Tab needed — Ctrl+V pastes directly into Password.
-                        let inputs: [INPUT; 6] = [
-                            ki(VK_CONTROL.0, 0),       // Ctrl down
-                            ki(VK_V.0, 0),             // V down    → Ctrl+V (paste into password)
-                            ki(VK_V.0, KF_UP),         // V up
-                            ki(VK_CONTROL.0, KF_UP),   // Ctrl up
-                            ki(VK_RETURN.0, 0),        // Enter down → submit
-                            ki(VK_RETURN.0, KF_UP),    // Enter up
-                        ];
-                        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                        eprintln!("[rdp] SendInput: {sent}/{} events (Ctrl+V, Enter)", inputs.len());
-
-                        if attached {
-                            AttachThreadInput(our_tid, atl_tid, false);
-                        }
-                    }
-
-                    // Clear clipboard shortly after so the password doesn't linger.
-                    std::thread::sleep(Duration::from_millis(500));
-                    if OpenClipboard(None).is_ok() {
-                        let _ = EmptyClipboard();
-                        let _ = CloseClipboard();
-                        eprintln!("[rdp] clipboard cleared");
-                    }
-                });
-            }
-        }
-        3 => {
-            // DISPID 3 = OnLoginComplete: the Windows session login succeeded.
-            // This fires only after a real interactive login — NOT during NLA
-            // handshake or failed auth.  We use it (rather than DISPID 2 /
-            // polling) to set ever_connected because all events can arrive in a
-            // single message-pump pass before the first polling tick runs.
-            inner.logged_in.store(true, Ordering::SeqCst);
-            eprintln!("[rdp-event] OnLoginComplete — session ready");
-        }
-        27 => {
-            // DISPID 27 = OnServiceMessageReceived(bstrMessage: BSTR).
-            // The server sends this before disconnecting for things like licensing
-            // errors, session limit notifications, or group policy messages.
-            // Read the BSTR from DISPPARAMS to log the exact message.
-            if !parms.is_null() {
-                #[repr(C)]
-                struct Dp { rgvarg: *const VarRaw, _named: *mut i32, c_args: u32, _c_named: u32 }
-                let dp = &*(parms as *const Dp);
-                if dp.c_args >= 1 {
-                    let v = &*dp.rgvarg;
-                    // VT_BSTR = 8
-                    if v.vt == 8 {
-                        let bstr = v.data.bstrVal;
-                        if !bstr.is_null() {
-                            let len = *bstr.cast::<u32>().offset(-1) / 2;
-                            let s = std::slice::from_raw_parts(bstr, len as usize);
-                            let msg = String::from_utf16_lossy(s);
-                            eprintln!("[rdp-event] OnServiceMessageReceived: {msg:?}");
-                        }
-                    }
-                }
-            }
-        }
-        38 => {
-            // DISPID 38 fires on newer mstscax builds immediately after OnLoginComplete
-            // in some server configurations.  It does NOT mean the session is ending —
-            // only DISPID 4 / ConnectionState=0 indicates a true disconnect.
-            eprintln!("[rdp-event] DISPID 38 — post-login notification (ignored)");
-        }
-        4 => {
-            // DISPID 4 = OnDisconnected(discReason: long).
-            // Log the disconnect reason to distinguish user-initiated, server-side,
-            // auth failure, etc.
-            let disc_reason: i32 = if !parms.is_null() {
-                // DISPPARAMS: *VARIANT rgvarg, *DISPID namedArgs, UINT cArgs, UINT cNamedArgs
-                // OnDisconnected has 1 arg (discReason) at rgvarg[0] as VT_I4.
-                #[repr(C)]
-                struct Dp { rgvarg: *const VarRaw, _named: *mut i32, c_args: u32, _c_named: u32 }
-                let dp = &*(parms as *const Dp);
-                if dp.c_args >= 1 {
-                    let v = &*dp.rgvarg;
-                    if v.vt == 3 { v.data.lVal } else { -1 }
-                } else { -1 }
-            } else { -1 };
-            inner.disconnected.store(true, Ordering::SeqCst);
-            eprintln!("[rdp-event] OnDisconnected discReason=0x{disc_reason:08X} ({disc_reason})");
-        }
-        _ => {}
-    }
-    0 // S_OK
-}
-
-// Create a COM event sink that responds to QI for both the mstscax-specific
-// events IID and the standard IDispatch IID, then wraps it as IUnknown.
-// ref_count starts at 1; mstscax's Advise will AddRef → 2, our drop → 1,
-// Unadvise → 0 → Box freed.
-fn new_event_sink(
-    logged_in: Arc<AtomicBool>,
-    disconnected: Arc<AtomicBool>,
-    password: Option<String>,
-    host_hwnd_raw: isize,
-    cover_hwnd_raw: isize,
-) -> IUnknown {
-    let inner = Box::new(EvSinkInner {
-        vtbl: &EV_SINK_VTBL,
-        ref_count: AtomicU32::new(1),
-        logged_in,
-        disconnected,
-        password,
-        host_hwnd_raw,
-        cover_hwnd_raw,
-    });
-    unsafe { <IUnknown as Interface>::from_raw(Box::into_raw(inner) as *mut _) }
-}
-
-// MsRdpClient10 (Windows 10+); MsRdpClient9 used as fallback
-const CLSID_MSTSC_10: GUID = GUID::from_values(
-    0xC0EFA91A, 0xEEB7, 0x41C7,
-    [0x97, 0xFA, 0xF0, 0xED, 0x64, 0x5E, 0xFB, 0x24],
-);
-const CLSID_MSTSC_9: GUID = GUID::from_values(
-    0x8B918B82, 0x7985, 0x4C24,
-    [0x89, 0xDF, 0xC3, 0x3A, 0xD2, 0xBB, 0xFB, 0xCD],
-);
-
-// ── Command channel ───────────────────────────────────────────────────────────
-
-enum ComCmd {
-    Reposition { x: i32, y: i32, width: i32, height: i32 },
-    Show,
-    Hide,
-    Disconnect,
-    Reparent { new_parent: isize, rel_x: i32, rel_y: i32, width: i32, height: i32 },
-}
-
-// ── Session ───────────────────────────────────────────────────────────────────
+// ── Session handle ────────────────────────────────────────────────────────────
 
 pub struct WindowsRdpSession {
-    tx: mpsc::SyncSender<ComCmd>,
+    /// Signals the host loop to stop (hide + kill helper).
+    pub stop: Arc<AtomicBool>,
+    /// Handle of our WS_POPUP host window, stored as isize for Send.
+    pub host_hwnd: Arc<AtomicIsize>,
+    /// Current position/size relative to the parent canvas (for reposition).
+    pub rel_x:  Arc<AtomicIsize>,
+    pub rel_y:  Arc<AtomicIsize>,
+    pub width:  Arc<AtomicIsize>,
+    pub height: Arc<AtomicIsize>,
+    /// Current reference parent (for canvas_to_screen).
+    pub parent_hwnd: Arc<AtomicIsize>,
 }
 
+// SAFETY: AtomicIsize/AtomicBool are Send+Sync; HWND is only accessed on the host thread.
 unsafe impl Send for WindowsRdpSession {}
 unsafe impl Sync for WindowsRdpSession {}
 
-impl Drop for WindowsRdpSession {
-    fn drop(&mut self) {
-        let _ = self.tx.send(ComCmd::Disconnect);
-    }
-}
+// ── Window class ──────────────────────────────────────────────────────────────
 
-// ── OLE Frame ─────────────────────────────────────────────────────────────────
-//
-// IOleInPlaceFrame represents the outermost application window.
-// Its GetWindow() MUST return the top-level frame (Tauri main window), NOT the
-// container child window — mstscax uses this to know the app boundary.
-// If we return the wrong HWND here, DoVerb(-5) silently fails → black screen.
-
-#[implement(IOleInPlaceFrame)]
-struct RdpFrame {
-    hwnd: HWND, // top-level application window (Tauri main window)
-}
-
-impl IOleWindow_Impl for RdpFrame_Impl {
-    fn GetWindow(&self) -> windows::core::Result<HWND> { Ok(self.hwnd) }
-    fn ContextSensitiveHelp(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
-}
-
-impl IOleInPlaceUIWindow_Impl for RdpFrame_Impl {
-    fn GetBorder(&self) -> windows::core::Result<RECT> { Err(E_NOTIMPL.into()) }
-    fn RequestBorderSpace(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
-    fn SetBorderSpace(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
-    fn SetActiveObject(
-        &self,
-        _: Ref<'_, IOleInPlaceActiveObject>,
-        _: &PCWSTR,
-    ) -> windows::core::Result<()> { Ok(()) }
-}
-
-impl IOleInPlaceFrame_Impl for RdpFrame_Impl {
-    fn InsertMenus(&self, _: HMENU, _: *mut OLEMENUGROUPWIDTHS) -> windows::core::Result<()> { Ok(()) }
-    fn SetMenu(&self, _: HMENU, _: isize, _: HWND) -> windows::core::Result<()> { Ok(()) }
-    fn RemoveMenus(&self, _: HMENU) -> windows::core::Result<()> { Ok(()) }
-    fn SetStatusText(&self, _: &PCWSTR) -> windows::core::Result<()> { Ok(()) }
-    fn EnableModeless(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
-    fn TranslateAccelerator(&self, _: *const MSG, _: u16) -> windows::core::Result<()> {
-        // S_FALSE tells the control the container didn't handle it → control processes it
-        Err(windows::Win32::Foundation::S_FALSE.into())
-    }
-}
-
-// ── OLE Site ──────────────────────────────────────────────────────────────────
-//
-// IOleClientSite + IOleInPlaceSite represent the immediate container window
-// (host_hwnd). GetWindow() here returns host_hwnd (the popup we own).
-
-#[implement(IOleClientSite, IOleInPlaceSite)]
-struct RdpSite {
-    hwnd: HWND,              // container popup window (host_hwnd)
-    frame: IOleInPlaceFrame, // top-level frame (kept alive for GetWindowContext)
-}
-
-// SAFETY: used exclusively on the dedicated STA COM thread
-unsafe impl Send for RdpSite {}
-
-impl IOleClientSite_Impl for RdpSite_Impl {
-    fn SaveObject(&self) -> windows::core::Result<()> { Err(E_NOTIMPL.into()) }
-    fn GetMoniker(&self, _: &OLEGETMONIKER, _: &OLEWHICHMK) -> windows::core::Result<IMoniker> {
-        Err(E_NOTIMPL.into())
-    }
-    fn GetContainer(&self) -> windows::core::Result<IOleContainer> { Err(E_NOTIMPL.into()) }
-    fn ShowObject(&self) -> windows::core::Result<()> { Ok(()) }
-    fn OnShowWindow(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
-    fn RequestNewObjectLayout(&self) -> windows::core::Result<()> { Err(E_NOTIMPL.into()) }
-}
-
-impl IOleWindow_Impl for RdpSite_Impl {
-    fn GetWindow(&self) -> windows::core::Result<HWND> { Ok(self.hwnd) }
-    fn ContextSensitiveHelp(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
-}
-
-impl IOleInPlaceSite_Impl for RdpSite_Impl {
-    fn CanInPlaceActivate(&self) -> windows::core::Result<()> { Ok(()) }
-    fn OnInPlaceActivate(&self) -> windows::core::Result<()> { Ok(()) }
-    fn OnUIActivate(&self) -> windows::core::Result<()> { Ok(()) }
-    fn GetWindowContext(
-        &self,
-        ppframe: OutRef<'_, IOleInPlaceFrame>,
-        ppdoc: OutRef<'_, IOleInPlaceUIWindow>,
-        lprcposrect: *mut RECT,
-        lprccliprect: *mut RECT,
-        lpframeinfo: *mut OLEINPLACEFRAMEINFO,
-    ) -> windows::core::Result<()> {
-        unsafe {
-            // ppframe → top-level app frame (critical — must be non-null)
-            ppframe.write(Some(self.frame.clone()));
-            // ppdoc → null for SDI (no separate document window)
-            ppdoc.write(None);
-            let mut rc = RECT::default();
-            GetClientRect(self.hwnd, &mut rc).ok();
-            if !lprcposrect.is_null()  { *lprcposrect  = rc; }
-            if !lprccliprect.is_null() { *lprccliprect = rc; }
-            if !lpframeinfo.is_null() {
-                (*lpframeinfo).cb            = std::mem::size_of::<OLEINPLACEFRAMEINFO>() as u32;
-                (*lpframeinfo).fMDIApp       = BOOL(0);
-                (*lpframeinfo).hwndFrame     = self.hwnd;
-                (*lpframeinfo).haccel        = HACCEL::default();
-                (*lpframeinfo).cAccelEntries = 0;
-            }
-        }
-        Ok(())
-    }
-    fn Scroll(&self, _: &windows::Win32::Foundation::SIZE) -> windows::core::Result<()> { Ok(()) }
-    fn OnUIDeactivate(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
-    fn OnInPlaceDeactivate(&self) -> windows::core::Result<()> { Ok(()) }
-    fn DiscardUndoState(&self) -> windows::core::Result<()> { Ok(()) }
-    fn DeactivateAndUndo(&self) -> windows::core::Result<()> { Ok(()) }
-    fn OnPosRectChange(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
-}
-
-// ── IDispatch helpers ─────────────────────────────────────────────────────────
-
-fn get_dispid(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
-    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let pcwstr = PCWSTR(wide.as_ptr());
-    let mut id = 0i32;
-    unsafe { disp.GetIDsOfNames(&GUID::zeroed(), &pcwstr, 1, 0x0409, &mut id)?; }
-    Ok(id)
-}
-
-// VARIANT on Win64: u16 vt + u16[3] reserved + 8-byte data = 16 bytes total.
-#[repr(C)]
-union VarData { bstrVal: *mut u16, lVal: i32, boolVal: i16, pdispVal: *mut core::ffi::c_void }
-#[repr(C)]
-struct VarRaw { vt: u16, _r: [u16; 3], data: VarData }
-
-fn put_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core::Result<()> {
-    let id = get_dispid(disp, name)?;
-    let bval = std::mem::ManuallyDrop::new(BSTR::from(value));
+fn register_host_class(hinstance: windows::Win32::Foundation::HINSTANCE) {
     unsafe {
-        let mut var: VARIANT = std::mem::zeroed();
-        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 8; (*r).data.bstrVal = bval.as_ptr() as *mut u16; }
-        let mut named = DISPID_PROPERTYPUT;
-        let res = disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
-            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
-            None, None, None);
-        VariantClear(&mut var).ok();
-        res
-    }
-}
-
-fn put_i4(disp: &IDispatch, name: &str, value: i32) -> windows::core::Result<()> {
-    let id = get_dispid(disp, name)?;
-    unsafe {
-        let mut var: VARIANT = std::mem::zeroed();
-        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 3; (*r).data.lVal = value; }
-        let mut named = DISPID_PROPERTYPUT;
-        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
-            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
-            None, None, None)
-    }
-}
-
-fn put_bool_prop(disp: &IDispatch, name: &str, value: bool) -> windows::core::Result<()> {
-    let id = get_dispid(disp, name)?;
-    unsafe {
-        let mut var: VARIANT = std::mem::zeroed();
-        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 11; (*r).data.boolVal = if value { -1i16 } else { 0i16 }; }
-        let mut named = DISPID_PROPERTYPUT;
-        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
-            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
-            None, None, None)
-    }
-}
-
-fn get_dispatch_sub(disp: &IDispatch, name: &str) -> windows::core::Result<IDispatch> {
-    let id = get_dispid(disp, name)?;
-    unsafe {
-        let mut result: VARIANT = std::mem::zeroed();
-        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYGET,
-            &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
-            Some(&mut result), None, None)?;
-        let r = &result as *const VARIANT as *const VarRaw;
-        if (*r).vt == 9 {
-            let raw = (*r).data.pdispVal;
-            if !raw.is_null() {
-                (*(r as *mut VarRaw)).vt = 0;
-                return Ok(IDispatch::from_raw(raw));
-            }
-        }
-        VariantClear(&mut result).ok();
-        Err(E_NOTIMPL.into())
-    }
-}
-
-fn get_i4(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
-    let id = get_dispid(disp, name)?;
-    unsafe {
-        let mut result: VARIANT = std::mem::zeroed();
-        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYGET,
-            &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
-            Some(&mut result), None, None)?;
-        let r = &result as *const VARIANT as *const VarRaw;
-        let val = if (*r).vt == 3 { (*r).data.lVal } else { 0 };
-        VariantClear(&mut result).ok();
-        Ok(val)
-    }
-}
-
-
-// Sets the RDP password directly on the mstscax COM object via
-// IMsTscNonScriptable::put_ClearTextPassword before Connect(), so mstscax
-// can perform NLA silently without showing the credential dialog (DISPID 18).
-//
-// IMsTscNonScriptable is not exported by windows-rs 0.61, so we QI and call
-// the method via raw vtable pointer arithmetic.
-//
-// IID: {C539BD95-2782-4D46-9606-50B31E9D4897}
-// Vtable layout (after IUnknown at [0..2]):
-//   [3] put_ClearTextPassword(this, rhs: BSTR) -> HRESULT
-//   [4] get_ClearTextPassword ...
-//   [5..] PortablePassword, PortableSalt, BinaryPassword, BinarySalt, ResetPassword
-unsafe fn ns_set_clear_text_password(com_ptr: *mut std::ffi::c_void, password: &str) -> bool {
-    if com_ptr.is_null() || password.is_empty() { return false; }
-
-    const IID_NS: GUID = GUID::from_values(
-        0xC539BD95, 0x2782, 0x4D46,
-        [0x96, 0x06, 0x50, 0xB3, 0x1E, 0x9D, 0x48, 0x97],
-    );
-
-    // COM interface pointer layout on x64:
-    //   com_ptr → [vtable_ptr (8 bytes)] [object data ...]
-    //   vtable_ptr → [fn_ptr_0 (QI), fn_ptr_1 (AddRef), fn_ptr_2 (Release), ...]
-    let vtbl: *const usize = *(com_ptr as *const *const usize);
-
-    // QueryInterface (vtable[0])
-    type QiFn = unsafe extern "system" fn(
-        *mut std::ffi::c_void, *const GUID, *mut *mut std::ffi::c_void,
-    ) -> i32;
-    let qi: QiFn = std::mem::transmute(*vtbl.add(0));
-    let mut ns_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-    let qi_hr: i32 = qi(com_ptr, &IID_NS, &mut ns_ptr);
-    if qi_hr < 0 || ns_ptr.is_null() {
-        eprintln!("[rdp] IMsTscNonScriptable QI hr=0x{:08X} (not available)", qi_hr as u32);
-        return false;
-    }
-    eprintln!("[rdp] IMsTscNonScriptable QI ok");
-
-    let ns_vtbl: *const usize = *(ns_ptr as *const *const usize);
-    let pw_bstr = BSTR::from(password);
-
-    // put_ClearTextPassword (vtable[3]) — BSTR is *mut u16 in COM ABI
-    type PutFn = unsafe extern "system" fn(*mut std::ffi::c_void, *mut u16) -> i32;
-    let put_fn: PutFn = std::mem::transmute(*ns_vtbl.add(3));
-    let put_hr: i32 = put_fn(ns_ptr, pw_bstr.as_ptr() as *mut u16);
-
-    // Release (vtable[2])
-    type RelFn = unsafe extern "system" fn(*mut std::ffi::c_void) -> u32;
-    let release: RelFn = std::mem::transmute(*ns_vtbl.add(2));
-    release(ns_ptr);
-
-    eprintln!("[rdp] IMsTscNonScriptable::put_ClearTextPassword hr=0x{:08X}", put_hr as u32);
-    put_hr >= 0
-}
-
-// Write credentials directly into Windows Credential Manager via CredWriteW.
-// More reliable than spawning cmdkey.exe (no process creation, no UAC, no
-// quoting issues). NLA/CredSSP picks these up automatically during Connect().
-fn store_rdp_credential(host: &str, port: u16, username: &str, domain: &str, password: &str) {
-    use windows::Win32::Security::Credentials::{
-        CredWriteW, CredDeleteW,
-        CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE,
-        CRED_TYPE_DOMAIN_PASSWORD,
-    };
-    use windows::core::PWSTR;
-
-    // `username` here is already the bare user (no domain prefix); `domain` is
-    // separate.  For domain accounts, CredSSP expects "DOMAIN\user" in UserName.
-    // The ".\user" form is only valid for local accounts.
-    let user_plain = if domain.is_empty() {
-        username.to_owned()
-    } else {
-        format!("{}\\{}", domain, username)
-    };
-    // Only add a ".\" local-machine prefix for plain local usernames (no domain,
-    // no embedded backslash).  For domain accounts the dot prefix is incorrect
-    // and would cause CredSSP to find the wrong credential entry.
-    let user_dot: Option<String> = if domain.is_empty() && !username.contains('\\') {
-        Some(format!(".\\{}", username))
-    } else {
-        None
-    };
-
-    // For the default RDP port (3389), mstscax/CredSSP looks up TERMSRV/<host>
-    // without the port suffix.  For non-standard ports, also store the :port form.
-    let mut base_targets = vec![format!("TERMSRV/{}", host)];
-    if port != 3389 {
-        base_targets.push(format!("TERMSRV/{}:{}", host, port));
-    }
-
-    // CRED_TYPE_DOMAIN_PASSWORD with plain UTF-16LE password — same as cmdkey /add.
-    // Windows handles DPAPI encryption internally for DOMAIN_PASSWORD credentials;
-    // mstscax/CredSSP reads these natively and performs silent NLA (ATL window stays
-    // invisible, no credential dialog).  CRED_TYPE_GENERIC with a DPAPI blob was the
-    // previous approach but mstscax sent the raw blob as the NLA password → 7943.
-    let pw_utf16: Vec<u8> = password.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
-
-    for target in &base_targets {
-        let mut target_wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
-
-        unsafe {
-            // Remove stale entries of either type to avoid CredSSP picking the wrong one.
-            let _ = CredDeleteW(PCWSTR(target_wide.as_ptr()), CRED_TYPE_DOMAIN_PASSWORD, Some(0));
-        }
-
-        let mut user_variants: Vec<String> = vec![user_plain.clone()];
-        if let Some(ref dot) = user_dot { user_variants.push(dot.clone()); }
-
-        for user_str in &user_variants {
-            let mut user_wide: Vec<u16> = user_str.encode_utf16().chain(Some(0)).collect();
-            let cred = CREDENTIALW {
-                Flags: CRED_FLAGS(0),
-                Type: CRED_TYPE_DOMAIN_PASSWORD,
-                TargetName: PWSTR(target_wide.as_mut_ptr()),
-                Comment: PWSTR::null(),
-                LastWritten: unsafe { std::mem::zeroed() },
-                CredentialBlobSize: pw_utf16.len() as u32,
-                CredentialBlob: pw_utf16.as_ptr() as *mut u8,
-                Persist: CRED_PERSIST_LOCAL_MACHINE,
-                AttributeCount: 0,
-                Attributes: std::ptr::null_mut(),
-                TargetAlias: PWSTR::null(),
-                UserName: PWSTR(user_wide.as_mut_ptr()),
-            };
-            let ok = unsafe { CredWriteW(&cred, 0).is_ok() };
-            eprintln!("[rdp] CredWriteW {target} user={user_str} type=DOMAIN_PASSWORD bytes={} ok={ok}",
-                pw_utf16.len());
-        }
-    }
-}
-
-// Write HKCU\...\Terminal Services\Client\RedirectionWarningDialogVersion=1.
-// The April-2026 security update (KB5057577) introduced a new per-connection
-// redirection warning dialog that overrides the old WarnAbout* COM properties.
-// Setting this registry value (documented for IT admins) reverts the dialog
-// behavior to the pre-update version where WarnAbout*=FALSE is honored.
-// HKCU requires no elevation; Windows reads both HKCU and HKLM for this key.
-fn set_rdp_warning_dialog_version() {
-    use windows::Win32::System::Registry::{
-        RegCreateKeyExW, RegSetValueExW, RegCloseKey,
-        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
-        REG_OPTION_NON_VOLATILE, REG_DWORD,
-    };
-    let subkey: Vec<u16> = "Software\\Policies\\Microsoft\\Windows NT\\Terminal Services\\Client"
-        .encode_utf16().chain(Some(0)).collect();
-    let vname: Vec<u16> = "RedirectionWarningDialogVersion"
-        .encode_utf16().chain(Some(0)).collect();
-    let mut hkey = HKEY::default();
-    unsafe {
-        if RegCreateKeyExW(
-            HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), Some(0), PCWSTR::null(),
-            REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut hkey, None,
-        ).is_ok() {
-            let v: u32 = 1;
-            let ok = RegSetValueExW(hkey, PCWSTR(vname.as_ptr()), Some(0), REG_DWORD,
-                Some(&v.to_ne_bytes())).is_ok();
-            eprintln!("[rdp] HKCU RedirectionWarningDialogVersion=1 ok={ok}");
-            RegCloseKey(hkey);
-        }
-    }
-}
-
-// Write per-server registry values under
-//   HKCU\Software\Microsoft\Terminal Server Client\servers\<host>
-// mstscax reads these before showing any warning dialogs and uses UsernameHint
-// to select the right Credential Manager entry for automatic authentication.
-fn suppress_rdp_server_registry(host: &str, port: u16, username: &str, domain: &str) {
-    use windows::Win32::System::Registry::{
-        RegCreateKeyExW, RegSetValueExW, RegCloseKey,
-        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
-        REG_OPTION_NON_VOLATILE, REG_DWORD, REG_SZ,
-    };
-
-    let user_hint = if domain.is_empty() {
-        username.to_owned()
-    } else {
-        format!("{}\\{}", domain, username)
-    };
-
-    // Write under both host-only and host:port forms so whichever key mstscax
-    // resolves to gets the suppression values.
-    let mut server_keys = vec![host.to_owned()];
-    server_keys.push(format!("{}:{}", host, port));
-
-    // Write the global (non-per-server) suppression values first.
-    // On some mstscax versions the global key takes precedence over per-server.
-    let global_subkey: Vec<u16> = "Software\\Microsoft\\Terminal Server Client"
-        .encode_utf16().chain(Some(0)).collect();
-    let mut global_hkey = HKEY::default();
-    unsafe {
-        if RegCreateKeyExW(
-            HKEY_CURRENT_USER, PCWSTR(global_subkey.as_ptr()), Some(0), PCWSTR::null(),
-            REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut global_hkey, None,
-        ).is_ok() {
-            let zero: u32 = 0;
-            for name in &["WarnAboutClipboardRedirection", "WarnAboutSendingCredentials",
-                           "WarnAboutPrintRedirection"] {
-                let vname: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-                let _ = RegSetValueExW(global_hkey, PCWSTR(vname.as_ptr()), Some(0), REG_DWORD,
-                    Some(&zero.to_ne_bytes()));
-            }
-            let _ = RegCloseKey(global_hkey);
-        }
-    }
-
-    for server in &server_keys {
-        let subkey_str = format!("Software\\Microsoft\\Terminal Server Client\\servers\\{}", server);
-        let subkey: Vec<u16> = subkey_str.encode_utf16().chain(Some(0)).collect();
-        let mut hkey = HKEY::default();
-        unsafe {
-            if RegCreateKeyExW(
-                HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), Some(0), PCWSTR::null(),
-                REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, None, &mut hkey, None,
-            ).is_ok() {
-                let zero: u32 = 0;
-                for name in &["WarnAboutClipboardRedirection", "WarnAboutSendingCredentials",
-                               "WarnAboutPrintRedirection"] {
-                    let vname: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-                    let _ = RegSetValueExW(hkey, PCWSTR(vname.as_ptr()), Some(0), REG_DWORD,
-                        Some(&zero.to_ne_bytes()));
-                }
-                // UsernameHint: mstscax uses this to locate the Credential Manager
-                // entry for NLA pre-authentication without prompting.
-                let hint_name: Vec<u16> = "UsernameHint".encode_utf16().chain(Some(0)).collect();
-                let hint_bytes: Vec<u8> = user_hint.encode_utf16()
-                    .flat_map(|c| c.to_le_bytes()).chain([0u8, 0u8]).collect();
-                let _ = RegSetValueExW(hkey, PCWSTR(hint_name.as_ptr()), Some(0), REG_SZ,
-                    Some(&hint_bytes));
-                let _ = RegCloseKey(hkey);
-            }
-        }
-    }
-    eprintln!("[rdp] per-server registry suppression written for {host} hint={user_hint}");
-}
-
-// Suppress the two dialogs that appear on every RDP connection:
-//   1. Clipboard/redirect security warning (reverted by registry key above)
-//   2. "Windows Security – enter credentials" credential prompt
-unsafe fn suppress_rdp_dialogs(rdp_unk: &IUnknown) {
-    // Only NS3 is accessed via vtable; NS4/NS5 are skipped (see comment below).
-    const IID_NS3: GUID = GUID::from_values(
-        0xB3378D90, 0x0728, 0x45C7,
-        [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19],
-    );
-
-    type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
-    type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
-    type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
-
-    let raw = rdp_unk.as_raw() as *mut core::ffi::c_void;
-    let unk_vtbl: *const usize = *(raw as *const *const usize);
-    let qi: QIFn = core::mem::transmute(*unk_vtbl.add(0));
-
-    // ── NS3: WarnAboutClipboardRedirection + WarnAboutSendingCredentials ──────
-    // Flat vtable offsets (NS3 pointer):
-    //   [0-2]  IUnknown
-    //   [3-4]  NS1: NotifyRedirectDeviceChange, SendKeys
-    //   [5-16] NS2 (inherited): UIParentWindowHandle(2), ShowRedirectionWarningDialog(2),
-    //               PromptForCredentials(2), NegotiateSecurityLayer(2),
-    //               EnableCredSspSupport(2), AuthenticationServiceClass(2)
-    //   [17] get_WarnAboutSendingCredentials
-    //   [18] put_WarnAboutSendingCredentials
-    //   [19] get_WarnAboutClipboardRedirection
-    //   [20] put_WarnAboutClipboardRedirection
-    //   [21] get_ConnectionBarText
-    //   [22] put_ConnectionBarText
-    let mut ns3: *mut core::ffi::c_void = core::ptr::null_mut();
-    if qi(raw, &IID_NS3, &mut ns3) >= 0 && !ns3.is_null() {
-        let v: *const usize = *(ns3 as *const *const usize);
-        let put_show_redir:   PutBool = core::mem::transmute(*v.add(8));  // ShowRedirectionWarningDialog (NS2)
-        let put_prompt_creds: PutBool = core::mem::transmute(*v.add(10)); // PromptForCredentials (NS2)
-        let put_neg_sec:      PutBool = core::mem::transmute(*v.add(12)); // NegotiateSecurityLayer (NS2)
-        let put_warn_creds:   PutBool = core::mem::transmute(*v.add(18)); // WarnAboutSendingCredentials (NS3)
-        let put_warn_clip:    PutBool = core::mem::transmute(*v.add(20)); // WarnAboutClipboardRedirection (NS3)
-        let release: RelFn            = core::mem::transmute(*v.add(2));
-        let h1 = put_show_redir(ns3, 0i16);
-        let h2 = put_prompt_creds(ns3, 0i16);
-        let h3 = put_neg_sec(ns3, -1i16);
-        let h4 = put_warn_creds(ns3, 0i16);
-        let h5 = put_warn_clip(ns3, 0i16);
-        eprintln!("[rdp] NS2 ShowRedirectionWarningDialog=0  hr=0x{:08X}", h1 as u32);
-        eprintln!("[rdp] NS2 PromptForCredentials=0          hr=0x{:08X}", h2 as u32);
-        eprintln!("[rdp] NS2 NegotiateSecurityLayer=1         hr=0x{:08X}", h3 as u32);
-        eprintln!("[rdp] NS3 WarnAboutSendingCredentials=0   hr=0x{:08X}", h4 as u32);
-        eprintln!("[rdp] NS3 WarnAboutClipboardRedirection=0  hr=0x{:08X}", h5 as u32);
-        release(ns3);
-    }
-
-    // NS4 and NS5 vtable access is intentionally skipped.
-    // On this mstscax build QI(NS4) returns S_OK but maps to the NS3 vtable
-    // (no extra entries), causing an access violation at offset [28]+.
-    // NS5 may exhibit the same pattern at offset [35].
-    // The per-server registry approach handles all credential/prompt suppression
-    // more reliably without vtable hackery.
-}
-
-fn call_no_args(disp: &IDispatch, name: &str) -> windows::core::Result<()> {
-    let id = get_dispid(disp, name)?;
-    unsafe {
-        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_METHOD,
-            &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
-            None, None, None)
-    }
-}
-
-// ── Coordinate helpers ────────────────────────────────────────────────────────
-
-/// Map a point in `hwnd`'s client coordinates to screen coordinates.
-///
-/// `ClientToScreen` is not exposed by the `windows` crate bindings, so we
-/// derive the same result from `GetWindowRect` (outer position) and
-/// `GetClientRect` (client size).  For standard Win32 windows:
-///   left_border == right_border == bottom_border  (symmetric frame)
-///   top_border = outer_height - client_height - left_border
-///
-/// This is exact for Tauri windows because WebView2 fills the whole client area
-/// and there is no custom client-area padding.
-unsafe fn canvas_to_screen(hwnd: HWND, cx: i32, cy: i32) -> (i32, i32) {
-    let mut outer = RECT::default();
-    let mut inner = RECT::default();
-    GetWindowRect(hwnd, &mut outer).ok();
-    GetClientRect(hwnd, &mut inner).ok();
-    let outer_w = outer.right - outer.left;
-    let outer_h = outer.bottom - outer.top;
-    let client_w = inner.right;  // GetClientRect top-left is always (0,0)
-    let client_h = inner.bottom;
-    let bx = (outer_w - client_w) / 2;  // left/right frame
-    let by = outer_h - client_h - bx;   // top = title bar + top frame
-    (outer.left + bx + cx, outer.top + by + cy)
-}
-
-// ── Host window class ─────────────────────────────────────────────────────────
-
-const HOST_CLASS: PCWSTR = w!("OrbRdpHostWnd");
-
-unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    DefWindowProcW(hwnd, msg, wp, lp)
-}
-
-fn register_host_class() {
-    unsafe {
-        let hmod = GetModuleHandleW(None).unwrap_or_default();
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(host_wnd_proc),
-            lpszClassName: HOST_CLASS,
-            hInstance: hmod.into(),
+        let class_name: Vec<u16> = HOST_CLASS.encode_utf16().chain(std::iter::once(0)).collect();
+        let wc = WNDCLASSEXW {
+            cbSize:        std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc:   Some(host_wnd_proc),
+            hInstance:     hinstance,
+            lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
             ..Default::default()
         };
-        RegisterClassW(&wc);
+        RegisterClassExW(&wc);
     }
 }
 
-// ── Cover window class ────────────────────────────────────────────────────────
-//
-// OrbRdpCoverWnd is a WS_EX_TOPMOST opaque overlay placed over the RDP canvas
-// for the duration of NLA authentication.  It hides both the host window's
-// white background and the mstscax ATL credential UI, which DirectX-renders
-// at screen coordinates independently of the host window's position.
-// The cover is destroyed (not just hidden) when the session ends.
+unsafe extern "system" fn host_wnd_proc(
+    hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_DESTROY => { PostQuitMessage(0); LRESULT(0) }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
 
-const COVER_CLASS: PCWSTR = w!("OrbRdpCoverWnd");
+// ── Screen positioning ────────────────────────────────────────────────────────
 
-fn register_cover_class() {
+fn canvas_to_screen(parent: HWND, rel_x: i32, rel_y: i32) -> (i32, i32) {
     unsafe {
-        let hmod = GetModuleHandleW(None).unwrap_or_default();
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(host_wnd_proc),
-            lpszClassName: COVER_CLASS,
-            hInstance: hmod.into(),
-            // System "window" color brush (opaque white) — hides everything beneath.
-            hbrBackground: HBRUSH((5 + 1) as *mut core::ffi::c_void), // COLOR_WINDOW + 1
-            ..Default::default()
-        };
-        RegisterClassW(&wc);
+        let mut r = RECT::default();
+        let _ = GetWindowRect(parent, &mut r);
+        (r.left + rel_x, r.top + rel_y)
     }
 }
 
-// ── STA thread ────────────────────────────────────────────────────────────────
+// ── Helper binary lookup ──────────────────────────────────────────────────────
+
+fn find_helper_exe() -> Option<std::path::PathBuf> {
+    // 1. Env override
+    if let Ok(p) = std::env::var("ORBITAL_RDP_HOST") {
+        let pb = std::path::PathBuf::from(p);
+        if pb.exists() { return Some(pb); }
+    }
+    // 2. Alongside our own exe
+    if let Ok(mut p) = std::env::current_exe() {
+        p.pop();
+        p.push("OrbitalRdpHost.exe");
+        if p.exists() { return Some(p); }
+    }
+    // 3. Tauri resources dir (packaged app)
+    if let Ok(mut p) = std::env::current_exe() {
+        p.pop();
+        p.push("resources");
+        p.push("OrbitalRdpHost.exe");
+        if p.exists() { return Some(p); }
+    }
+    // 4. Dev layout: csharp-rdp-host/ sibling of src-tauri/
+    if let Ok(mut p) = std::env::current_dir() {
+        p.push("csharp-rdp-host");
+        p.push("OrbitalRdpHost.exe");
+        if p.exists() { return Some(p); }
+    }
+    None
+}
+
+// ── Launch params ─────────────────────────────────────────────────────────────
 
 struct LaunchParams {
-    app: tauri::AppHandle,
+    app:        tauri::AppHandle,
     session_id: String,
     parent_hwnd: isize,
-    host: String,
-    port: u16,
-    username: String,
-    domain: String,
-    password: Option<String>,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
+    host:       String,
+    port:       u16,
+    username:   String,
+    domain:     String,
+    password:   Option<String>,
+    x: i32, y: i32, width: i32, height: i32,
     admin_mode: bool,
-    rdp_security: String,
-    color_depth: i32,
 }
 
-fn sta_thread(
-    params: LaunchParams,
-    result_tx: mpsc::SyncSender<Result<mpsc::SyncSender<ComCmd>, String>>,
-) {
-    unsafe {
-        if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
-            let _ = result_tx.send(Err("CoInitializeEx failed".into()));
+// ── Host thread ───────────────────────────────────────────────────────────────
+
+fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
+    let exe = match find_helper_exe() {
+        Some(p) => p,
+        None => {
+            eprintln!("[rdp] OrbitalRdpHost.exe not found");
+            session.finished.store(true, Ordering::SeqCst);
             return;
         }
+    };
 
-        register_host_class();
-        register_cover_class();
+    // Build user arg: "domain\user" if domain present, else just user
+    let user_arg = if params.domain.is_empty() {
+        params.username.clone()
+    } else {
+        format!("{}\\{}", params.domain, params.username)
+    };
 
-        // Split "DOMAIN\user" username into (domain, user) so mstscax and CredSSP
-        // receive the correct individual fields.  If the caller already split them
-        // (params.domain non-empty), use those; otherwise parse params.username.
-        // Write registry suppression values and credentials BEFORE creating the COM
-        // object so mstscax reads them at activation time (DoVerb/Connect).
-        let (domain_str, user_str): (&str, &str) = if let Some(pos) = params.username.find('\\') {
-            (&params.username[..pos], &params.username[pos + 1..])
-        } else {
-            (params.domain.as_str(), params.username.as_str())
-        };
-
-        if let Some(ref pw) = params.password {
-            store_rdp_credential(&params.host, params.port, user_str, domain_str, pw);
-        }
-        set_rdp_warning_dialog_version();
-        suppress_rdp_server_registry(&params.host, params.port, user_str, domain_str);
-
+    // Create WS_POPUP host window (must exist before spawning helper so we have an HWND)
+    let host_hwnd = unsafe {
         let hmod = GetModuleHandleW(None).unwrap_or_default();
-        // parent = Tauri main window (top-level application frame)
-        let mut parent = HWND(params.parent_hwnd as *mut _);
-        let w = params.width.max(640);
-        let h = params.height.max(480);
+        register_host_class(hmod.into());
 
-        // Convert canvas-relative coords to screen coords.
-        // The params x/y are relative to the Tauri window's client area.
+        let class_name: Vec<u16> = HOST_CLASS.encode_utf16().chain(std::iter::once(0)).collect();
+        let parent = HWND(params.parent_hwnd as *mut _);
         let (sx, sy) = canvas_to_screen(parent, params.x, params.y);
 
-        // WS_POPUP (not WS_CHILD): floats above WebView2's DirectComposition layer.
-        // WS_CHILD windows sit below DComp and appear black regardless of z-order.
-        // WS_EX_TOOLWINDOW: suppress taskbar entry for this auxiliary window.
-        // Passing `parent` as hWndParent sets the Win32 owner at creation time —
-        // owned popups stay above their owner in z-order but are NOT topmost,
-        // so other applications can be brought to the foreground normally.
-        // Never change the owner at runtime via SetWindowLongPtrW(GWLP_HWNDPARENT):
-        // that sends a synchronous cross-thread Win32 message which deadlocks.
-        let host_hwnd = match CreateWindowExW(
-            WS_EX_TOOLWINDOW,
-            HOST_CLASS, w!(""),
-            WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-            sx, sy, w, h,
-            Some(parent), None, Some(hmod.into()), None,
-        ) {
-            Ok(hwnd) => hwnd,
-            Err(e) => {
-                let _ = result_tx.send(Err(format!("CreateWindowExW: {e}")));
-                CoUninitialize();
-                return;
-            }
-        };
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            windows::core::PCWSTR(class_name.as_ptr()),
+            windows::core::PCWSTR(std::ptr::null()),
+            WS_POPUP | WS_VISIBLE,
+            sx, sy, params.width, params.height,
+            parent, // owner (not parent — keeps it above DComp)
+            None, hmod.into(), None,
+        ).unwrap_or(HWND(std::ptr::null_mut()))
+    };
 
-        // HWND_TOP: owned popup stays above its owner (Tauri) in z-order but is
-        // NOT always-on-top, so other applications can be brought to the foreground.
-        // The cover window (WS_EX_TOPMOST) hides both this window and the ATL
-        // credential UI during NLA auth and is shown just below.
-        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, w, h,
-            SWP_NOACTIVATE).ok();
+    if host_hwnd.0.is_null() {
+        eprintln!("[rdp] CreateWindowExW failed");
+        session.finished.store(true, Ordering::SeqCst);
+        return;
+    }
 
-        // Try MsRdpClient10 first, fall back to MsRdpClient9 for older Windows
-        let rdp_unk: IUnknown = match CoCreateInstance(&CLSID_MSTSC_10, None, CLSCTX_INPROC_SERVER)
-            .or_else(|_| CoCreateInstance(&CLSID_MSTSC_9, None, CLSCTX_INPROC_SERVER))
-        {
-            Ok(u) => u,
-            Err(e) => {
-                let _ = result_tx.send(Err(format!(
-                    "mstscax.dll no encontrado ({e})\nInstala Remote Desktop Connection."
-                )));
-                DestroyWindow(host_hwnd).ok();
-                CoUninitialize();
-                return;
-            }
-        };
+    session.host_hwnd.store(host_hwnd.0 as isize, Ordering::Relaxed);
 
-        let ole_obj: IOleObject = match rdp_unk.cast() {
-            Ok(o) => o,
-            Err(e) => {
-                let _ = result_tx.send(Err(format!("IOleObject QI: {e}")));
-                DestroyWindow(host_hwnd).ok();
-                CoUninitialize();
-                return;
-            }
-        };
+    // Spawn the C# helper, embedding its window inside our popup
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--parent").arg((host_hwnd.0 as isize).to_string())
+       .arg("--server").arg(&params.host)
+       .arg("--port").arg(params.port.to_string())
+       .arg("--user").arg(&user_arg)
+       .arg("--width").arg(params.width.to_string())
+       .arg("--height").arg(params.height.to_string());
+    if params.admin_mode { cmd.arg("--admin"); }
+    cmd.stdin(Stdio::piped())
+       .stdout(Stdio::piped())
+       .stderr(Stdio::null())
+       .creation_flags(CREATE_NO_WINDOW);
 
-        // frame → top-level application window (Tauri main window).
-        // IOleInPlaceFrame::GetWindow MUST return the top-level frame, not the
-        // container. mstscax validates this to create its rendering surface.
-        let frame: IOleInPlaceFrame = RdpFrame { hwnd: parent }.into();
-        let site: IOleClientSite = RdpSite { hwnd: host_hwnd, frame: frame.clone() }.into();
-
-        if let Err(e) = ole_obj.SetClientSite(Some(&site)) {
-            let _ = result_tx.send(Err(format!("SetClientSite: {e}")));
-            DestroyWindow(host_hwnd).ok();
-            CoUninitialize();
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[rdp] failed to spawn helper: {e}");
+            session.finished.store(true, Ordering::SeqCst);
+            unsafe { let _ = DestroyWindow(host_hwnd); }
             return;
         }
+    };
 
-        let _ = OleSetContainedObject(&rdp_unk, true);
-        let _ = ole_obj.SetHostNames(w!("OrbitalTerm"), w!(""));
+    // Send password via stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        let pw = params.password.clone().unwrap_or_default();
+        let _ = writeln!(stdin, "{pw}");
+    }
 
-        // NegotiateSecurityLayer must be set before DoVerb (vtable[12] on NS3).
-        // rdp_security="rdp" disables NLA + TLS (classic RDP, no DISPID 18 credential dialog).
-        // All other NS3/NS5 dialog-suppression calls happen after DoVerb in
-        // suppress_rdp_dialogs — calling them before activation crashes (AV).
-        {
-            const IID_NS3: GUID = GUID::from_values(0xB3378D90, 0x0728, 0x45C7, [0x8E, 0xD7, 0xB6, 0x15, 0x9F, 0xB9, 0x22, 0x19]);
-            type QIFn    = unsafe extern "system" fn(*mut core::ffi::c_void, *const GUID, *mut *mut core::ffi::c_void) -> i32;
-            type PutBool = unsafe extern "system" fn(*mut core::ffi::c_void, i16) -> i32;
-            type RelFn   = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
-            let raw = rdp_unk.as_raw() as *mut core::ffi::c_void;
-            let qi: QIFn = core::mem::transmute(*(*(raw as *const *const usize)).add(0));
-            let mut ns3: *mut core::ffi::c_void = core::ptr::null_mut();
-            if qi(raw, &IID_NS3, &mut ns3) >= 0 && !ns3.is_null() {
-                let v: *const usize = *(ns3 as *const *const usize);
-                let put_neg_sec: PutBool = core::mem::transmute(*v.add(12));
-                let release: RelFn       = core::mem::transmute(*v.add(2));
-                // "rdp" = classic RDP security, disable NegotiateSecurityLayer
-                let neg_sec_val: i16 = if params.rdp_security == "rdp" { 0 } else { -1 };
-                let h = put_neg_sec(ns3, neg_sec_val);
-                eprintln!("[rdp] pre-DoVerb NegotiateSecurityLayer={} hr=0x{:08X}",
-                    if neg_sec_val == 0 { 0 } else { 1 }, h as u32);
-                release(ns3);
+    // Background thread: read STATE: lines from helper stdout
+    let connected  = Arc::clone(&session.connected);
+    let finished   = Arc::clone(&session.finished);
+    if let Some(stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            for line in BufReader::new(stdout).lines().flatten() {
+                if line.contains("STATE:connected") || line.contains("OnLoginComplete") {
+                    connected.store(true, Ordering::SeqCst);
+                }
+                if line.contains("STATE:disconnected") || line.starts_with("ERROR:") {
+                    finished.store(true, Ordering::SeqCst);
+                }
             }
-        }
-
-        // ── Cover window ──────────────────────────────────────────────────────
-        // Show an opaque WS_EX_TOPMOST cover over the RDP canvas area now, before
-        // DoVerb / Connect activates mstscax.  This hides both the host window's
-        // blank background and the ATL DirectX credential UI that mstscax renders
-        // at the canvas screen coordinates during NLA authentication.
-        // The cover is hidden (and then destroyed) once the session connects.
-        let cover_hwnd: HWND = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            COVER_CLASS, w!(""),
-            WS_POPUP,
-            sx, sy, w, h,
-            Some(parent), None, Some(hmod.into()), None,
-        ).unwrap_or(HWND(core::ptr::null_mut()));
-        if !cover_hwnd.is_invalid() {
-            SetWindowPos(cover_hwnd, Some(HWND_TOPMOST), sx, sy, w, h,
-                SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
-            eprintln!("[rdp] cover window shown at ({sx},{sy}) {w}x{h}");
-        }
-
-        let mut rc = RECT { left: 0, top: 0, right: w, bottom: h };
-
-        let dv_result = ole_obj.DoVerb(-5i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
-        if dv_result.is_err() {
-            let _ = ole_obj.DoVerb(-1i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
-        }
-
-        if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
-            let _ = ipo.SetObjectRects(&rc, &rc);
-        }
-
-        let disp: IDispatch = match rdp_unk.cast() {
-            Ok(d) => d,
-            Err(e) => {
-                let _ = result_tx.send(Err(format!("IDispatch QI: {e}")));
-                if !cover_hwnd.is_invalid() { DestroyWindow(cover_hwnd).ok(); }
-                DestroyWindow(host_hwnd).ok();
-                CoUninitialize();
-                return;
-            }
-        };
-
-        // ── RDP properties ────────────────────────────────────────────────────
-        let _ = put_bstr(&disp, "Server", &params.host);
-        let _ = put_i4(&disp, "RDPPort", params.port as i32);
-        // Use combined "DOMAIN\user" format for UserName — no separate Domain property.
-        // mstscax matches this against the DOMAIN_PASSWORD CredManager entry (TERMSRV/<host>)
-        // and performs NLA silently without showing the credential dialog (ATL stays invisible).
-        let combined_user = if domain_str.is_empty() {
-            user_str.to_string()
-        } else {
-            format!("{}\\{}", domain_str, user_str)
-        };
-        let _ = put_bstr(&disp, "UserName", &combined_user);
-        eprintln!("[rdp] UserName={combined_user}");
-        let _ = put_i4(&disp, "DesktopWidth", w);
-        let _ = put_i4(&disp, "DesktopHeight", h);
-        let _ = put_bool_prop(&disp, "FullScreen", false);
-        // IMsRdpClient5::AuthenticationLevel = 0 → connect without certificate warning.
-        // Setting it here on the main client AND on AdvancedSettings ensures both
-        // interfaces suppress the "Precaución: conexión remota desconocida" dialog.
-        let _ = put_i4(&disp, "AuthenticationLevel", 0);
-
-        // AdvancedSettings: password, security layer, and AuthenticationLevel.
-        // AuthenticationLevel MUST be set on AdvancedSettings (not the main
-        // client object) to actually suppress the "unknown certificate" warning.
-        let adv_names = ["AdvancedSettings9","AdvancedSettings7","AdvancedSettings5","AdvancedSettings2"];
-        let adv = adv_names.iter().find_map(|name| {
-            get_dispatch_sub(&disp, name).ok().map(|d| { eprintln!("[rdp] AdvancedSettings: {name}"); d })
+            finished.store(true, Ordering::SeqCst);
         });
-        if let Some(ref adv) = adv {
-            let _ = put_i4(adv, "RDPPort", params.port as i32);
-            // NLA (CredSSP) is disabled for "rdp" and "tls" security modes.
-            let use_nla = params.rdp_security != "rdp" && params.rdp_security != "tls";
-            let _ = put_bool_prop(adv, "EnableCredSspSupport", use_nla);
-            eprintln!("[rdp] EnableCredSspSupport={use_nla} (security={})", params.rdp_security);
-            let _ = put_bool_prop(adv, "SmartSizing", true);
-            // 0 = always connect even if cert doesn't match → suppresses warning dialog
-            let _ = put_i4(adv, "AuthenticationLevel", 0);
-            // Color depth (bits per pixel): 8, 15, 16, 24, or 32
-            if [8i32, 15, 16, 24, 32].contains(&params.color_depth) {
-                let _ = put_i4(adv, "ColorDepth", params.color_depth);
-            }
-            // Enable clipboard redirect explicitly so WarnAboutClipboardRedirection
-            // can be set to FALSE below without returning E_INVALIDARG.
-            let _ = put_bool_prop(adv, "RedirectClipboard", true);
-            // Try to suppress the mstscax internal credential prompt via AdvancedSettings.
-            // PromptForCredentials and PromptForCredentialsOnClient may not exist on all
-            // mstscax versions (best-effort; NS2 path also attempted via vtable below).
-            {
-                let r1 = put_bool_prop(adv, "PromptForCredentials", false);
-                let r2 = put_bool_prop(adv, "PromptForCredentialsOnClient", false);
-                eprintln!("[rdp] PromptForCredentials hr=0x{:08X}  PromptForCredentialsOnClient hr=0x{:08X}",
-                    r1.as_ref().err().map(|e| e.code().0 as u32).unwrap_or(0),
-                    r2.as_ref().err().map(|e| e.code().0 as u32).unwrap_or(0));
-            }
-            if params.admin_mode {
-                let _ = put_i4(adv, "ConnectToAdministerServer", 1);
-            }
-        }
+    }
 
-        // WarnAbout* suppression via COM (best-effort; registry writes above are primary).
-        suppress_rdp_dialogs(&rdp_unk);
+    // ── Host event loop ───────────────────────────────────────────────────────
+    let parent = HWND(params.parent_hwnd as *mut _);
+    let rel_x  = params.x;
+    let rel_y  = params.y;
+    let mut last_parent_rect = RECT::default();
+    let mut ever_connected = false;
+    let mut visible = false;
 
-        // Set password via IMsTscNonScriptable::ClearTextPassword so mstscax can
-        // perform NLA silently before Connect(), without showing the credential dialog.
-        // This is the proper COM API path — GENERIC CredManager is kept as a fallback
-        // and the DISPID 18 injection is kept in case the dialog appears anyway.
-        if let Some(ref pw) = params.password {
-            let com_ptr = rdp_unk.as_raw() as *mut std::ffi::c_void;
-            unsafe { ns_set_clear_text_password(com_ptr, pw); }
-        }
+    unsafe {
+        ShowWindow(host_hwnd, SW_HIDE);
 
-        // Install thread-local CBT hook to auto-dismiss any #32770 dialogs with
-        // an IDYES button (redirect/security warnings) before the user sees them.
-        // Installed just before Connect() so it's active during the whole session.
-        {
-            use windows::Win32::System::Threading::GetCurrentThreadId;
-            match SetWindowsHookExW(WH_CBT, Some(rdp_auto_dismiss_proc), None, GetCurrentThreadId()) {
-                Ok(hook) => {
-                    RDP_AUTO_DISMISS_HOOK.store(hook.0 as isize, Ordering::Relaxed);
-                    eprintln!("[rdp] CBT hook installed");
-                }
-                Err(e) => eprintln!("[rdp] CBT hook failed: {e:?}"),
-            }
-        }
-
-        // Cross-thread dialog watcher: polls EnumWindows every 150 ms so that
-        // clipboard/credential warning dialogs created on mstscax worker threads
-        // are also auto-dismissed (the CBT hook above only fires on this thread).
-        use windows::Win32::System::Threading::GetCurrentProcessId;
-        WATCHER_PID.store(GetCurrentProcessId(), Ordering::Relaxed);
-        WATCHER_HOST_HWND.store(host_hwnd.0 as isize, Ordering::Relaxed);
-        let watcher_done = Arc::new(AtomicBool::new(false));
-        {
-            let done = watcher_done.clone();
-            std::thread::spawn(move || {
-                let mut scan_tick: u32 = 0;
-                while !done.load(Ordering::Relaxed) {
-                    // Per-process: dismiss #32770 redirect/cert dialogs.
-                    unsafe { EnumWindows(Some(watcher_dismiss_cb), LPARAM(0)).ok() };
-                    // Cross-process: dismiss Windows Security / credential dialogs
-                    // that CredSSP or mstscax may spawn in a broker/svchost process.
-                    unsafe { EnumWindows(Some(watcher_cred_cb), LPARAM(0)).ok() };
-                    // Clear the pending-dismissed HWND once the window is gone.
-                    let p = WATCHER_PENDING.load(Ordering::Relaxed);
-                    if p != 0 {
-                        let h = HWND(p as *mut _);
-                        if !unsafe { IsWindow(Some(h)) }.as_bool() {
-                            WATCHER_PENDING.store(0, Ordering::Relaxed);
-                        }
-                    }
-                    // Every ~1 s, log all visible titled windows in our process and
-                    // scan child windows of the mstscax host HWND so we can identify
-                    // non-#32770 top-level dialogs and child-window credential UIs.
-                    scan_tick += 1;
-                    if scan_tick % 7 == 0 {
-                        unsafe { EnumWindows(Some(watcher_scan_cb), LPARAM(0)).ok() };
-                        let hh = WATCHER_HOST_HWND.load(Ordering::Relaxed);
-                        if hh != 0 {
-                            let host = HWND(hh as *mut _);
-                            if unsafe { IsWindow(Some(host)) }.as_bool() {
-                                unsafe { EnumChildWindows(Some(host), Some(watcher_host_child_cb), LPARAM(0)) };
-                            }
-                        }
-                    }
-                    std::thread::sleep(Duration::from_millis(150));
-                }
-                WATCHER_PID.store(0, Ordering::Relaxed);
-                WATCHER_PENDING.store(0, Ordering::Relaxed);
-                WATCHER_HOST_HWND.store(0, Ordering::Relaxed);
-                eprintln!("[rdp] watcher thread exited");
-            });
-        }
-        eprintln!("[rdp] cross-thread watcher started");
-
-        // ── COM connection point: subscribe to mstscax events ────────────────
-        // Subscribe BEFORE Connect() so DISPID 18 (cert warning / credential
-        // dialog) and other early events are received from the very first
-        // connection attempt.  Previously this block was after Connect() which
-        // caused DISPID 18 to be missed because the cert warning fires almost
-        // immediately after Connect() returns.
-        let event_logged_in    = Arc::new(AtomicBool::new(false));
-        let event_disconnected = Arc::new(AtomicBool::new(false));
-        // Vec of (connection_point, advise_cookie) kept alive until after loop.
-        let mut cp_registrations: Vec<(IConnectionPoint, u32)> = Vec::new();
-
-        if let Ok(cpc) = rdp_unk.cast::<IConnectionPointContainer>() {
-            let sink_unk = new_event_sink(
-                event_logged_in.clone(),
-                event_disconnected.clone(),
-                params.password.clone(),
-                host_hwnd.0 as isize,
-                cover_hwnd.0 as isize,
-            );
-
-            let candidates: Vec<IConnectionPoint> =
-                match cpc.FindConnectionPoint(&IID_DMSRDPCLIENTEVENTS) {
-                    Ok(cp) => {
-                        eprintln!("[rdp] FindConnectionPoint(DIID_IMsTscAxEvents) ok");
-                        vec![cp]
-                    }
-                    Err(e) => {
-                        eprintln!("[rdp] FindConnectionPoint failed ({e:?}), enumerating...");
-                        let mut all = Vec::new();
-                        if let Ok(enum_cp) = cpc.EnumConnectionPoints() {
-                            loop {
-                                let mut cp_arr = [None::<IConnectionPoint>; 1];
-                                let mut fetched: u32 = 0;
-                                let hr = enum_cp.Next(&mut cp_arr, &mut fetched);
-                                if fetched == 0 { break; }
-                                if let Some(cp) = cp_arr[0].take() {
-                                    if let Ok(iid) = cp.GetConnectionInterface() {
-                                        eprintln!("[rdp] Available CP IID: {iid:?}");
-                                    }
-                                    all.push(cp);
-                                }
-                                if hr.0 != 0 { break; }
-                            }
-                        } else {
-                            eprintln!("[rdp] EnumConnectionPoints also failed");
-                        }
-                        all
-                    }
-                };
-
-            for cp in candidates {
-                match cp.Advise(&sink_unk) {
-                    Ok(cookie) => {
-                        eprintln!("[rdp] Advise ok cookie={cookie}");
-                        cp_registrations.push((cp, cookie));
-                    }
-                    Err(e) => eprintln!("[rdp] Advise failed: {e:?}"),
-                }
-            }
-            if cp_registrations.is_empty() {
-                eprintln!("[rdp] No CPs registered — falling back to polling only");
-            }
-        } else {
-            eprintln!("[rdp] QI IConnectionPointContainer failed");
-        }
-
-        if let Err(e) = call_no_args(&disp, "Connect") {
-            let _ = result_tx.send(Err(format!("RDP Connect(): {e}")));
-            if !cover_hwnd.is_invalid() { DestroyWindow(cover_hwnd).ok(); }
-            DestroyWindow(host_hwnd).ok();
-            CoUninitialize();
-            return;
-        }
-
-        let (tx, rx) = mpsc::sync_channel::<ComCmd>(16);
-        let _ = result_tx.send(Ok(tx));
-
-        // Track canvas-relative position so we can re-apply ClientToScreen
-        // when the parent moves (e.g. window drag).
-        let mut rel_x = params.x;
-        let mut rel_y = params.y;
-        let mut last_parent_rect = RECT::default();
-        GetWindowRect(parent, &mut last_parent_rect).ok();
-        // Gate visibility on session-connected so the blank host window never
-        // appears during NLA / cert authentication dialogs.
-        // Ensure the session-live flag is clear at the start of each session so a
-        // previous session's stale flag never suppresses watcher dismissal prematurely.
-        WATCHER_SESSION_LIVE.store(false, Ordering::Relaxed);
-        let mut rdp_connected    = false; // true once the session is established
-        let mut ever_connected   = false; // latch: true once connected, never reset
-        let mut show_pending     = false; // Show arrived before rdp_connected
-        let mut dispatch_errors  = 0u32; // consecutive get_i4 errors after connected
-        let mut disconnect_polls = 0u32; // consecutive state=0/3 polls (debounce)
-
-        // ── Message / command loop ─────────────────────────────────────────────
         let mut msg = MSG::default();
-        let mut tick = 0u32;
-        'outer: loop {
-            // Drain the command channel
-            loop {
-                match rx.try_recv() {
-                    Ok(ComCmd::Reposition { x, y, width, height }) => {
-                        rel_x = x;
-                        rel_y = y;
-                        let (sx, sy) = canvas_to_screen(parent, x, y);
-                        // No SWP_SHOWWINDOW: never reveal during auth dialogs.
-                        // Visibility is controlled exclusively by Show/Hide and the
-                        // connect/disconnect handlers below.
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, width, height,
-                            SWP_NOACTIVATE).ok();
-                        if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
-                            let r = RECT { left: 0, top: 0, right: width, bottom: height };
-                            let _ = ipo.SetObjectRects(&r, &r);
-                        }
-                    }
-                    Ok(ComCmd::Show) => {
-                        if rdp_connected {
-                            let _ = ShowWindow(host_hwnd, SW_SHOW);
-                            SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
-                        } else {
-                            show_pending = true;
-                        }
-                    }
-                    Ok(ComCmd::Hide) => {
-                        show_pending = false;
-                        let _ = ShowWindow(host_hwnd, SW_HIDE);
-                    }
-                    Ok(ComCmd::Reparent { new_parent, rel_x: new_rel_x, rel_y: new_rel_y, width, height }) => {
-                        let new_hwnd = HWND(new_parent as *mut _);
-                        // Update the tracked parent for canvas_to_screen calculations.
-                        // Do NOT call SetWindowLongPtrW(GWLP_HWNDPARENT) — it sends a
-                        // synchronous cross-thread Win32 message that deadlocks this STA thread.
-                        // HWND_TOP keeps the WS_POPUP above the new window's DComp layer.
-                        parent = new_hwnd;
-                        GetWindowRect(parent, &mut last_parent_rect).ok();
-                        rel_x = new_rel_x;
-                        rel_y = new_rel_y;
-                        let (sx, sy) = canvas_to_screen(parent, rel_x, rel_y);
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, width, height,
-                            SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
-                        if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
-                            let r = RECT { left: 0, top: 0, right: width, bottom: height };
-                            let _ = ipo.SetObjectRects(&r, &r);
-                        }
-                    }
-                    Ok(ComCmd::Disconnect) | Err(mpsc::TryRecvError::Disconnected) => {
-                        let _ = call_no_args(&disp, "Disconnect");
-                        PostQuitMessage(0);
-                        break 'outer;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                }
-            }
-
-            // Pump the COM STA message queue.
-            // mstscax fires IMsTscAxEvents (OnConnected, OnDisconnected, …) as
-            // window messages on this thread; DispatchMessageW delivers them to
-            // our ev_sink_invoke synchronously.
+        loop {
+            // Drain Win32 messages
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == WM_QUIT { break 'outer; }
-                TranslateMessage(&msg);
+                if msg.message == WM_QUIT { break; }
+                let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
 
-            // ── COM event checks (every tick = 16 ms) ────────────────────────
-            // Process in order: logged_in first so a same-tick login+disconnect
-            // is handled correctly (ever_connected set before disconnect check).
-
-            // DISPID 3 = OnLoginComplete: Windows session login succeeded.
-            // Show the host window immediately here rather than waiting for the
-            // 100ms ConnectionState poll — the poll can miss state=2 if it fires
-            // during the brief auth→desktop transition where state changes quickly.
-            if event_logged_in.load(Ordering::SeqCst) {
-                event_logged_in.store(false, Ordering::SeqCst);
-                ever_connected   = true;
-                rdp_connected    = true;
-                disconnect_polls = 0;
-                show_pending     = false;
-                // Mark session live so the watcher stops auto-dismissing dialogs:
-                // any dialog after login is a server-side prompt (session limit, policy,
-                // etc.) that must not be silently dismissed as it could cause a disconnect.
-                WATCHER_SESSION_LIVE.store(true, Ordering::Relaxed);
-                // Hide cover (no-op if already hidden) and reveal the RDP window.
-                if !cover_hwnd.is_invalid() {
-                    let _ = ShowWindow(cover_hwnd, SW_HIDE);
-                }
-                let (tsx, tsy) = canvas_to_screen(parent, rel_x, rel_y);
-                SetWindowPos(host_hwnd, Some(HWND_TOP), tsx, tsy, 0, 0,
-                    SWP_NOSIZE | SWP_NOACTIVATE).ok();
-                let _ = ShowWindow(host_hwnd, SW_SHOW);
-                SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
-                eprintln!("[rdp] login complete — session window shown at ({tsx},{tsy})");
+            if session.stop.load(Ordering::SeqCst)
+                || session.finished.load(Ordering::SeqCst)
+            {
+                break;
             }
 
-            // DISPID 4 = OnDisconnected: session ended — hide cover and exit loop.
-            // Always handle disconnect regardless of ever_connected; if login never
-            // completed (e.g. discReason=516 encryption error) the cover window must
-            // be hidden or the user sees a permanent blank screen.
-            if event_disconnected.load(Ordering::SeqCst) {
-                eprintln!("[rdp] OnDisconnected event (ever_connected={ever_connected}) — closing session");
-                rdp_connected = false;
-                show_pending  = false;
-                if !cover_hwnd.is_invalid() { ShowWindow(cover_hwnd, SW_HIDE).ok(); }
-                let _ = ShowWindow(host_hwnd, SW_HIDE);
-                break 'outer;
+            // Show window once connected
+            if session.connected.load(Ordering::SeqCst) && !visible {
+                visible = true;
+                ever_connected = true;
+                ShowWindow(host_hwnd, SW_SHOW);
             }
 
-            // ── Slow path (every ~100 ms): parent liveness + polling fallback ─
-            tick += 1;
-            if tick % 6 == 0 {
-                // If the owner window (Tauri) was destroyed (e.g. detached window
-                // closed without going through disconnect_rdp), clean up and exit
-                // so the WS_POPUP doesn't orphan on the screen.
-                if !IsWindow(Some(parent)).as_bool() {
-                    let _ = call_no_args(&disp, "Disconnect");
-                    PostQuitMessage(0);
-                    break 'outer;
-                }
-
-                // ConnectionState polling: primary use is detecting the initial
-                // connection (state 2 → show window) for the case where OnConnected
-                // fired before Advise was called. Also acts as a fallback disconnect
-                // guard when the event sink was not registered.
-                match get_i4(&disp, "ConnectionState") {
-                    Ok(2) if !rdp_connected => {
-                        dispatch_errors  = 0;
-                        disconnect_polls = 0;
-                        rdp_connected    = true;
-                        ever_connected   = true;
-                        show_pending     = false;
-                        WATCHER_SESSION_LIVE.store(true, Ordering::Relaxed);
-                        // Hide the cover now that auth is complete, then bring
-                        // the session window to the foreground.
-                        if !cover_hwnd.is_invalid() {
-                            ShowWindow(cover_hwnd, SW_HIDE).ok();
-                        }
-                        let (tsx, tsy) = canvas_to_screen(parent, rel_x, rel_y);
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), tsx, tsy, 0, 0,
-                            SWP_NOSIZE | SWP_NOACTIVATE).ok();
-                        let _ = ShowWindow(host_hwnd, SW_SHOW);
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
-                        eprintln!("[rdp] cover hidden — session connected at ({tsx},{tsy})");
-                    }
-                    // States 0 (NOT_CONNECTED) or 3 (DISCONNECTING) after being connected.
-                    // Debounce: require 3 consecutive polls (~300 ms) before breaking to
-                    // avoid exiting on transient state transitions immediately after login.
-                    Ok(0) | Ok(3) if rdp_connected => {
-                        disconnect_polls += 1;
-                        eprintln!("[rdp] ConnectionState=0/3 while connected (poll {disconnect_polls}/3)");
-                        if disconnect_polls >= 3 {
-                            eprintln!("[rdp] disconnect confirmed — exiting session loop");
-                            rdp_connected = false;
-                            show_pending  = false;
-                            if !cover_hwnd.is_invalid() { ShowWindow(cover_hwnd, SW_HIDE).ok(); }
-                            let _ = ShowWindow(host_hwnd, SW_HIDE);
-                            break 'outer;
-                        }
-                    }
-                    // State 0 when we never connected: connection attempt failed
-                    // (event sink may not have fired DISPID 4). Exit so the tab closes.
-                    Ok(0) if !rdp_connected && !ever_connected => {
-                        eprintln!("[rdp] ConnectionState=0 without login — connection failed");
-                        show_pending = false;
-                        if !cover_hwnd.is_invalid() { ShowWindow(cover_hwnd, SW_HIDE).ok(); }
-                        break 'outer;
-                    }
-                    Ok(_) => { dispatch_errors = 0; disconnect_polls = 0; }
-                    Err(_) if rdp_connected => {
-                        // COM error while connected: count consecutive failures.
-                        dispatch_errors += 1;
-                        if dispatch_errors >= 3 {
-                            rdp_connected = false;
-                            show_pending  = false;
-                            let _ = ShowWindow(host_hwnd, SW_HIDE);
-                            break 'outer;
-                        }
-                    }
-                    Err(_) => {}
-                }
-
-                let mut cur = RECT::default();
-                GetWindowRect(parent, &mut cur).ok();
-                if cur.left != last_parent_rect.left || cur.top != last_parent_rect.top {
-                    let (sx, sy) = canvas_to_screen(parent, rel_x, rel_y);
-                    SetWindowPos(host_hwnd, None, sx, sy, 0, 0,
-                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE).ok();
-                    if !cover_hwnd.is_invalid() {
-                        SetWindowPos(cover_hwnd, None, sx, sy, 0, 0,
-                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE).ok();
-                    }
-                    last_parent_rect = cur;
-                }
+            // Follow parent window movement
+            let mut cur = RECT::default();
+            let _ = GetWindowRect(parent, &mut cur);
+            if cur.left != last_parent_rect.left || cur.top != last_parent_rect.top {
+                let (sx, sy) = canvas_to_screen(parent, rel_x, rel_y);
+                let _ = SetWindowPos(host_hwnd, None, sx, sy, 0, 0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                last_parent_rect = cur;
             }
 
             std::thread::sleep(Duration::from_millis(16));
         }
 
-        // Remove the CBT hook now that the session is ending.
-        let hook_raw = RDP_AUTO_DISMISS_HOOK.swap(0, Ordering::Relaxed);
-        if hook_raw != 0 {
-            let _ = UnhookWindowsHookEx(HHOOK(hook_raw as *mut std::ffi::c_void));
-        }
+        // Cleanup
+        let _ = child.kill();
+        DestroyWindow(host_hwnd).ok();
+    }
 
-        // Signal the cross-thread watcher to stop and clear per-session state.
-        WATCHER_HOST_HWND.store(0, Ordering::Relaxed);
-        WATCHER_SESSION_LIVE.store(false, Ordering::Relaxed);
-        watcher_done.store(true, Ordering::Relaxed);
-
-        // Unregister all COM event sink registrations before releasing.
-        for (cp, cookie) in &cp_registrations {
-            let _ = cp.Unadvise(*cookie);
-        }
-        drop(cp_registrations);
-
-        // Notify the frontend regardless of WHY the loop exited (user log-off,
-        // WM_QUIT from mstscax, parent window destroyed, explicit Disconnect cmd,
-        // or failed connection attempt). The listener in RdpPane is already
-        // unregistered if the tab was manually closed, so this is a no-op then.
+    if ever_connected {
         params.app.emit(
             &format!("rdp-disconnected-{}", params.session_id),
             (),
         ).ok();
-
-        let _ = ole_obj.SetClientSite(None);
-        if !cover_hwnd.is_invalid() { DestroyWindow(cover_hwnd).ok(); }
-        DestroyWindow(host_hwnd).ok();
-        drop(disp);
-        drop(ole_obj);
-        drop(site);
-        drop(frame);
-        CoUninitialize();
     }
+
+    session.finished.store(true, Ordering::SeqCst);
+}
+
+// ── Shared atomics (between host thread and public API) ───────────────────────
+
+struct SessionShared {
+    connected:   Arc<AtomicBool>,
+    finished:    Arc<AtomicBool>,
+    stop:        Arc<AtomicBool>,
+    host_hwnd:   Arc<AtomicIsize>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -2072,9 +305,24 @@ pub fn launch(
     width: i32,
     height: i32,
     admin_mode: bool,
-    rdp_security: &str,
-    color_depth: i32,
 ) -> Result<WindowsRdpSession, String> {
+    let shared = Arc::new(SessionShared {
+        connected: Arc::new(AtomicBool::new(false)),
+        finished:  Arc::new(AtomicBool::new(false)),
+        stop:      Arc::new(AtomicBool::new(false)),
+        host_hwnd: Arc::new(AtomicIsize::new(0)),
+    });
+
+    let session = WindowsRdpSession {
+        stop:        Arc::clone(&shared.stop),
+        host_hwnd:   Arc::clone(&shared.host_hwnd),
+        parent_hwnd: Arc::new(AtomicIsize::new(parent_hwnd.0 as isize)),
+        rel_x:       Arc::new(AtomicIsize::new(x as isize)),
+        rel_y:       Arc::new(AtomicIsize::new(y as isize)),
+        width:       Arc::new(AtomicIsize::new(width as isize)),
+        height:      Arc::new(AtomicIsize::new(height as isize)),
+    };
+
     let params = LaunchParams {
         app,
         session_id: session_id.to_string(),
@@ -2086,32 +334,43 @@ pub fn launch(
         password: password.map(str::to_string),
         x, y, width, height,
         admin_mode,
-        rdp_security: rdp_security.to_string(),
-        color_depth,
     };
-    let (result_tx, result_rx) = mpsc::sync_channel::<Result<mpsc::SyncSender<ComCmd>, String>>(1);
-    std::thread::spawn(move || sta_thread(params, result_tx));
-    let tx = result_rx
-        .recv_timeout(Duration::from_secs(20))
-        .map_err(|_| "El hilo COM-RDP no respondió a tiempo".to_string())??;
-    Ok(WindowsRdpSession { tx })
+
+    let shared_thread = Arc::clone(&shared);
+    std::thread::spawn(move || host_thread(params, shared_thread));
+
+    Ok(session)
 }
 
 pub fn reposition(session: &WindowsRdpSession, x: i32, y: i32, width: i32, height: i32) {
-    let _ = session.tx.try_send(ComCmd::Reposition { x, y, width, height });
+    session.rel_x.store(x as isize, Ordering::Relaxed);
+    session.rel_y.store(y as isize, Ordering::Relaxed);
+    session.width.store(width as isize, Ordering::Relaxed);
+    session.height.store(height as isize, Ordering::Relaxed);
+
+    let hwnd_raw = session.host_hwnd.load(Ordering::Relaxed);
+    if hwnd_raw == 0 { return; }
+    let host = HWND(hwnd_raw as *mut _);
+    let parent = HWND(session.parent_hwnd.load(Ordering::Relaxed) as *mut _);
+    let (sx, sy) = canvas_to_screen(parent, x, y);
+    unsafe {
+        let _ = SetWindowPos(host, None, sx, sy, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 }
 
 pub fn show(session: &WindowsRdpSession) {
-    let _ = session.tx.try_send(ComCmd::Show);
+    let hwnd_raw = session.host_hwnd.load(Ordering::Relaxed);
+    if hwnd_raw == 0 { return; }
+    unsafe { ShowWindow(HWND(hwnd_raw as *mut _), SW_SHOW); }
 }
 
 pub fn hide(session: &WindowsRdpSession) {
-    let _ = session.tx.try_send(ComCmd::Hide);
+    let hwnd_raw = session.host_hwnd.load(Ordering::Relaxed);
+    if hwnd_raw == 0 { return; }
+    unsafe { ShowWindow(HWND(hwnd_raw as *mut _), SW_HIDE); }
 }
 
 pub fn reparent(session: &WindowsRdpSession, new_parent: HWND, rel_x: i32, rel_y: i32, width: i32, height: i32) {
-    let _ = session.tx.try_send(ComCmd::Reparent {
-        new_parent: new_parent.0 as isize,
-        rel_x, rel_y, width, height,
-    });
+    session.parent_hwnd.store(new_parent.0 as isize, Ordering::Relaxed);
+    reposition(session, rel_x, rel_y, width, height);
 }

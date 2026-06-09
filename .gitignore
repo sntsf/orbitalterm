@@ -8,10 +8,9 @@ src-tauri/target/
 src-tauri/gen/
 
 # C# RDP helper build artifacts
-csharp-rdp-host/interop/
-csharp-rdp-host/*.exe
-csharp-rdp-host/*.dll
+csharp-rdp-host/OrbitalRdpHost.exe
 csharp-rdp-host/*.pdb
+csharp-rdp-host/interop/
 
 # Misc
 .DS_Store
