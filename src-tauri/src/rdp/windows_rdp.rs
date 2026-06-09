@@ -19,6 +19,7 @@ use std::time::Duration;
 use tauri::Emitter;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -71,6 +72,13 @@ unsafe extern "system" fn host_wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_DESTROY => { PostQuitMessage(0); LRESULT(0) }
+        WM_SETFOCUS => {
+            // Cascade focus to the WinForms/mstscax child so keyboard input reaches the RDP session.
+            if let Ok(child) = GetWindow(hwnd, GW_CHILD) {
+                if !child.0.is_null() { let _ = SetFocus(Some(child)); }
+            }
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
 }
@@ -290,6 +298,10 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
                 cur_visible = wants;
                 if wants {
                     ShowWindow(host_hwnd, SW_SHOW);
+                    // Move keyboard focus to the WinForms child so the user can type immediately.
+                    if let Ok(child) = GetWindow(host_hwnd, GW_CHILD) {
+                        if !child.0.is_null() { let _ = SetFocus(Some(child)); }
+                    }
                 } else {
                     ShowWindow(host_hwnd, SW_HIDE);
                 }
