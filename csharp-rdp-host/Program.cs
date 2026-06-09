@@ -170,10 +170,9 @@ namespace OrbitalRdpHost
                 BackColor = Color.Black,
             };
 
-            string progId;
-            string clsid = PickClsid(out progId);
+            string clsid = PickClsid();
             if (clsid == null) { Emit("ERROR:no MsRdpClient control could be created"); return 3; }
-            Emit("INFO:control=" + progId + " clsid=" + clsid);
+            Emit("INFO:using clsid=" + clsid);
             _rdpAx = new RdpAxControl(clsid) { Dock = DockStyle.Fill };
             _form.Controls.Add(_rdpAx);
 
@@ -199,32 +198,82 @@ namespace OrbitalRdpHost
             return 0;
         }
 
-        // Resolve a creatable MsRdpClient coclass via ProgID. mRemoteNG uses v9,
-        // so prefer it; ORB_VER=9|10|11 forces a specific version for testing.
-        static string PickClsid(out string progId)
+        // The NotSafeForScripting coclasses have NO ProgIDs — only CLSIDs. So we
+        // enumerate the registry for every COM class backed by mstscax.dll, print
+        // them (CLSID + friendly name), and pick one. ORB_CLSID forces a specific
+        // CLSID so we can test each control version (mRemoteNG hosts v9).
+        static string PickClsid()
         {
-            string forced = Environment.GetEnvironmentVariable("ORB_VER");
-            string[] order = string.IsNullOrEmpty(forced)
-                ? new[] { "9", "10", "11", "" }
-                : new[] { forced };
-
-            foreach (var v in order)
+            string forced = Environment.GetEnvironmentVariable("ORB_CLSID");
+            if (!string.IsNullOrEmpty(forced))
             {
-                string pid = "MsRdpClient" + v + "NotSafeForScripting";
-                if (v == "") pid = "MsRdpClientNotSafeForScripting";
-                Type t = Type.GetTypeFromProgID(pid, false);
-                if (t == null) continue;
+                forced = forced.Trim('{', '}');
+                Emit("INFO:ORB_CLSID forced=" + forced);
+            }
+
+            var found = EnumerateMstscaxClasses();   // (clsid -> name)
+            foreach (var kv in found)
+                Emit("INFO:available clsid=" + kv.Key + " name=\"" + kv.Value + "\"");
+
+            // Build the try-order: forced first, then any enumerated, then the
+            // known-good v10 CLSID as a final fallback.
+            var order = new System.Collections.Generic.List<string>();
+            if (!string.IsNullOrEmpty(forced)) order.Add(forced);
+            // Prefer the highest-named version that is NOT v10/v11 first? We don't
+            // trust the name->version mapping, so just try all enumerated, then v10.
+            foreach (var kv in found) if (!order.Contains(kv.Key)) order.Add(kv.Key);
+            const string V10 = "c0efa91a-eeb7-41c7-97fa-f0ed645efb24";
+            if (!order.Contains(V10)) order.Add(V10);
+
+            foreach (var c in order)
+            {
                 try
                 {
+                    Type t = Type.GetTypeFromCLSID(new Guid(c), false);
+                    if (t == null) continue;
                     object o = Activator.CreateInstance(t);
                     if (o != null) Marshal.ReleaseComObject(o);
-                    progId = pid;
-                    return t.GUID.ToString();
+                    return c;
                 }
-                catch { /* try next */ }
+                catch (Exception ex) { Emit("WARN:create " + c + " failed: " + ex.Message); }
             }
-            progId = null;
             return null;
+        }
+
+        // Scan HKCR\CLSID for classes whose InprocServer32 is mstscax.dll.
+        static System.Collections.Generic.Dictionary<string, string> EnumerateMstscaxClasses()
+        {
+            var result = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using (var root = Registry.ClassesRoot.OpenSubKey("CLSID"))
+                {
+                    if (root == null) return result;
+                    foreach (var sub in root.GetSubKeyNames())
+                    {
+                        if (sub.Length < 2 || sub[0] != '{') continue;
+                        try
+                        {
+                            using (var k = root.OpenSubKey(sub))
+                            {
+                                if (k == null) continue;
+                                using (var ip = k.OpenSubKey("InprocServer32"))
+                                {
+                                    if (ip == null) continue;
+                                    string dll = ip.GetValue(null) as string;
+                                    if (string.IsNullOrEmpty(dll)) continue;
+                                    if (dll.IndexOf("mstscax.dll", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                                    string name = k.GetValue(null) as string ?? "";
+                                    result[sub.Trim('{', '}')] = name;
+                                }
+                            }
+                        }
+                        catch { /* skip unreadable keys */ }
+                    }
+                }
+            }
+            catch (Exception ex) { Emit("WARN:enum " + ex.Message); }
+            return result;
         }
 
         static void SuppressRedirectionWarning(string server)
