@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::Emitter;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -72,10 +72,14 @@ unsafe extern "system" fn host_wnd_proc(
 // ── Screen positioning ────────────────────────────────────────────────────────
 
 fn canvas_to_screen(parent: HWND, rel_x: i32, rel_y: i32) -> (i32, i32) {
+    // getBoundingClientRect() in the browser returns coordinates relative to the
+    // WebView2 client area. ClientToScreen converts client-area coords to screen
+    // coords correctly, unlike GetWindowRect which includes the non-client area
+    // (title bar, borders) causing an offset that covers the tab bar.
     unsafe {
-        let mut r = RECT::default();
-        let _ = GetWindowRect(parent, &mut r);
-        (r.left + rel_x, r.top + rel_y)
+        let mut pt = POINT { x: rel_x, y: rel_y };
+        let _ = ClientToScreen(parent, &mut pt);
+        (pt.x, pt.y)
     }
 }
 
