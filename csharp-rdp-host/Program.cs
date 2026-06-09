@@ -51,6 +51,35 @@ public sealed class RdpAxControl : AxHost
 {
     public RdpAxControl(string clsidNoBraces) : base(clsidNoBraces) { }
     public object GetOcxObject() { return GetOcx(); }
+
+    // Forward WM_SETFOCUS to the underlying mstscax window so keyboard works
+    // when focus is delegated to this AxHost from outside (e.g. Rust SetFocus).
+    protected override void WndProc(ref Message m)
+    {
+        base.WndProc(ref m);
+        if (m.Msg == 0x0007 /* WM_SETFOCUS */)
+            Focus();
+    }
+}
+
+// ── Click-to-focus message filter ─────────────────────────────────────────────
+// Any mouse click anywhere in this process routes focus back to the RDP control.
+// Required because the mstscax.dll window, after cross-process SetParent, may
+// not call SetFocus itself in response to WM_LBUTTONDOWN.
+sealed class ClickFocusFilter : IMessageFilter
+{
+    readonly Control _target;
+    public ClickFocusFilter(Control target) { _target = target; }
+
+    public bool PreFilterMessage(ref Message m)
+    {
+        if ((m.Msg == 0x0201 /* WM_LBUTTONDOWN */ || m.Msg == 0x0021 /* WM_MOUSEACTIVATE */)
+            && _target != null && _target.IsHandleCreated)
+        {
+            _target.Focus();
+        }
+        return false; // never consume — just react
+    }
 }
 
 // ── COM event sink ────────────────────────────────────────────────────────────
@@ -312,6 +341,11 @@ public sealed class RdpHostForm : Form
             Controls.Add(_ax);
             _ax.CreateControl();
 
+            // Wire focus debugging and click-to-focus filter.
+            _ax.GotFocus  += (s, ev) => Emit("DBG:AxHost.GotFocus");
+            _ax.LostFocus += (s, ev) => Emit("DBG:AxHost.LostFocus");
+            Application.AddMessageFilter(new ClickFocusFilter(_ax));
+
             _rdp = _ax.GetOcxObject();
             if (_rdp == null) throw new Exception("GetOcx() returned null");
 
@@ -376,6 +410,11 @@ public sealed class RdpHostForm : Form
     void HandleConnected()
     {
         Emit("STATE:connected");
+        // Route keyboard focus to the RDP control once the session is live.
+        if (InvokeRequired)
+            BeginInvoke(new Action(() => { if (_ax != null) { Emit("DBG:connected→_ax.Focus"); _ax.Focus(); } }));
+        else
+            { if (_ax != null) { Emit("DBG:connected→_ax.Focus"); _ax.Focus(); } }
     }
 
     void HandleDisconnected(int reason)
@@ -385,6 +424,17 @@ public sealed class RdpHostForm : Form
             BeginInvoke(new Action(Close));
         else
             Close();
+    }
+
+    // Cascade WM_SETFOCUS down to the RDP ActiveX control so the user can type.
+    protected override void WndProc(ref Message m)
+    {
+        base.WndProc(ref m);
+        if (m.Msg == 0x0007 /* WM_SETFOCUS */ && _ax != null)
+        {
+            Emit("DBG:Form.WM_SETFOCUS→_ax.Focus");
+            _ax.Focus();
+        }
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
