@@ -441,15 +441,12 @@ export function RdpPane({ tab }: RdpPaneProps) {
     if (!nativeWindow) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    let unlisten: UnlistenFn | null = null;
+    const unlistens: UnlistenFn[] = [];
+
+    // Normal session end (user logged off after a real connection)
     listen(`rdp-disconnected-${sid}`, () => {
       const s = sessionIdRef.current;
-      if (s) {
-        disconnectRdp(s).catch(() => {});
-        sessionIdRef.current = null;
-      }
-      // Show a "session ended" state in the tab instead of silently closing it.
-      // This keeps the Reconnect button visible and also fires the notification.
+      if (s) { disconnectRdp(s).catch(() => {}); sessionIdRef.current = null; }
       setEmbedded(false);
       setNativeWindow(false);
       setStatus("error");
@@ -462,8 +459,28 @@ export function RdpPane({ tab }: RdpPaneProps) {
         host: conn?.host ?? "",
         raw: "SESSION_ENDED",
       });
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
+    }).then((fn) => unlistens.push(fn));
+
+    // Connection failed before ever connecting (server off, port closed, etc.)
+    listen<string>(`rdp-error-${sid}`, (e) => {
+      const s = sessionIdRef.current;
+      if (s) { disconnectRdp(s).catch(() => {}); sessionIdRef.current = null; }
+      const raw = e.payload || "connection timed out";
+      setEmbedded(false);
+      setNativeWindow(false);
+      setStatus("error");
+      setErrorMsg(raw);
+      setTabStatus(tab.id, "error");
+      const conn = getConnectionById(tab.connection_id);
+      useNotifStore.getState().add({
+        connName: tab.connection_name,
+        connType: "rdp",
+        host: conn?.host ?? "",
+        raw,
+      });
+    }).then((fn) => unlistens.push(fn));
+
+    return () => { unlistens.forEach((fn) => fn()); };
   }, [nativeWindow]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Windows native window: transparent placeholder that drives mstsc position

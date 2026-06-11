@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, X, Bell } from "lucide-react";
 import { useNotifStore } from "../../store/useNotifStore";
 import { useI18nStore } from "../../store/useI18nStore";
-import { friendlyConnError } from "../../lib/connErrors";
+import { friendlyConnErrorShort } from "../../lib/connErrors";
 
 const AUTO_HIDE_MS = 20_000;
 
@@ -36,7 +36,7 @@ export function NotificationOverlay() {
   if (notifs.length === 0) return null;
 
   const latest = notifs[0];
-  const friendly = friendlyConnError(latest.raw, lang, latest.connType);
+  const friendly = friendlyConnErrorShort(latest.raw, lang, latest.connType);
   const tabLabel = lang === "es" ? "Notificaciones" : "Notifications";
   const timeStr = new Date(latest.ts).toLocaleTimeString(
     lang === "es" ? "es-ES" : "en-US",

@@ -244,9 +244,12 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
         let _ = writeln!(stdin, "{pw}");
     }
 
-    // Background thread: read STATE: lines from helper stdout
+    // Background thread: read STATE: lines from helper stdout.
+    // ERROR: lines are captured and forwarded to the frontend as rdp-error events.
     let connected  = Arc::clone(&session.connected);
     let finished   = Arc::clone(&session.finished);
+    let last_error: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+    let last_error_clone = Arc::clone(&last_error);
     if let Some(stdout) = child.stdout.take() {
         std::thread::spawn(move || {
             use std::io::{BufRead, BufReader};
@@ -255,6 +258,11 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
                     connected.store(true, Ordering::SeqCst);
                 }
                 if line.contains("STATE:disconnected") || line.starts_with("ERROR:") {
+                    if line.starts_with("ERROR:") {
+                        if let Ok(mut e) = last_error_clone.lock() {
+                            *e = line[6..].trim().to_string();
+                        }
+                    }
                     finished.store(true, Ordering::SeqCst);
                 }
             }
@@ -348,9 +356,23 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
     }
 
     if ever_connected {
+        // Clean logoff or unexpected disconnect after a real session.
         params.app.emit(
             &format!("rdp-disconnected-{}", params.session_id),
             (),
+        ).ok();
+    } else {
+        // The session ended before connecting (server off, port closed, auth failed, etc.).
+        // Emit rdp-error so the frontend can show a specific error and notification.
+        let raw_err = last_error.lock().map(|e| e.clone()).unwrap_or_default();
+        let err_msg = if raw_err.is_empty() {
+            "connection timed out".to_string()
+        } else {
+            raw_err
+        };
+        params.app.emit(
+            &format!("rdp-error-{}", params.session_id),
+            err_msg,
         ).ok();
     }
 

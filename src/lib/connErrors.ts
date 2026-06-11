@@ -17,37 +17,39 @@ export function friendlyConnError(raw: string, lang: "es" | "en", connType?: str
     ) {
       if (connType === "rdp") {
         return (
-          "No se puede conectar al equipo remoto por una de las siguientes razones:\n\n" +
-          "  1) El acceso remoto al servidor no está habilitado\n" +
-          "  2) El equipo remoto está desactivado\n" +
-          "  3) El equipo remoto no está disponible en la red\n\n" +
-          "Asegúrate de que el equipo esté encendido y conectado a la red,\n" +
-          "y de que el acceso remoto esté habilitado."
+          "No se puede conectar al equipo remoto.\n\n" +
+          "Posibles causas:\n" +
+          "  1) El equipo remoto está apagado o no disponible en la red\n" +
+          "  2) El acceso remoto (RDP) no está habilitado en el servidor\n" +
+          "  3) El puerto 3389 está bloqueado por un firewall\n\n" +
+          "Asegúrate de que el equipo esté encendido, conectado a la red\n" +
+          "y con el acceso remoto habilitado."
         );
       }
       if (connType === "vnc") {
         return (
-          "No se puede conectar al servidor VNC:\n\n" +
-          "  1) El servidor VNC no está en ejecución\n" +
-          "  2) El equipo remoto está apagado o no disponible en la red\n" +
-          "  3) El puerto VNC está bloqueado por un firewall\n\n" +
-          "Verifica que el servidor VNC esté activo y el puerto abierto."
+          "No se puede conectar al servidor VNC.\n\n" +
+          "Posibles causas:\n" +
+          "  1) El equipo remoto está apagado o no disponible en la red\n" +
+          "  2) El servidor VNC no está en ejecución\n" +
+          "  3) El puerto VNC está bloqueado por un firewall"
         );
       }
       if (connType === "ssh" || connType === "sftp") {
         return (
-          "No se puede conectar al servidor SSH:\n\n" +
-          "  1) El servicio SSH no está en ejecución (sshd detenido)\n" +
-          "  2) El equipo remoto está apagado o no disponible en la red\n" +
-          "  3) El puerto SSH está bloqueado por un firewall\n\n" +
-          "Verifica que el servidor esté encendido y el servicio SSH activo."
+          "No se puede conectar al servidor SSH.\n\n" +
+          "Posibles causas:\n" +
+          "  1) El equipo remoto está apagado o no disponible en la red\n" +
+          "  2) El puerto SSH está bloqueado por un firewall\n" +
+          "  3) El servicio SSH no está en ejecución (sshd detenido)"
         );
       }
       if (connType === "ftp") {
         return (
-          "No se puede conectar al servidor FTP:\n\n" +
-          "  1) El servidor FTP no está en ejecución\n" +
-          "  2) El equipo remoto está apagado o no disponible en la red\n" +
+          "No se puede conectar al servidor FTP.\n\n" +
+          "Posibles causas:\n" +
+          "  1) El equipo remoto está apagado o no disponible en la red\n" +
+          "  2) El servicio FTP no está en ejecución\n" +
           "  3) El puerto FTP está bloqueado por un firewall"
         );
       }
@@ -58,18 +60,20 @@ export function friendlyConnError(raw: string, lang: "es" | "en", connType?: str
     if (r.includes("connection refused")) {
       if (connType === "rdp") {
         return (
-          "Conexión rechazada en el puerto RDP:\n\n" +
-          "  1) El Escritorio Remoto no está habilitado en el servidor\n" +
-          "  2) El puerto 3389 está bloqueado por un firewall\n" +
-          "  3) El servicio RDP no está en ejecución\n\n" +
-          "Verifica la configuración de Escritorio Remoto en el servidor."
+          "Conexión rechazada en el puerto RDP.\n\n" +
+          "Posibles causas:\n" +
+          "  1) El equipo remoto está apagado o sin red\n" +
+          "  2) El Escritorio Remoto no está habilitado en el servidor\n" +
+          "  3) El puerto 3389 está bloqueado por un firewall"
         );
       }
       if (connType === "ssh" || connType === "sftp") {
         return (
-          "Conexión rechazada:\n\n" +
-          "  1) El servicio SSH no está en ejecución en ese puerto\n" +
-          "  2) El firewall está bloqueando la conexión"
+          "Conexión rechazada en el puerto SSH.\n\n" +
+          "Posibles causas:\n" +
+          "  1) El equipo remoto está apagado o sin red\n" +
+          "  2) El servicio SSH no está en ejecución (sshd detenido)\n" +
+          "  3) El puerto SSH está bloqueado por un firewall"
         );
       }
       return "Conexión rechazada — el puerto está cerrado o el servicio no está activo en el servidor.";
@@ -138,37 +142,39 @@ export function friendlyConnError(raw: string, lang: "es" | "en", connType?: str
   ) {
     if (connType === "rdp") {
       return (
-        "Cannot connect to the remote computer for one of the following reasons:\n\n" +
-        "  1) Remote access to the server is not enabled\n" +
-        "  2) The remote computer is turned off\n" +
-        "  3) The remote computer is not available on the network\n\n" +
-        "Make sure the computer is on and connected to the network,\n" +
+        "Cannot connect to the remote computer.\n\n" +
+        "Possible reasons:\n" +
+        "  1) The remote computer is off or not available on the network\n" +
+        "  2) Remote Desktop (RDP) is not enabled on the server\n" +
+        "  3) Port 3389 is blocked by a firewall\n\n" +
+        "Make sure the computer is on, connected to the network,\n" +
         "and that remote access is enabled."
       );
     }
     if (connType === "vnc") {
       return (
-        "Cannot connect to the VNC server:\n\n" +
-        "  1) The VNC server is not running\n" +
-        "  2) The remote computer is off or not reachable on the network\n" +
-        "  3) The VNC port is blocked by a firewall\n\n" +
-        "Check that the VNC server is running and the port is open."
+        "Cannot connect to the VNC server.\n\n" +
+        "Possible reasons:\n" +
+        "  1) The remote computer is off or not available on the network\n" +
+        "  2) The VNC server is not running\n" +
+        "  3) The VNC port is blocked by a firewall"
       );
     }
     if (connType === "ssh" || connType === "sftp") {
       return (
-        "Cannot connect to the SSH server:\n\n" +
-        "  1) The SSH service is not running (sshd stopped)\n" +
-        "  2) The remote computer is off or not available on the network\n" +
-        "  3) The SSH port is blocked by a firewall\n\n" +
-        "Check that the server is on and the SSH service is active."
+        "Cannot connect to the SSH server.\n\n" +
+        "Possible reasons:\n" +
+        "  1) The remote computer is off or not available on the network\n" +
+        "  2) The SSH port is blocked by a firewall\n" +
+        "  3) The SSH service is not running (sshd stopped)"
       );
     }
     if (connType === "ftp") {
       return (
-        "Cannot connect to the FTP server:\n\n" +
-        "  1) The FTP server is not running\n" +
-        "  2) The remote computer is off or not available on the network\n" +
+        "Cannot connect to the FTP server.\n\n" +
+        "Possible reasons:\n" +
+        "  1) The remote computer is off or not available on the network\n" +
+        "  2) The FTP server is not running\n" +
         "  3) The FTP port is blocked by a firewall"
       );
     }
@@ -178,18 +184,20 @@ export function friendlyConnError(raw: string, lang: "es" | "en", connType?: str
   if (r.includes("connection refused")) {
     if (connType === "rdp") {
       return (
-        "Connection refused on the RDP port:\n\n" +
-        "  1) Remote Desktop is not enabled on the server\n" +
-        "  2) Port 3389 is blocked by a firewall\n" +
-        "  3) The RDP service is not running\n\n" +
-        "Check the Remote Desktop settings on the server."
+        "Connection refused on the RDP port.\n\n" +
+        "Possible reasons:\n" +
+        "  1) The remote computer is off or unreachable on the network\n" +
+        "  2) Remote Desktop is not enabled on the server\n" +
+        "  3) Port 3389 is blocked by a firewall"
       );
     }
     if (connType === "ssh" || connType === "sftp") {
       return (
-        "Connection refused:\n\n" +
-        "  1) The SSH service is not running on that port\n" +
-        "  2) A firewall is blocking the connection"
+        "Connection refused on the SSH port.\n\n" +
+        "Possible reasons:\n" +
+        "  1) The remote computer is off or unreachable on the network\n" +
+        "  2) The SSH service is not running (sshd stopped)\n" +
+        "  3) The SSH port is blocked by a firewall"
       );
     }
     return "Connection refused — the port is closed or the service is not running on the server.";
@@ -241,4 +249,9 @@ export function friendlyConnError(raw: string, lang: "es" | "en", connType?: str
     return "The session expired or was closed. Reconnect to continue.";
 
   return raw;
+}
+
+/** Returns just the first line — suitable for single-line notification toasts. */
+export function friendlyConnErrorShort(raw: string, lang: "es" | "en", connType?: string): string {
+  return friendlyConnError(raw, lang, connType).split("\n")[0];
 }
