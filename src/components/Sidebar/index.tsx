@@ -89,6 +89,11 @@ export function Sidebar() {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
 
+  // Pointer-based DnD refs (avoid stale closures in global listeners)
+  const pDragRef = useRef<{ connId: string; connName: string; startX: number; startY: number; active: boolean } | null>(null);
+  const pDropRef = useRef<string | null>(null);
+  const [ghostPos, setGhostPos] = useState<{ x: number; y: number } | null>(null);
+
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [renameFolderName, setRenameFolderName] = useState("");
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -287,7 +292,87 @@ export function Sidebar() {
     setNewGroupName("");
   };
 
-  const handleDragEnd = () => { setDragId(null); setDropTarget(null); };
+  const handleDragEnd = () => {
+    pDragRef.current = null;
+    pDropRef.current = null;
+    setDragId(null);
+    setDropTarget(null);
+    setGhostPos(null);
+  };
+
+  const DRAG_THRESHOLD = 6;
+
+  // Called when a ConnItem receives pointerdown — arms the pointer-based drag.
+  // We use global pointermove/pointerup instead of HTML5 DnD events because
+  // WebView2 on Windows does not reliably fire dragstart/dragover/drop.
+  const startPointerDrag = (conn: Connection, startX: number, startY: number) => {
+    pDragRef.current = { connId: conn.id, connName: conn.name, startX, startY, active: false };
+    pDropRef.current = null;
+  };
+
+  // Register global listeners as soon as any potential drag is armed.
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      const d = pDragRef.current;
+      if (!d) return;
+
+      // Activate drag only after the pointer has moved beyond the threshold.
+      if (!d.active) {
+        const dist = Math.hypot(e.clientX - d.startX, e.clientY - d.startY);
+        if (dist < DRAG_THRESHOLD) return;
+        d.active = true;
+        setDragId(d.connId);
+      }
+
+      setGhostPos({ x: e.clientX, y: e.clientY });
+
+      // Walk elementsFromPoint to find the first matching drop target.
+      const hits = document.elementsFromPoint(e.clientX, e.clientY);
+      let target: string | null = null;
+      for (const el of hits) {
+        const h = el as HTMLElement;
+        if (h.dataset.folderId) { target = `folder:${h.dataset.folderId}`; break; }
+        if (h.dataset.groupId)  { target = `group:${h.dataset.groupId}`;   break; }
+        if (h.dataset.connId && h.dataset.connId !== d.connId) {
+          target = h.dataset.connId; break;
+        }
+      }
+      pDropRef.current = target;
+      setDropTarget(target);
+    };
+
+    const onUp = async () => {
+      const d  = pDragRef.current;
+      const dt = pDropRef.current;
+      pDragRef.current = null;
+
+      if (!d?.active) {
+        // Threshold never reached — treat as a normal click (no drag cleanup needed).
+        return;
+      }
+
+      if (dt) {
+        if (dt.startsWith("folder:")) {
+          await handleDropOnFolder(dt.slice(7));
+        } else if (dt.startsWith("group:")) {
+          await handleDropOnFolder(null, dt.slice(6));
+        } else {
+          const target = connections.find((c) => c.id === dt);
+          if (target) await handleDropOnConn(target);
+        }
+      } else {
+        handleDragEnd();
+      }
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleDropOnConn = async (target: Connection) => {
     if (!dragId || dragId === target.id) { handleDragEnd(); return; }
@@ -469,16 +554,22 @@ export function Sidebar() {
     folderInputRef,
     dragId,
     dropTarget,
-    onDragStart: setDragId,
-    onDragEnd: handleDragEnd,
-    onDropTarget: setDropTarget,
-    onDropOnConn: handleDropOnConn,
-    onDropOnFolder: handleDropOnFolder,
+    onConnPointerDown: (conn: Connection, x: number, y: number) => startPointerDrag(conn, x, y),
     searchMatchIds,
     searchFocusId,
   };
 
   return (
+    <>
+    {/* Drag ghost — follows the pointer while dragging a connection */}
+    {ghostPos && pDragRef.current && (
+      <div
+        className="fixed z-[9999] pointer-events-none px-2 py-0.5 rounded text-[12px] text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] shadow-xl opacity-90 max-w-[180px] truncate"
+        style={{ left: ghostPos.x + 14, top: ghostPos.y - 10 }}
+      >
+        {pDragRef.current.connName}
+      </div>
+    )}
     <aside
       className="flex flex-col h-full bg-[var(--color-bg-surface)] border-r border-[var(--color-border)] shrink-0 relative"
       style={{ width: sidebarWidth }}
@@ -609,11 +700,9 @@ export function Sidebar() {
                 </div>
               ) : (
                 <button
+                  data-group-id={group.id}
                   onClick={() => { toggleGroupExpanded(group.id); setSidebarHint(buildGroupHint(group, lang, connections)); }}
                   onContextMenu={(e) => groupMenu(e, group)}
-                  onDragOver={(e) => { e.preventDefault(); setDropTarget(`group:${group.id}`); }}
-                  onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropTarget(null); }}
-                  onDrop={(e) => { e.preventDefault(); handleDropOnFolder(null, group.id); }}
                   className={[
                     "flex items-center gap-1.5 w-full px-2 py-1 transition-colors",
                     isGroupDropTarget
@@ -688,10 +777,7 @@ export function Sidebar() {
                             onHint={() => setSidebarHint(buildConnHint(conn, lang))}
                             dragging={dragId === conn.id}
                             isDropTarget={dropTarget === conn.id}
-                            onDragStart={() => setDragId(conn.id)}
-                            onDragEnd={handleDragEnd}
-                            onDragOver={() => setDropTarget(conn.id)}
-                            onDrop={() => handleDropOnConn(conn)}
+                            onPointerDragStart={(x, y) => startPointerDrag(conn, x, y)}
                             isSearchMatch={searchMatchIds.has(conn.id)}
                             isSearchFocus={searchFocusId === conn.id}
                           />
@@ -741,6 +827,7 @@ export function Sidebar() {
 
       {menu && <ContextMenu {...menu} onClose={closeMenu} />}
     </aside>
+    </>
   );
 }
 
@@ -785,11 +872,7 @@ interface SharedProps {
   folderInputRef: React.RefObject<HTMLInputElement>;
   dragId: string | null;
   dropTarget: string | null;
-  onDragStart: (id: string) => void;
-  onDragEnd: () => void;
-  onDropTarget: (id: string | null) => void;
-  onDropOnConn: (c: Connection) => void;
-  onDropOnFolder: (folderId: string | null, groupId?: string) => void;
+  onConnPointerDown: (conn: Connection, x: number, y: number) => void;
   searchMatchIds: Set<string>;
   searchFocusId: string | null;
 }
@@ -806,7 +889,7 @@ function FolderItem({
     renamingFolderId, renameFolderName, onRenameChange, onRenameConfirm, onRenameCancel, renameInputRef,
     creatingFolder, newFolderParentId, newFolderName,
     onSubfolderNameChange, onSubfolderConfirm, onSubfolderCancel, folderInputRef,
-    dragId, dropTarget, onDragStart, onDragEnd, onDropTarget, onDropOnConn, onDropOnFolder,
+    dragId, dropTarget, onConnPointerDown,
     searchMatchIds, searchFocusId,
   } = shared;
 
@@ -850,11 +933,9 @@ function FolderItem({
         </div>
       ) : (
         <button
+          data-folder-id={folder.id}
           onClick={() => { toggleFolder(folder.id); onFolderHint(folder); }}
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
-          onDragOver={(e) => { e.preventDefault(); onDropTarget(`folder:${folder.id}`); }}
-          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) onDropTarget(null); }}
-          onDrop={(e) => { e.preventDefault(); onDropOnFolder(folder.id); }}
           className={[
             "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
             isFolderDropTarget
@@ -920,10 +1001,7 @@ function FolderItem({
                   onHint={() => onConnHint(conn)}
                   dragging={dragId === conn.id}
                   isDropTarget={dropTarget === conn.id}
-                  onDragStart={() => onDragStart(conn.id)}
-                  onDragEnd={onDragEnd}
-                  onDragOver={() => onDropTarget(conn.id)}
-                  onDrop={() => onDropOnConn(conn)}
+                  onPointerDragStart={(x, y) => onConnPointerDown(conn, x, y)}
                   isSearchMatch={searchMatchIds.has(conn.id)}
                   isSearchFocus={searchFocusId === conn.id}
                 />
@@ -950,7 +1028,7 @@ function ConnItem({
   conn, continuations, isLast, selected, onSelect, onOpen, onContextMenu,
   onHint,
   dragging = false, isDropTarget = false,
-  onDragStart, onDragEnd, onDragOver, onDrop,
+  onPointerDragStart,
   isSearchMatch = false, isSearchFocus = false,
 }: {
   conn: Connection;
@@ -963,20 +1041,14 @@ function ConnItem({
   onHint?: () => void;
   dragging?: boolean;
   isDropTarget?: boolean;
-  onDragStart?: () => void;
-  onDragEnd?: () => void;
-  onDragOver?: () => void;
-  onDrop?: () => void;
+  onPointerDragStart?: (x: number, y: number) => void;
   isSearchMatch?: boolean;
   isSearchFocus?: boolean;
 }) {
   const iconKey = conn.icon || DEFAULT_CONN_ICON[conn.type as keyof typeof DEFAULT_CONN_ICON] || "server";
 
   return (
-    // Use div instead of button so HTML5 DnD initiates reliably in WebView2.
-    // button elements can suppress dragstart in Chromium-based webviews.
     <div
-      draggable
       role="button"
       tabIndex={0}
       data-conn-id={conn.id}
@@ -984,15 +1056,10 @@ function ConnItem({
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { onSelect(); onHint?.(); } }}
-      onDragStart={(e) => {
-        e.stopPropagation();
-        e.dataTransfer.setData("text/plain", conn.id);
-        e.dataTransfer.effectAllowed = "move";
-        onDragStart?.();
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        onPointerDragStart?.(e.clientX, e.clientY);
       }}
-      onDragEnd={onDragEnd}
-      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; onDragOver?.(); }}
-      onDrop={(e) => { e.preventDefault(); onDrop?.(); }}
       className={[
         "flex items-center w-full py-0.5 pr-2 transition-colors text-left cursor-pointer select-none",
         dragging ? "opacity-40" : "",
