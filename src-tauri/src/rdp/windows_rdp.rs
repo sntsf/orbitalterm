@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::Emitter;
-use windows::Win32::Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF, SetWindowRgn};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -474,7 +474,7 @@ pub fn set_menu_region(session: &WindowsRdpSession, menu_rect: Option<[i32; 4]>)
         match menu_rect {
             None => {
                 // NULL region → entire window is visible
-                let _ = SetWindowRgn(host_hwnd, None, BOOL(1));
+                let _ = SetWindowRgn(host_hwnd, None, true);
             }
             Some([menu_vp_x, menu_vp_y, menu_vp_w, menu_vp_h]) => {
                 let popup_vp_x = session.rel_x.load(Ordering::Relaxed) as i32;
@@ -492,9 +492,9 @@ pub fn set_menu_region(session: &WindowsRdpSession, menu_rect: Option<[i32; 4]>)
                 // Build: full_region MINUS hole_region
                 let full = CreateRectRgn(0, 0, popup_w, popup_h);
                 let hole = CreateRectRgn(lx, ly, rx, by);
-                CombineRgn(full, full, hole, RGN_DIFF);
-                // After SetWindowRgn succeeds, the OS owns full_rgn — do NOT delete it.
-                let _ = SetWindowRgn(host_hwnd, full, BOOL(1));
+                CombineRgn(Some(full), Some(full), Some(hole), RGN_DIFF);
+                // After SetWindowRgn succeeds, the OS owns full — do NOT delete it.
+                let _ = SetWindowRgn(host_hwnd, Some(full), true);
                 // hole is ours; delete it.
                 let _ = DeleteObject(hole.into());
             }
