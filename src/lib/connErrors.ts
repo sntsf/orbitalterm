@@ -1,6 +1,13 @@
 export function friendlyConnError(raw: string, lang: "es" | "en", connType?: string): string {
   const r = raw.toLowerCase();
 
+  // ── Special markers ──────────────────────────────────────────────────────────
+  if (r === "session_ended" || r.startsWith("session_ended")) {
+    return lang === "es"
+      ? "La sesión se desconectó. El servidor puede haberse reiniciado o la red fue interrumpida."
+      : "The session disconnected. The server may have restarted or the network was lost.";
+  }
+
   if (lang === "es") {
     // ── Host apagado / sin red / timeout ─────────────────────────────────────
     if (

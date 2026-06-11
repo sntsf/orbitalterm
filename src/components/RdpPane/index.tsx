@@ -279,7 +279,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
   // created. This prevents React 18 StrictMode's double-invoke from opening
   // two simultaneous RDP connections to the same server.
   const connectGenRef = useRef(0);
-  const { setTabStatus, setTabSessionId, getConnectionById, closeTab } = useAppStore();
+  const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
   const t = useT();
   const { lang } = useI18nStore();
   const isWindows = /Windows/i.test(navigator.userAgent);
@@ -448,7 +448,20 @@ export function RdpPane({ tab }: RdpPaneProps) {
         disconnectRdp(s).catch(() => {});
         sessionIdRef.current = null;
       }
-      closeTab(tab.id);
+      // Show a "session ended" state in the tab instead of silently closing it.
+      // This keeps the Reconnect button visible and also fires the notification.
+      setEmbedded(false);
+      setNativeWindow(false);
+      setStatus("error");
+      setErrorMsg("SESSION_ENDED");
+      setTabStatus(tab.id, "error");
+      const conn = getConnectionById(tab.connection_id);
+      useNotifStore.getState().add({
+        connName: tab.connection_name,
+        connType: "rdp",
+        host: conn?.host ?? "",
+        raw: "SESSION_ENDED",
+      });
     }).then((fn) => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, [nativeWindow]); // eslint-disable-line react-hooks/exhaustive-deps

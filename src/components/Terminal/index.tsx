@@ -145,16 +145,42 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         sftpSessionIdRef.current = sid;
       }).catch(console.error);
 
+      // Buffer SSH output to detect connection errors emitted by the ssh process.
+      // connectSsh() returns immediately after spawning; errors appear as PTY text.
+      let sshConnError: string | null = null;
+      const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/[\r\n]+/g, " ").trim();
+
       // Stream SSH output into xterm
       const unlistenData = await listen<string>(`ssh-data-${sessionId}`, (e) => {
         term.write(e.payload);
+        if (!sshConnError) {
+          const plain = stripAnsi(e.payload).toLowerCase();
+          if (
+            plain.includes("connection refused") || plain.includes("no route to host") ||
+            plain.includes("connection timed out") || plain.includes("network is unreachable") ||
+            plain.includes("host unreachable") || plain.includes("could not resolve") ||
+            plain.includes("name or service not known") || plain.includes("ssh: connect to host") ||
+            plain.includes("permission denied") || plain.includes("host key verification failed") ||
+            plain.includes("too many authentication failures") || plain.includes("port 22: ")
+          ) {
+            sshConnError = stripAnsi(e.payload);
+          }
+        }
       });
       cleanups.push(unlistenData);
 
-      // Handle SSH process exit — close SFTP and the tab
+      // Handle SSH process exit — notify if a connection error was detected, then close tab
       const unlistenClosed = await listen(`ssh-closed-${sessionId}`, () => {
         const { t: tNow } = useI18nStore.getState();
         term.writeln(`\r\n\x1b[2m[${tNow("sshConnClosed")}]\x1b[0m`);
+        if (sshConnError) {
+          useNotifStore.getState().add({
+            connName: connection.name,
+            connType: "ssh",
+            host: connection.host,
+            raw: sshConnError,
+          });
+        }
         if (sftpSessionIdRef.current) {
           sftpDisconnect(sftpSessionIdRef.current).catch(console.error);
           sftpSessionIdRef.current = null;
