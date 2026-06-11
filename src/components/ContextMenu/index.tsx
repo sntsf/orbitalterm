@@ -1,5 +1,4 @@
 import { useRef, useState } from "react";
-import { useAppStore } from "../../store/useAppStore";
 
 interface MenuItem {
   label?: string;
@@ -63,20 +62,23 @@ export interface ContextMenuState {
   items: MenuItem[];
 }
 
+const MENU_MIN_WIDTH = 176; // matches min-w-44 (Tailwind 4 = 11rem = 176px)
+
 export function useContextMenu() {
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
 
   const open = (e: React.MouseEvent, items: MenuItem[]) => {
     e.preventDefault();
     e.stopPropagation();
-    setMenu({ x: e.clientX, y: e.clientY, items });
-    // Hide any native RDP overlays so the menu isn't covered.
-    useAppStore.getState().setMenusOpen(true);
+    // Clamp x so the menu stays within the sidebar and doesn't overlap the RDP
+    // native window (which sits above the WebView2 DComp layer and would cover it).
+    const sidebarWidth = Number(localStorage.getItem("orbitalterm:sidebarWidth") || 256);
+    const x = Math.min(e.clientX, sidebarWidth - MENU_MIN_WIDTH);
+    setMenu({ x, y: e.clientY, items });
   };
 
   const close = () => {
     setMenu(null);
-    useAppStore.getState().setMenusOpen(false);
   };
 
   return { menu, open, close };
