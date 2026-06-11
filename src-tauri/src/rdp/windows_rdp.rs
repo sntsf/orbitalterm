@@ -482,18 +482,31 @@ pub fn set_menu_region(session: &WindowsRdpSession, menu_rect: Option<[i32; 4]>)
                 let popup_w    = session.width.load(Ordering::Relaxed) as i32;
                 let popup_h    = session.height.load(Ordering::Relaxed) as i32;
 
-                // The nc offsets cancel when computing menu-local coords (both calls to
-                // canvas_to_screen add the same nc_x/nc_y), so local coords = vp delta.
-                let lx = (menu_vp_x - popup_vp_x).max(0);
-                let ly = (menu_vp_y - popup_vp_y).max(0);
-                let rx = (lx + menu_vp_w).min(popup_w);
-                let by = (ly + menu_vp_h).min(popup_h);
+                // Compute the ACTUAL intersection of the menu and the WS_POPUP in viewport
+                // coordinates, then convert to WS_POPUP-local coordinates for the hole.
+                // Using the full menu rect directly would carve a hole larger than the overlap,
+                // making the WS_POPUP show dark WebView2 background beyond the menu edge.
+                let inter_left   = menu_vp_x.max(popup_vp_x);
+                let inter_top    = menu_vp_y.max(popup_vp_y);
+                let inter_right  = (menu_vp_x + menu_vp_w).min(popup_vp_x + popup_w);
+                let inter_bottom = (menu_vp_y + menu_vp_h).min(popup_vp_y + popup_h);
+
+                if inter_right <= inter_left || inter_bottom <= inter_top {
+                    // No overlap — menu is entirely outside the WS_POPUP; nothing to carve.
+                    return;
+                }
+
+                // Convert intersection to WS_POPUP local (nc offsets cancel out).
+                let lx = inter_left   - popup_vp_x;
+                let ly = inter_top    - popup_vp_y;
+                let rx = inter_right  - popup_vp_x;
+                let by = inter_bottom - popup_vp_y;
 
                 // Build: full_region MINUS hole_region
                 let full = CreateRectRgn(0, 0, popup_w, popup_h);
                 let hole = CreateRectRgn(lx, ly, rx, by);
                 CombineRgn(Some(full), Some(full), Some(hole), RGN_DIFF);
-                // After SetWindowRgn succeeds, the OS owns full — do NOT delete it.
+                // After SetWindowRgn succeeds the OS owns full — do NOT delete it.
                 let _ = SetWindowRgn(host_hwnd, Some(full), true);
                 // hole is ours; delete it.
                 let _ = DeleteObject(hole.into());
