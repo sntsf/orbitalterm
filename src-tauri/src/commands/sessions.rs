@@ -653,6 +653,27 @@ pub async fn rdp_windows_visibility(
     Ok(())
 }
 
+/// Carve a rectangular hole in the RDP WS_POPUP so an HTML menu (sidebar context menu or
+/// menubar dropdown) rendered inside WebView2 shows through without hiding the RDP.
+/// `rect` is `[vp_x, vp_y, vp_w, vp_h]` in WebView2 viewport coordinates from
+/// `getBoundingClientRect()`.  Pass null/None to restore the full visible region.
+#[tauri::command]
+pub async fn rdp_windows_set_menu_region(
+    embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
+    session_id: String,
+    rect: Option<[i32; 4]>,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let map = embedded_sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            crate::rdp::windows_rdp::set_menu_region(session, rect);
+        }
+    }
+    let _ = (embedded_sessions, session_id, rect);
+    Ok(())
+}
+
 /// Transfer a live COM/mstscax RDP session to a new owner window by updating GWLP_HWNDPARENT.
 #[tauri::command]
 pub async fn rdp_windows_reparent(

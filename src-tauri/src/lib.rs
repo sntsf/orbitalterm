@@ -23,8 +23,8 @@ use commands::sessions::{
     connect_rdp, connect_ssh, copy_password, delete_password, disconnect_rdp, disconnect_ssh,
     has_password, rdp_get_linux_clipboard, rdp_key_input, rdp_mouse_input, rdp_refresh_session,
     rdp_resize_session, rdp_set_clipboard, rdp_status, rdp_windows_reparent,
-    rdp_windows_reposition, rdp_windows_visibility, resize_pty, save_password, send_input,
-    show_rdp_tab_menu,
+    rdp_windows_reposition, rdp_windows_set_menu_region, rdp_windows_visibility, resize_pty,
+    save_password, send_input, show_rdp_tab_menu,
 };
 use commands::sftp::{
     sftp_connect, sftp_create_file, sftp_delete, sftp_disconnect, sftp_download, sftp_list_dir,
@@ -204,6 +204,7 @@ pub fn run() {
             rdp_windows_reposition,
             rdp_windows_visibility,
             rdp_windows_reparent,
+            rdp_windows_set_menu_region,
             show_rdp_tab_menu,
             // passwords
             save_password,

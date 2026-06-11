@@ -163,6 +163,15 @@ export async function showRdpTabMenu(x: number, y: number): Promise<string | nul
   return invoke("show_rdp_tab_menu", { x, y });
 }
 
+/** Carve a hole in the RDP WS_POPUP so an HTML menu shows through without hiding the RDP.
+ *  `rect` = [vp_x, vp_y, vp_w, vp_h] in WebView2 viewport coords; null clears the hole. */
+export async function rdpWindowsSetMenuRegion(
+  sessionId: string,
+  rect: [number, number, number, number] | null,
+): Promise<void> {
+  return invoke("rdp_windows_set_menu_region", { sessionId, rect });
+}
+
 export async function rdpWindowsReparent(
   sessionId: string,
   x: number,

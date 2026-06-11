@@ -17,7 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::Emitter;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -457,4 +458,46 @@ pub fn hide(session: &WindowsRdpSession) {
 pub fn reparent(session: &WindowsRdpSession, new_parent: HWND, rel_x: i32, rel_y: i32, width: i32, height: i32) {
     session.parent_hwnd.store(new_parent.0 as isize, Ordering::Relaxed);
     reposition(session, rel_x, rel_y, width, height);
+}
+
+/// Carve a rectangular hole in the WS_POPUP so an HTML menu rendered inside WebView2
+/// shows through it.  `menu_rect` is in viewport (WebView2 client-area) coordinates
+/// matching `getBoundingClientRect()`.  Pass `None` to restore the full region.
+///
+/// SetWindowRgn may be called safely from any thread; the region update is immediate.
+pub fn set_menu_region(session: &WindowsRdpSession, menu_rect: Option<[i32; 4]>) {
+    let host_hwnd = HWND(session.host_hwnd.load(Ordering::Relaxed) as *mut _);
+    if host_hwnd.0.is_null() {
+        return;
+    }
+    unsafe {
+        match menu_rect {
+            None => {
+                // NULL region → entire window is visible
+                let _ = SetWindowRgn(host_hwnd, None, BOOL(1));
+            }
+            Some([menu_vp_x, menu_vp_y, menu_vp_w, menu_vp_h]) => {
+                let popup_vp_x = session.rel_x.load(Ordering::Relaxed) as i32;
+                let popup_vp_y = session.rel_y.load(Ordering::Relaxed) as i32;
+                let popup_w    = session.width.load(Ordering::Relaxed) as i32;
+                let popup_h    = session.height.load(Ordering::Relaxed) as i32;
+
+                // The nc offsets cancel when computing menu-local coords (both calls to
+                // canvas_to_screen add the same nc_x/nc_y), so local coords = vp delta.
+                let lx = (menu_vp_x - popup_vp_x).max(0);
+                let ly = (menu_vp_y - popup_vp_y).max(0);
+                let rx = (lx + menu_vp_w).min(popup_w);
+                let by = (ly + menu_vp_h).min(popup_h);
+
+                // Build: full_region MINUS hole_region
+                let full = CreateRectRgn(0, 0, popup_w, popup_h);
+                let hole = CreateRectRgn(lx, ly, rx, by);
+                CombineRgn(full, full, hole, RGN_DIFF);
+                // After SetWindowRgn succeeds, the OS owns full_rgn — do NOT delete it.
+                let _ = SetWindowRgn(host_hwnd, full, BOOL(1));
+                // hole is ours; delete it.
+                let _ = DeleteObject(hole.into());
+            }
+        }
+    }
 }

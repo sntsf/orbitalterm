@@ -15,10 +15,6 @@ interface AppStore {
   tabs: Tab[];
   activeTabId: string | null;
 
-  /** True while any React menu/dropdown is open — RDP overlays hide themselves. */
-  menusOpen: boolean;
-  setMenusOpen: (v: boolean) => void;
-
   setConnections: (connections: Connection[]) => void;
   setFolders: (folders: Folder[]) => void;
   setGroups: (groups: Group[]) => void;
@@ -57,8 +53,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
   sidebarVisible: true,
   tabs: [],
   activeTabId: null,
-  menusOpen: false,
-  setMenusOpen: (menusOpen) => set({ menusOpen }),
   sidebarHint: null,
   setSidebarHint: (sidebarHint) => set({ sidebarHint }),
 
