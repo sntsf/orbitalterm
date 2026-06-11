@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, X, Bell } from "lucide-react";
+import { AlertTriangle, X, Bell, ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 import { useNotifStore } from "../../store/useNotifStore";
 import { useI18nStore } from "../../store/useI18nStore";
 import { friendlyConnErrorNotif } from "../../lib/connErrors";
@@ -7,10 +7,11 @@ import { friendlyConnErrorNotif } from "../../lib/connErrors";
 const AUTO_HIDE_MS = 20_000;
 
 export function NotificationOverlay() {
-  const { notifs } = useNotifStore();
+  const { notifs, dismiss, clearAll } = useNotifStore();
   const { lang } = useI18nStore();
   const [showToast, setShowToast] = useState(false);
   const [progressKey, setProgressKey] = useState(0);
+  const [idx, setIdx] = useState(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevCountRef = useRef(0);
 
@@ -26,22 +27,41 @@ export function NotificationOverlay() {
     if (timerRef.current) clearTimeout(timerRef.current);
   };
 
+  // New notification arrived → jump to it and restart timer
   useEffect(() => {
-    if (notifs.length > prevCountRef.current) startTimer();
+    if (notifs.length > prevCountRef.current) {
+      setIdx(0);
+      startTimer();
+    }
     prevCountRef.current = notifs.length;
   }, [notifs.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep idx in bounds when notifications are removed
+  useEffect(() => {
+    if (notifs.length === 0) { setShowToast(false); return; }
+    setIdx((i) => Math.min(i, notifs.length - 1));
+  }, [notifs.length]);
 
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
   if (notifs.length === 0) return null;
 
-  const latest = notifs[0];
-  const friendly = friendlyConnErrorNotif(latest.raw, lang, latest.connType);
+  const safeIdx = Math.min(idx, notifs.length - 1);
+  const current = notifs[safeIdx];
+  const friendly = friendlyConnErrorNotif(current.raw, lang, current.connType);
   const tabLabel = lang === "es" ? "Notificaciones" : "Notifications";
-  const timeStr = new Date(latest.ts).toLocaleTimeString(
+  const timeStr = new Date(current.ts).toLocaleTimeString(
     lang === "es" ? "es-ES" : "en-US",
     { hour: "2-digit", minute: "2-digit", second: "2-digit" },
   );
+
+  const goPrev = () => setIdx((i) => Math.max(0, i - 1));
+  const goNext = () => setIdx((i) => Math.min(notifs.length - 1, i + 1));
+
+  const dismissCurrent = () => {
+    dismiss(current.id);
+    // idx stays or clamps via the useEffect above
+  };
 
   return (
     <>
@@ -54,40 +74,79 @@ export function NotificationOverlay() {
             <AlertTriangle size={18} className="text-[var(--color-warning)] shrink-0 mt-0.5" />
 
             <div className="flex flex-col gap-1 flex-1 min-w-0">
-              {/* Top row: label · connection identity · time · close */}
+              {/* Top row: label · identity · time · nav · actions */}
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-[13px] font-semibold text-[var(--color-warning)] shrink-0">
                   {lang === "es" ? "Error de conexión" : "Connection error"}
                 </span>
                 <div className="w-px h-4 bg-[var(--color-border)] shrink-0" />
                 <span className="text-[13px] font-semibold text-[var(--color-text-primary)] shrink-0">
-                  {latest.connName}
+                  {current.connName}
                 </span>
                 <span className="text-[10px] uppercase font-mono bg-[var(--color-bg-base)] text-[var(--color-text-muted)] px-1.5 py-0.5 rounded shrink-0">
-                  {latest.connType}
+                  {current.connType}
                 </span>
-                {latest.host && (
+                {current.host && (
                   <span className="text-[12px] text-[var(--color-text-muted)] shrink-0">
-                    {latest.host}
+                    {current.host}
                   </span>
                 )}
                 <div className="flex-1" />
                 <span className="text-[11px] text-[var(--color-text-muted)] shrink-0">{timeStr}</span>
+
+                {/* Prev / counter / next */}
                 {notifs.length > 1 && (
-                  <span className="text-[10px] bg-[var(--color-bg-base)] border border-[var(--color-border)] text-[var(--color-text-muted)] px-1.5 py-px rounded shrink-0">
-                    +{notifs.length - 1}
-                  </span>
+                  <div className="flex items-center gap-0.5 shrink-0">
+                    <button
+                      onClick={goPrev}
+                      disabled={safeIdx === 0}
+                      className="p-0.5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] disabled:opacity-30 transition-colors"
+                      title={lang === "es" ? "Anterior" : "Previous"}
+                    >
+                      <ChevronLeft size={13} />
+                    </button>
+                    <span className="text-[10px] text-[var(--color-text-muted)] font-mono px-0.5 tabular-nums">
+                      {safeIdx + 1}/{notifs.length}
+                    </span>
+                    <button
+                      onClick={goNext}
+                      disabled={safeIdx === notifs.length - 1}
+                      className="p-0.5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] disabled:opacity-30 transition-colors"
+                      title={lang === "es" ? "Siguiente" : "Next"}
+                    >
+                      <ChevronRight size={13} />
+                    </button>
+                  </div>
                 )}
+
+                {/* Dismiss current */}
                 <button
-                  onClick={closeToast}
+                  onClick={dismissCurrent}
                   className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
-                  title={lang === "es" ? "Cerrar" : "Close"}
+                  title={lang === "es" ? "Descartar esta" : "Dismiss this"}
                 >
                   <X size={14} />
                 </button>
+
+                {/* Clear all + minimize */}
+                <button
+                  onClick={() => { clearAll(); }}
+                  className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-danger)] transition-colors"
+                  title={lang === "es" ? "Limpiar todas" : "Clear all"}
+                >
+                  <Trash2 size={13} />
+                </button>
+
+                <button
+                  onClick={closeToast}
+                  className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors ml-1"
+                  title={lang === "es" ? "Minimizar" : "Minimize"}
+                >
+                  <Bell size={13} />
+                </button>
               </div>
 
-              {/* Error detail — up to 2 lines with line-break support */}
+              {/* Error detail */}
               <span className="text-[12px] text-[var(--color-text-muted)] whitespace-pre-line leading-snug">
                 {friendly}
               </span>
@@ -98,17 +157,26 @@ export function NotificationOverlay() {
 
       {/* ── Small persistent tab when bar is hidden ── */}
       {!showToast && (
-        <button
-          onClick={startTimer}
-          className="absolute bottom-0 right-6 z-50 flex items-center gap-1.5 px-3 py-1 rounded-t text-[12px] font-medium border border-b-0 shadow-md transition-colors bg-[var(--color-warning)]/15 border-[var(--color-warning)]/40 text-[var(--color-warning)] hover:bg-[var(--color-warning)]/25"
-          title={lang === "es" ? "Ver notificación" : "Show notification"}
-        >
-          <Bell size={12} />
-          <span>{tabLabel}</span>
-          <span className="bg-[var(--color-warning)] text-black text-[9px] font-bold px-1.5 py-px rounded-full leading-none">
-            {notifs.length}
-          </span>
-        </button>
+        <div className="absolute bottom-0 right-6 z-50 flex items-center rounded-t border border-b-0 shadow-md bg-[var(--color-warning)]/15 border-[var(--color-warning)]/40">
+          <button
+            onClick={startTimer}
+            className="flex items-center gap-1.5 px-3 py-1 text-[12px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 transition-colors rounded-tl"
+            title={lang === "es" ? "Ver notificaciones" : "Show notifications"}
+          >
+            <Bell size={12} />
+            <span>{tabLabel}</span>
+            <span className="bg-[var(--color-warning)] text-black text-[9px] font-bold px-1.5 py-px rounded-full leading-none">
+              {notifs.length}
+            </span>
+          </button>
+          <button
+            onClick={() => clearAll()}
+            className="px-2 py-1 text-[var(--color-warning)]/60 hover:text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 transition-colors rounded-tr border-l border-[var(--color-warning)]/20"
+            title={lang === "es" ? "Limpiar todas" : "Clear all"}
+          >
+            <Trash2 size={11} />
+          </button>
+        </div>
       )}
     </>
   );
