@@ -292,50 +292,41 @@ export function Sidebar() {
     setNewGroupName("");
   };
 
-  const handleDragEnd = () => {
-    pDragRef.current = null;
-    pDropRef.current = null;
-    setDragId(null);
-    setDropTarget(null);
-    setGhostPos(null);
-  };
 
   const DRAG_THRESHOLD = 6;
 
+  // Always-current snapshot of state needed inside the global pointer listeners.
+  // useEffect with [] captures stale closures; reading from this ref is safe.
+  const dndState = useRef({ connections, folders, setConnections });
+  dndState.current = { connections, folders, setConnections };
+
   // Called when a ConnItem receives pointerdown — arms the pointer-based drag.
-  // We use global pointermove/pointerup instead of HTML5 DnD events because
-  // WebView2 on Windows does not reliably fire dragstart/dragover/drop.
   const startPointerDrag = (conn: Connection, startX: number, startY: number) => {
     pDragRef.current = { connId: conn.id, connName: conn.name, startX, startY, active: false };
     pDropRef.current = null;
   };
 
-  // Register global listeners as soon as any potential drag is armed.
+  // Global listeners registered once — use refs so they always see current state.
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       const d = pDragRef.current;
       if (!d) return;
 
-      // Activate drag only after the pointer has moved beyond the threshold.
       if (!d.active) {
-        const dist = Math.hypot(e.clientX - d.startX, e.clientY - d.startY);
-        if (dist < DRAG_THRESHOLD) return;
+        if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < DRAG_THRESHOLD) return;
         d.active = true;
         setDragId(d.connId);
       }
 
       setGhostPos({ x: e.clientX, y: e.clientY });
 
-      // Walk elementsFromPoint to find the first matching drop target.
       const hits = document.elementsFromPoint(e.clientX, e.clientY);
       let target: string | null = null;
       for (const el of hits) {
         const h = el as HTMLElement;
         if (h.dataset.folderId) { target = `folder:${h.dataset.folderId}`; break; }
         if (h.dataset.groupId)  { target = `group:${h.dataset.groupId}`;   break; }
-        if (h.dataset.connId && h.dataset.connId !== d.connId) {
-          target = h.dataset.connId; break;
-        }
+        if (h.dataset.connId && h.dataset.connId !== d.connId) { target = h.dataset.connId; break; }
       }
       pDropRef.current = target;
       setDropTarget(target);
@@ -345,80 +336,68 @@ export function Sidebar() {
       const d  = pDragRef.current;
       const dt = pDropRef.current;
       pDragRef.current = null;
+      pDropRef.current = null;
 
-      if (!d?.active) {
-        // Threshold never reached — treat as a normal click (no drag cleanup needed).
-        return;
-      }
+      if (!d?.active) return; // never moved past threshold — normal click, nothing to do
 
-      if (dt) {
-        if (dt.startsWith("folder:")) {
-          await handleDropOnFolder(dt.slice(7));
-        } else if (dt.startsWith("group:")) {
-          await handleDropOnFolder(null, dt.slice(6));
+      // Read CURRENT state from ref (avoids stale-closure bugs with [] dependency).
+      const { connections: conns, folders: folderList, setConnections: setConns } = dndState.current;
+
+      const dragged = conns.find((c) => c.id === d.connId);
+
+      const finish = () => { setDragId(null); setDropTarget(null); setGhostPos(null); };
+
+      if (!dragged || !dt) { finish(); return; }
+
+      if (dt.startsWith("folder:") || dt.startsWith("group:")) {
+        const folderId = dt.startsWith("folder:") ? dt.slice(7) : null;
+        const groupId  = dt.startsWith("group:")  ? dt.slice(6)  : undefined;
+
+        let targetGroupId: string;
+        if (folderId) {
+          const folder = folderList.find((f) => f.id === folderId);
+          targetGroupId = folder?.group_id ?? dragged.group_id;
         } else {
-          const target = connections.find((c) => c.id === dt);
-          if (target) await handleDropOnConn(target);
+          targetGroupId = groupId ?? dragged.group_id;
         }
+
+        if (dragged.folder_id === folderId && dragged.group_id === targetGroupId) {
+          finish(); return;
+        }
+
+        const maxSort = conns
+          .filter((c) => c.folder_id === folderId && c.group_id === targetGroupId)
+          .reduce((m, c) => Math.max(m, c.sort_order), -10) + 10;
+
+        await reorderConnections([{ id: d.connId, sort_order: maxSort, folder_id: folderId, group_id: targetGroupId }]).catch(console.error);
+        setConns(await getConnections());
       } else {
-        handleDragEnd();
+        // Drop onto another connection — reorder within the same folder
+        const target = conns.find((c) => c.id === dt);
+        if (!target) { finish(); return; }
+
+        const targetGroupId = target.group_id;
+        const level = conns
+          .filter((c) => c.folder_id === target.folder_id && c.group_id === targetGroupId)
+          .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
+        const without = level.filter((c) => c.id !== d.connId);
+        const idx = without.findIndex((c) => c.id === target.id);
+        without.splice(idx, 0, { ...dragged, folder_id: target.folder_id, group_id: targetGroupId });
+        const updates = without.map((c, i) => ({ id: c.id, sort_order: i * 10, folder_id: target.folder_id, group_id: targetGroupId }));
+        await reorderConnections(updates).catch(console.error);
+        setConns(await getConnections());
       }
+
+      finish();
     };
 
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointerup",   onUp);
     return () => {
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointerup",   onUp);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const handleDropOnConn = async (target: Connection) => {
-    if (!dragId || dragId === target.id) { handleDragEnd(); return; }
-    const dragged = connections.find((c) => c.id === dragId);
-    if (!dragged) { handleDragEnd(); return; }
-    // Use target's group_id when moving between groups
-    const targetGroupId = target.group_id;
-    const level = connections
-      .filter((c) => c.folder_id === target.folder_id && c.group_id === targetGroupId)
-      .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
-    const without = level.filter((c) => c.id !== dragId);
-    const idx = without.findIndex((c) => c.id === target.id);
-    without.splice(idx, 0, { ...dragged, folder_id: target.folder_id, group_id: targetGroupId });
-    const updates = without.map((c, i) => ({ id: c.id, sort_order: i * 10, folder_id: target.folder_id, group_id: targetGroupId }));
-    await reorderConnections(updates).catch(console.error);
-    setConnections(await getConnections());
-    handleDragEnd();
-  };
-
-  // folderId=null + groupId = move to group root
-  const handleDropOnFolder = async (folderId: string | null, groupId?: string) => {
-    if (!dragId) { handleDragEnd(); return; }
-    const dragged = connections.find((c) => c.id === dragId);
-    if (!dragged) { handleDragEnd(); return; }
-
-    // Determine target group_id
-    let targetGroupId: string;
-    if (folderId) {
-      const folder = folders.find((f) => f.id === folderId);
-      targetGroupId = folder?.group_id ?? dragged.group_id;
-    } else {
-      targetGroupId = groupId ?? dragged.group_id;
-    }
-
-    if (dragged.folder_id === folderId && dragged.group_id === targetGroupId) {
-      handleDragEnd();
-      return;
-    }
-
-    const maxSort = connections
-      .filter((c) => c.folder_id === folderId && c.group_id === targetGroupId)
-      .reduce((m, c) => Math.max(m, c.sort_order), -10) + 10;
-    await reorderConnections([{ id: dragId, sort_order: maxSort, folder_id: folderId, group_id: targetGroupId }]).catch(console.error);
-    setConnections(await getConnections());
-    handleDragEnd();
-  };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const folderMenu = (e: React.MouseEvent, folder: FolderType) =>
     openMenu(e, [
