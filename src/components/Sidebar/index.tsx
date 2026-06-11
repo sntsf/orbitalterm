@@ -358,7 +358,7 @@ export function Sidebar() {
       name: `${conn.name}(duplicado)`, type: conn.type, host: conn.host, port: conn.port,
       username: conn.username, auth_type: conn.auth_type, key_path: conn.key_path,
       folder_id: conn.folder_id, notes: conn.notes, description: conn.description,
-      domain: conn.domain, rdp_admin: conn.rdp_admin, group_id: conn.group_id,
+      domain: conn.domain, group_id: conn.group_id,
       icon: conn.icon, url: conn.url ?? "", custom_hosts: conn.custom_hosts ?? "",
       rdp_security: conn.rdp_security ?? "negotiate", rdp_color_depth: conn.rdp_color_depth ?? 32,
     });
@@ -613,7 +613,7 @@ export function Sidebar() {
                   onClick={() => { toggleGroupExpanded(group.id); setSidebarHint(buildGroupHint(group, lang, connections)); }}
                   onContextMenu={(e) => groupMenu(e, group)}
                   onDragOver={(e) => { e.preventDefault(); setDropTarget(`group:${group.id}`); }}
-                  onDragLeave={() => setDropTarget(null)}
+                  onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropTarget(null); }}
                   onDrop={(e) => { e.preventDefault(); handleDropOnFolder(null, group.id); }}
                   className={[
                     "flex items-center gap-1.5 w-full px-2 py-1 transition-colors",
@@ -854,7 +854,7 @@ function FolderItem({
           onClick={() => { toggleFolder(folder.id); onFolderHint(folder); }}
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
           onDragOver={(e) => { e.preventDefault(); onDropTarget(`folder:${folder.id}`); }}
-          onDragLeave={() => onDropTarget(null)}
+          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) onDropTarget(null); }}
           onDrop={(e) => { e.preventDefault(); onDropOnFolder(folder.id); }}
           className={[
             "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
@@ -974,12 +974,17 @@ function ConnItem({
   const iconKey = conn.icon || DEFAULT_CONN_ICON[conn.type as keyof typeof DEFAULT_CONN_ICON] || "server";
 
   return (
-    <button
+    // Use div instead of button so HTML5 DnD initiates reliably in WebView2.
+    // button elements can suppress dragstart in Chromium-based webviews.
+    <div
       draggable
+      role="button"
+      tabIndex={0}
       data-conn-id={conn.id}
       onClick={() => { onSelect(); onHint?.(); }}
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { onSelect(); onHint?.(); } }}
       onDragStart={(e) => {
         e.stopPropagation();
         e.dataTransfer.setData("text/plain", conn.id);
@@ -990,10 +995,9 @@ function ConnItem({
       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; onDragOver?.(); }}
       onDrop={(e) => { e.preventDefault(); onDrop?.(); }}
       className={[
-        "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
+        "flex items-center w-full py-0.5 pr-2 transition-colors text-left cursor-pointer select-none",
         dragging ? "opacity-40" : "",
         isDropTarget ? "border-t-2 border-[var(--color-accent)]" : "",
-        // Search focus takes accent highlight, match gets amber tint, normal gets hover
         isSearchFocus || selected
           ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
           : isSearchMatch
@@ -1007,6 +1011,6 @@ function ConnItem({
       <span className={`text-[10px] uppercase font-semibold px-1 rounded shrink-0 ml-1 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
         {conn.type}
       </span>
-    </button>
+    </div>
   );
 }

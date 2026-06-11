@@ -35,7 +35,7 @@ export function MenuBar() {
   const t = useT();
   const { lang, setLang } = useI18nStore();
   const { theme, fontSize, setTheme, setFontSize, resetLayout } = usePrefsStore();
-  const { startNewConnection, setConnections, setFolders, setGroups, toggleSidebar, sidebarVisible } = useAppStore();
+  const { startNewConnection, setConnections, setFolders, setGroups, toggleSidebar, sidebarVisible, setMenusOpen } = useAppStore();
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showAbout, setShowAbout] = useState(false);
   const [showExport, setShowExport] = useState(false);
@@ -49,6 +49,9 @@ export function MenuBar() {
   useEffect(() => {
     getCurrentWindow().isFullscreen().then(setIsFullscreen).catch(() => {});
   }, []);
+
+  // Hide/restore RDP overlays when a menu bar dropdown opens or closes.
+  useEffect(() => { setMenusOpen(openMenuId !== null); }, [openMenuId, setMenusOpen]);
 
   // Close dropdown on click outside
   useEffect(() => {

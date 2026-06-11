@@ -49,16 +49,15 @@ interface WindowsViewerProps {
 function WindowsEmbeddedViewer({ sessionId, tabId, transferred }: WindowsViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const reparentedRef = useRef(false);
-  const { activeTabId } = useAppStore();
+  const { activeTabId, menusOpen } = useAppStore();
 
-  // Show/hide by watching the active tab from the store.
-  // ResizeObserver is NOT used for visibility because it does not fire reliably
-  // when a parent element is toggled between display:block and display:none.
+  // Show/hide by watching the active tab and menus state from the store.
+  // Hidden when any React menu is open so the WS_POPUP doesn't cover dropdowns
+  // or context menus that are rendered inside WebView2 (below the native popup).
   useEffect(() => {
-    const isActive = activeTabId === tabId;
+    const isActive = activeTabId === tabId && !menusOpen;
     if (isActive) {
       rdpWindowsVisibility(sessionId, true).catch(() => {});
-      // Reposition after the browser has resolved layout for the now-visible element.
       requestAnimationFrame(() => {
         const el = containerRef.current;
         if (!el) return;
@@ -75,7 +74,7 @@ function WindowsEmbeddedViewer({ sessionId, tabId, transferred }: WindowsViewerP
     } else {
       rdpWindowsVisibility(sessionId, false).catch(() => {});
     }
-  }, [activeTabId, tabId, sessionId, transferred]);
+  }, [activeTabId, tabId, sessionId, transferred, menusOpen]);
 
   // Reposition on window resize while this tab is active.
   useEffect(() => {

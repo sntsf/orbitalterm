@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { useAppStore } from "../../store/useAppStore";
 
 interface MenuItem {
   label?: string;
@@ -69,9 +70,14 @@ export function useContextMenu() {
     e.preventDefault();
     e.stopPropagation();
     setMenu({ x: e.clientX, y: e.clientY, items });
+    // Hide any native RDP overlays so the menu isn't covered.
+    useAppStore.getState().setMenusOpen(true);
   };
 
-  const close = () => setMenu(null);
+  const close = () => {
+    setMenu(null);
+    useAppStore.getState().setMenusOpen(false);
+  };
 
   return { menu, open, close };
 }
