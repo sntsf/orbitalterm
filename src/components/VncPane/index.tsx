@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { vncConnect, vncDisconnect, vncKeyEvent, vncPointerEvent } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import { useNotifStore } from "../../store/useNotifStore";
+import { useT, useI18nStore } from "../../store/useI18nStore";
+import { friendlyConnError } from "../../lib/connErrors";
 import type { Tab } from "../../types";
 
 interface VncPaneProps {
@@ -84,6 +86,8 @@ interface VncFrame {
 export function VncPane({ tab }: VncPaneProps) {
   const { getConnectionById, setTabStatus } = useAppStore();
   const connection = getConnectionById(tab.connection_id);
+  const t = useT();
+  const { lang } = useI18nStore();
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -241,7 +245,7 @@ export function VncPane({ tab }: VncPaneProps) {
         {status === "connecting" ? (
           <>
             <Loader size={32} className="animate-spin opacity-40" />
-            <p className="text-xs">Conectando a VNC…</p>
+            <p className="text-xs">{t("vncConnecting")}</p>
             {connection && (
               <p className="text-[10px] text-[var(--color-text-muted)]">
                 {connection.host}:{connection.port}
@@ -252,17 +256,19 @@ export function VncPane({ tab }: VncPaneProps) {
           <>
             <WifiOff size={32} className={status === "disconnected" ? "opacity-40" : "text-[var(--color-danger)] opacity-70"} />
             <p className="text-xs font-medium text-[var(--color-text-primary)]">
-              {status === "disconnected" ? "Sesión VNC desconectada" : "Error de conexión VNC"}
+              {status === "disconnected" ? t("vncDisconnected") : t("vncConnError")}
             </p>
             {errorMsg && (
-              <p className="text-[10px] text-[var(--color-danger)] max-w-xs text-center px-4">{errorMsg}</p>
+              <p className="text-[10px] text-[var(--color-danger)] max-w-xs text-center px-4 whitespace-pre-line">
+                {friendlyConnError(errorMsg, lang, "vnc")}
+              </p>
             )}
             <button
               onClick={handleReconnect}
               disabled={reconnecting}
               className="px-4 py-1.5 bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white text-xs rounded transition-colors disabled:opacity-50"
             >
-              {reconnecting ? "Reconectando…" : "Reconectar"}
+              {reconnecting ? t("connReconnecting") : t("connReconnect")}
             </button>
           </>
         )}

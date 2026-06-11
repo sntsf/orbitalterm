@@ -36,7 +36,7 @@ export function NotificationOverlay() {
   if (notifs.length === 0) return null;
 
   const latest = notifs[0];
-  const friendly = friendlyConnError(latest.raw, lang);
+  const friendly = friendlyConnError(latest.raw, lang, latest.connType);
   const tabLabel = lang === "es" ? "Notificaciones" : "Notifications";
   const timeStr = new Date(latest.ts).toLocaleTimeString(
     lang === "es" ? "es-ES" : "en-US",

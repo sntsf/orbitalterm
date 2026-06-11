@@ -105,6 +105,30 @@ const T = {
     deleteGroup: "Eliminar",
     deleteGroupConfirm: "¿Eliminar este grupo y todo su contenido?",
     groupNamePlaceholder: "Nombre del grupo…",
+    // Connection states
+    connRetry: "Reintentar",
+    connReconnect: "Reconectar",
+    connReconnecting: "Reconectando…",
+    connSessionEnded: "Sesión finalizada",
+    // RDP pane
+    rdpLaunching: "Iniciando cliente RDP…",
+    rdpSessionExternal: "Sesión RDP activa en ventana externa",
+    rdpExternalHint: "El cliente RDP fue iniciado. Ciérralo para finalizar la sesión o usa Reconectar para abrir una nueva ventana.",
+    rdpNoPasswordTitle: "Contraseña no guardada",
+    rdpNoPasswordDesc: "Para conectarte en modo embebido necesitás guardar la contraseña. Cerrá esta pestaña, seleccioná la conexión en el sidebar, ingresá la contraseña en Propiedades y guardá.",
+    rdpMissingClientTitle: "Cliente RDP no instalado",
+    rdpInstallCmd: "Comando de instalación",
+    rdpInstallHint: "Después de instalar, haz clic en Reintentar.",
+    // VNC pane
+    vncConnecting: "Conectando a VNC…",
+    vncDisconnected: "Sesión VNC desconectada",
+    vncConnError: "Error de conexión VNC",
+    // SSH terminal inline
+    sshConnecting: "Conectando a",
+    sshConnFailed: "Conexión fallida",
+    sshConnClosed: "Conexión cerrada",
+    sshSessionResumed: "Sesión retomada",
+    sshConnNotFound: "Conexión no encontrada.",
   },
   en: {
     menuFile: "File",
@@ -193,6 +217,30 @@ const T = {
     deleteGroup: "Delete",
     deleteGroupConfirm: "Delete this group and all its contents?",
     groupNamePlaceholder: "Group name…",
+    // Connection states
+    connRetry: "Retry",
+    connReconnect: "Reconnect",
+    connReconnecting: "Reconnecting…",
+    connSessionEnded: "Session ended",
+    // RDP pane
+    rdpLaunching: "Launching RDP client…",
+    rdpSessionExternal: "RDP session active in external window",
+    rdpExternalHint: "The RDP client was launched. Close it to end the session, or use Reconnect to open a new window.",
+    rdpNoPasswordTitle: "Password not saved",
+    rdpNoPasswordDesc: "To connect in embedded mode you need to save the password. Close this tab, select the connection in the sidebar, enter the password in Properties and save.",
+    rdpMissingClientTitle: "No RDP client installed",
+    rdpInstallCmd: "Install command",
+    rdpInstallHint: "After installing, click Retry below.",
+    // VNC pane
+    vncConnecting: "Connecting to VNC…",
+    vncDisconnected: "VNC session disconnected",
+    vncConnError: "VNC connection error",
+    // SSH terminal inline
+    sshConnecting: "Connecting to",
+    sshConnFailed: "Connection failed",
+    sshConnClosed: "Connection closed",
+    sshSessionResumed: "Session resumed",
+    sshConnNotFound: "Connection not found.",
   },
 } as const;
 

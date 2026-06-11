@@ -15,6 +15,8 @@ import {
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import { useNotifStore } from "../../store/useNotifStore";
+import { useT, useI18nStore } from "../../store/useI18nStore";
+import { friendlyConnError } from "../../lib/connErrors";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import type { Tab } from "../../types";
 
@@ -278,6 +280,8 @@ export function RdpPane({ tab }: RdpPaneProps) {
   // two simultaneous RDP connections to the same server.
   const connectGenRef = useRef(0);
   const { setTabStatus, setTabSessionId, getConnectionById, closeTab } = useAppStore();
+  const t = useT();
+  const { lang } = useI18nStore();
   const isWindows = /Windows/i.test(navigator.userAgent);
 
   const connect = async (isRetry = false, adminMode = false) => {
@@ -515,7 +519,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
 
       {status === "connecting" && (
         <p className="text-sm text-[var(--color-text-muted)] animate-pulse">
-          Launching RDP client…
+          {t("rdpLaunching")}
         </p>
       )}
 
@@ -523,18 +527,17 @@ export function RdpPane({ tab }: RdpPaneProps) {
         <div className="flex flex-col items-center gap-3">
           <div className="flex items-center gap-2 text-[var(--color-success)] text-sm">
             <CheckCircle size={15} />
-            RDP session active in external window
+            {t("rdpSessionExternal")}
           </div>
           <p className="text-xs text-[var(--color-text-muted)] max-w-xs">
-            The RDP client was launched. Close it to end the session, or use
-            Reconnect to open a new window.
+            {t("rdpExternalHint")}
           </p>
           <button
             onClick={() => connect(true)}
             className="flex items-center gap-2 px-3 py-1.5 rounded text-xs border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
           >
             <RefreshCw size={12} />
-            Reconnect
+            {t("connReconnect")}
           </button>
         </div>
       )}
@@ -545,14 +548,14 @@ export function RdpPane({ tab }: RdpPaneProps) {
             <div className="flex flex-col items-center gap-3 max-w-sm text-center">
               <CheckCircle size={28} className="text-[var(--color-text-muted)] opacity-50" />
               <p className="text-sm text-[var(--color-text-muted)]">
-                Sesión finalizada
+                {t("connSessionEnded")}
               </p>
               <button
                 onClick={() => connect(true)}
                 className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
               >
                 <RefreshCw size={12} />
-                Reconectar
+                {t("connReconnect")}
               </button>
             </div>
           );
@@ -562,12 +565,10 @@ export function RdpPane({ tab }: RdpPaneProps) {
             <div className="flex flex-col items-center gap-3 max-w-sm text-center">
               <AlertCircle size={28} className="text-[var(--color-warning)]" />
               <p className="text-sm font-medium text-[var(--color-text-primary)]">
-                Contraseña no guardada
+                {t("rdpNoPasswordTitle")}
               </p>
               <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
-                Para conectarte en modo embebido necesitás guardar la contraseña.
-                Cerrá esta pestaña, seleccioná la conexión en el sidebar,
-                ingresá la contraseña en Propiedades y guardá.
+                {t("rdpNoPasswordDesc")}
               </p>
             </div>
           );
@@ -578,14 +579,14 @@ export function RdpPane({ tab }: RdpPaneProps) {
             <div className="flex flex-col items-center gap-4 max-w-sm text-center">
               <div className="flex items-center gap-2 text-[var(--color-warning)]">
                 <PackageOpen size={18} />
-                <span className="text-sm font-medium">No RDP client installed</span>
+                <span className="text-sm font-medium">{t("rdpMissingClientTitle")}</span>
               </div>
               <p className="text-xs text-[var(--color-text-muted)] whitespace-pre-line leading-relaxed">
                 {missing.rest.split("\n").slice(1).join("\n")}
               </p>
               <div className="flex flex-col gap-2 w-full">
                 <p className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider">
-                  Install command
+                  {t("rdpInstallCmd")}
                 </p>
                 <code
                   className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-3 py-2 text-xs font-mono text-[var(--color-text-primary)] text-left cursor-pointer select-all"
@@ -595,7 +596,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
                   sudo apt install freerdp3-x11
                 </code>
                 <p className="text-[10px] text-[var(--color-text-muted)]">
-                  After installing, click Retry below.
+                  {t("rdpInstallHint")}
                 </p>
               </div>
               <button
@@ -603,7 +604,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
                 className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
               >
                 <RefreshCw size={12} />
-                Retry
+                {t("connRetry")}
               </button>
             </div>
           );
@@ -612,14 +613,14 @@ export function RdpPane({ tab }: RdpPaneProps) {
           <div className="flex flex-col items-center gap-3 max-w-sm">
             <div className="flex items-start gap-2 text-[var(--color-danger)] text-sm text-left">
               <AlertCircle size={15} className="shrink-0 mt-0.5" />
-              <span className="whitespace-pre-line">{errorMsg}</span>
+              <span className="whitespace-pre-line">{friendlyConnError(errorMsg, lang, "rdp")}</span>
             </div>
             <button
               onClick={() => connect(true)}
               className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
             >
               <RefreshCw size={12} />
-              Retry
+              {t("connRetry")}
             </button>
           </div>
         );
