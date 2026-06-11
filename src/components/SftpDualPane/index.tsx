@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "../../store/useAppStore";
+import { useNotifStore } from "../../store/useNotifStore";
 import {
   sftpConnect, sftpDisconnect, sftpListDir, sftpUpload, sftpDownload,
   sftpMkdir, sftpRename, sftpDelete,
@@ -691,12 +692,18 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
       const home = connection.username ? `/home/${connection.username}` : "/";
       try { await loadRemote(sid, home); } catch { await loadRemote(sid, "/"); }
     } catch (err) {
-      setConnError(String(err));
-      setTabStatus(tab.id, "error");
+      const raw = String(err);
+      useNotifStore.getState().add({
+        connName: connection.name,
+        connType: "sftp",
+        host: connection.host,
+        raw,
+      });
+      closeTab(tab.id);
     } finally {
       setConnecting(false);
     }
-  }, [connection, tab.id, setTabStatus, loadRemote]);
+  }, [connection, tab.id, setTabStatus, loadRemote, closeTab]);
 
   // ── Initial load ────────────────────────────────────────────────────────────
 

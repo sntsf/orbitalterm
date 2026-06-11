@@ -38,13 +38,13 @@ function FtpStandalonePane({ tab }: { tab: Tab }) {
       .then((sid) => { if (!cancelled) handleConnect(sid); })
       .catch((err) => {
         if (!cancelled) {
-          setTabStatus(tab.id, "error");
           useNotifStore.getState().add({
             connName: connection?.name ?? tab.connection_name,
             connType: "ftp",
             host: connection?.host ?? "",
             raw: String(err),
           });
+          closeTab(tab.id);
         }
       });
     return () => { cancelled = true; };

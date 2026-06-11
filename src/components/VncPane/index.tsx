@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Monitor, WifiOff, Loader } from "lucide-react";
+import { Monitor, Loader } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { vncConnect, vncDisconnect, vncKeyEvent, vncPointerEvent } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import { useNotifStore } from "../../store/useNotifStore";
-import { useT, useI18nStore } from "../../store/useI18nStore";
-import { friendlyConnError } from "../../lib/connErrors";
+import { useT } from "../../store/useI18nStore";
 import type { Tab } from "../../types";
 
 interface VncPaneProps {
@@ -84,19 +83,16 @@ interface VncFrame {
 }
 
 export function VncPane({ tab }: VncPaneProps) {
-  const { getConnectionById, setTabStatus } = useAppStore();
+  const { getConnectionById, setTabStatus, closeTab } = useAppStore();
   const connection = getConnectionById(tab.connection_id);
   const t = useT();
-  const { lang } = useI18nStore();
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
 
-  const [status, setStatus] = useState<"connecting" | "connected" | "disconnected" | "error">("connecting");
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [status, setStatus] = useState<"connecting" | "connected">("connecting");
   const [vncSize, setVncSize] = useState({ width: 1024, height: 768 });
-  const [reconnecting, setReconnecting] = useState(false);
 
   // Draw a received JPEG frame onto the canvas
   const drawFrame = useCallback((payload: VncFrame) => {
@@ -112,7 +108,6 @@ export function VncPane({ tab }: VncPaneProps) {
   const connect = useCallback(async () => {
     if (!connection) return;
     setStatus("connecting");
-    setErrorMsg(null);
     try {
       const result = await vncConnect(connection.id);
       sessionIdRef.current = result.session_id;
@@ -121,19 +116,15 @@ export function VncPane({ tab }: VncPaneProps) {
       setTabStatus(tab.id, "connected");
     } catch (err) {
       const raw = String(err);
-      setStatus("error");
-      setErrorMsg(raw);
-      setTabStatus(tab.id, "error");
-      if (connection) {
-        useNotifStore.getState().add({
-          connName: connection.name,
-          connType: "vnc",
-          host: connection.host,
-          raw,
-        });
-      }
+      useNotifStore.getState().add({
+        connName: connection.name,
+        connType: "vnc",
+        host: connection.host,
+        raw,
+      });
+      closeTab(tab.id);
     }
-  }, [connection, tab.id, setTabStatus]);
+  }, [connection, tab.id, setTabStatus, closeTab]);
 
   // Connect on mount
   useEffect(() => {
@@ -155,8 +146,7 @@ export function VncPane({ tab }: VncPaneProps) {
     listen<VncFrame>(`vnc-frame-${sid}`, (e) => drawFrame(e.payload))
       .then((fn) => cleanups.push(fn));
     listen(`vnc-disconnected-${sid}`, () => {
-      setStatus("disconnected");
-      setTabStatus(tab.id, "error");
+      closeTab(tab.id);
     }).then((fn) => cleanups.push(fn));
 
     return () => cleanups.forEach((fn) => fn());
@@ -227,50 +217,17 @@ export function VncPane({ tab }: VncPaneProps) {
     e.preventDefault();
   };
 
-  const handleReconnect = async () => {
-    if (sessionIdRef.current) {
-      vncDisconnect(sessionIdRef.current).catch(console.error);
-      sessionIdRef.current = null;
-    }
-    setReconnecting(true);
-    try { await connect(); }
-    finally { setReconnecting(false); }
-  };
+  // ── Connecting spinner ─────────────────────────────────────────────────────
 
-  // ── Error / disconnected states ────────────────────────────────────────────
-
-  if (status === "connecting" || status === "error" || status === "disconnected") {
+  if (status === "connecting") {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4 text-[var(--color-text-muted)] bg-[var(--color-bg-base)]">
-        {status === "connecting" ? (
-          <>
-            <Loader size={32} className="animate-spin opacity-40" />
-            <p className="text-xs">{t("vncConnecting")}</p>
-            {connection && (
-              <p className="text-[10px] text-[var(--color-text-muted)]">
-                {connection.host}:{connection.port}
-              </p>
-            )}
-          </>
-        ) : (
-          <>
-            <WifiOff size={32} className={status === "disconnected" ? "opacity-40" : "text-[var(--color-danger)] opacity-70"} />
-            <p className="text-xs font-medium text-[var(--color-text-primary)]">
-              {status === "disconnected" ? t("vncDisconnected") : t("vncConnError")}
-            </p>
-            {errorMsg && (
-              <p className="text-[10px] text-[var(--color-danger)] max-w-xs text-center px-4 whitespace-pre-line">
-                {friendlyConnError(errorMsg, lang, "vnc")}
-              </p>
-            )}
-            <button
-              onClick={handleReconnect}
-              disabled={reconnecting}
-              className="px-4 py-1.5 bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white text-xs rounded transition-colors disabled:opacity-50"
-            >
-              {reconnecting ? t("connReconnecting") : t("connReconnect")}
-            </button>
-          </>
+        <Loader size={32} className="animate-spin opacity-40" />
+        <p className="text-xs">{t("vncConnecting")}</p>
+        {connection && (
+          <p className="text-[10px] text-[var(--color-text-muted)]">
+            {connection.host}:{connection.port}
+          </p>
         )}
       </div>
     );

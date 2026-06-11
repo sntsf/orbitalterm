@@ -279,7 +279,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
   // created. This prevents React 18 StrictMode's double-invoke from opening
   // two simultaneous RDP connections to the same server.
   const connectGenRef = useRef(0);
-  const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
+  const { setTabStatus, setTabSessionId, getConnectionById, closeTab } = useAppStore();
   const t = useT();
   const { lang } = useI18nStore();
   const isWindows = /Windows/i.test(navigator.userAgent);
@@ -349,11 +349,12 @@ export function RdpPane({ tab }: RdpPaneProps) {
     } catch (err) {
       if (gen === connectGenRef.current) {
         const raw = String(err);
-        setErrorMsg(raw);
-        setStatus("error");
-        setTabStatus(tab.id, "error");
-        // Don't notify for cases that have their own inline UI (missing client / no password)
-        if (!raw.startsWith("NO_RDP_CLIENT") && !raw.startsWith("NO_PASSWORD")) {
+        if (raw.startsWith("NO_RDP_CLIENT") || raw.startsWith("NO_PASSWORD")) {
+          // Show inline UI for these special cases (package not installed / no credentials)
+          setErrorMsg(raw);
+          setStatus("error");
+          setTabStatus(tab.id, "error");
+        } else {
           const conn = getConnectionById(tab.connection_id);
           useNotifStore.getState().add({
             connName: tab.connection_name,
@@ -361,6 +362,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
             host: conn?.host ?? "",
             raw,
           });
+          closeTab(tab.id);
         }
       }
     }
@@ -443,22 +445,11 @@ export function RdpPane({ tab }: RdpPaneProps) {
     if (!sid) return;
     const unlistens: UnlistenFn[] = [];
 
-    // Normal session end (user logged off after a real connection)
+    // Normal session end (user logged off after a real connection) — just close the tab
     listen(`rdp-disconnected-${sid}`, () => {
       const s = sessionIdRef.current;
       if (s) { disconnectRdp(s).catch(() => {}); sessionIdRef.current = null; }
-      setEmbedded(false);
-      setNativeWindow(false);
-      setStatus("error");
-      setErrorMsg("SESSION_ENDED");
-      setTabStatus(tab.id, "error");
-      const conn = getConnectionById(tab.connection_id);
-      useNotifStore.getState().add({
-        connName: tab.connection_name,
-        connType: "rdp",
-        host: conn?.host ?? "",
-        raw: "SESSION_ENDED",
-      });
+      closeTab(tab.id);
     }).then((fn) => unlistens.push(fn));
 
     // Connection failed before ever connecting (server off, port closed, etc.)
@@ -466,11 +457,6 @@ export function RdpPane({ tab }: RdpPaneProps) {
       const s = sessionIdRef.current;
       if (s) { disconnectRdp(s).catch(() => {}); sessionIdRef.current = null; }
       const raw = e.payload || "connection timed out";
-      setEmbedded(false);
-      setNativeWindow(false);
-      setStatus("error");
-      setErrorMsg(raw);
-      setTabStatus(tab.id, "error");
       const conn = getConnectionById(tab.connection_id);
       useNotifStore.getState().add({
         connName: tab.connection_name,
@@ -478,6 +464,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
         host: conn?.host ?? "",
         raw,
       });
+      closeTab(tab.id);
     }).then((fn) => unlistens.push(fn));
 
     return () => { unlistens.forEach((fn) => fn()); };
@@ -502,10 +489,6 @@ export function RdpPane({ tab }: RdpPaneProps) {
         width={frameSize.width}
         height={frameSize.height}
         onSessionError={(msg) => {
-          setEmbedded(false);
-          setNativeWindow(false);
-          setStatus("error");
-          setErrorMsg(msg);
           if (msg !== "SESSION_ENDED") {
             const conn = getConnectionById(tab.connection_id);
             useNotifStore.getState().add({
@@ -515,6 +498,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
               raw: msg,
             });
           }
+          closeTab(tab.id);
         }}
         onResize={handleResize}
       />

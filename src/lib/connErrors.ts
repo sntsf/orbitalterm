@@ -255,3 +255,78 @@ export function friendlyConnError(raw: string, lang: "es" | "en", connType?: str
 export function friendlyConnErrorShort(raw: string, lang: "es" | "en", connType?: string): string {
   return friendlyConnError(raw, lang, connType).split("\n")[0];
 }
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+function isUnreachable(r: string) {
+  return (
+    r.includes("timed out") || r.includes("timeout") || r.includes("connection timed") ||
+    r.includes("no route to host") || r.includes("network is unreachable") ||
+    r.includes("host unreachable") || r.includes("connect_transport_failed") ||
+    r.includes("transport failed")
+  );
+}
+function isRefused(r: string) { return r.includes("connection refused"); }
+
+/**
+ * Compact two-line format for the notification toast:
+ *   Line 1 — short title
+ *   Line 2 — numbered causes joined with "  ·  "
+ */
+export function friendlyConnErrorNotif(raw: string, lang: "es" | "en", connType?: string): string {
+  const r = raw.toLowerCase();
+
+  if (r === "session_ended" || r.startsWith("session_ended")) {
+    return lang === "es" ? "Sesión finalizada." : "Session ended.";
+  }
+
+  if (lang === "es") {
+    if (isUnreachable(r)) {
+      if (connType === "rdp")
+        return "No se puede conectar al equipo remoto.\n1) Equipo apagado o sin red  ·  2) Puerto 3389 bloqueado o modificado  ·  3) Acceso remoto (RDP) no habilitado en el servidor";
+      if (connType === "vnc")
+        return "No se puede conectar al servidor VNC.\n1) Equipo apagado o sin red  ·  2) Puerto VNC bloqueado  ·  3) Servidor VNC no está en ejecución";
+      if (connType === "ssh" || connType === "sftp")
+        return "No se puede conectar al servidor SSH.\n1) Equipo apagado o sin red  ·  2) Puerto SSH bloqueado  ·  3) Servicio SSH (sshd) no está en ejecución";
+      if (connType === "ftp")
+        return "No se puede conectar al servidor FTP.\n1) Equipo apagado o sin red  ·  2) Puerto FTP bloqueado  ·  3) Servidor FTP no está en ejecución";
+      return "Tiempo de espera agotado — el host no respondió.";
+    }
+    if (isRefused(r)) {
+      if (connType === "rdp")
+        return "Conexión rechazada en el puerto RDP.\n1) Equipo apagado o sin red  ·  2) Puerto 3389 bloqueado o modificado  ·  3) Acceso remoto (RDP) no habilitado en el servidor";
+      if (connType === "ssh" || connType === "sftp")
+        return "Conexión rechazada en el puerto SSH.\n1) Equipo apagado o sin red  ·  2) Servicio SSH (sshd) no está en ejecución  ·  3) Puerto SSH bloqueado";
+      if (connType === "vnc")
+        return "Conexión rechazada en el puerto VNC.\n1) Equipo apagado o sin red  ·  2) Servidor VNC no está en ejecución  ·  3) Puerto VNC bloqueado";
+      if (connType === "ftp")
+        return "Conexión rechazada en el puerto FTP.\n1) Equipo apagado o sin red  ·  2) Servidor FTP no está en ejecución  ·  3) Puerto FTP bloqueado";
+      return "Conexión rechazada — el puerto está cerrado o el servicio no está activo.";
+    }
+    return friendlyConnErrorShort(raw, lang, connType);
+  }
+
+  // English
+  if (isUnreachable(r)) {
+    if (connType === "rdp")
+      return "Cannot connect to the remote computer.\n1) Computer off or no network  ·  2) Port 3389 blocked or changed  ·  3) Remote Desktop (RDP) not enabled on server";
+    if (connType === "vnc")
+      return "Cannot connect to the VNC server.\n1) Computer off or no network  ·  2) VNC port blocked  ·  3) VNC server is not running";
+    if (connType === "ssh" || connType === "sftp")
+      return "Cannot connect to the SSH server.\n1) Computer off or no network  ·  2) SSH port blocked  ·  3) SSH service (sshd) is not running";
+    if (connType === "ftp")
+      return "Cannot connect to the FTP server.\n1) Computer off or no network  ·  2) FTP port blocked  ·  3) FTP server is not running";
+    return "Connection timed out — the host did not respond.";
+  }
+  if (isRefused(r)) {
+    if (connType === "rdp")
+      return "Connection refused on the RDP port.\n1) Computer off or no network  ·  2) Port 3389 blocked or changed  ·  3) Remote Desktop (RDP) not enabled on server";
+    if (connType === "ssh" || connType === "sftp")
+      return "Connection refused on the SSH port.\n1) Computer off or no network  ·  2) SSH service (sshd) is not running  ·  3) SSH port blocked";
+    if (connType === "vnc")
+      return "Connection refused on the VNC port.\n1) Computer off or no network  ·  2) VNC server is not running  ·  3) VNC port blocked";
+    if (connType === "ftp")
+      return "Connection refused on the FTP port.\n1) Computer off or no network  ·  2) FTP server is not running  ·  3) FTP port blocked";
+    return "Connection refused — the port is closed or the service is not running.";
+  }
+  return friendlyConnErrorShort(raw, lang, connType);
+}
