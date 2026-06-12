@@ -428,7 +428,7 @@ export function Sidebar() {
 
   const folderMenu = (e: React.MouseEvent, folder: FolderType) =>
     openMenu(e, [
-      { label: t("newConnectionMenu"), icon: <Plus size={12} />, action: () => startNewConnection(folder.id, folder.group_id) },
+      { label: t("newConnectionMenu"), icon: <Plus size={12} />, action: () => startNewConnection(folder.id, folder.group_id, t("newConnectionMenu")) },
       { label: t("newSubfolder"), icon: <FolderPlus size={12} />, action: () => startCreateFolder(folder.id, folder.group_id) },
       { label: t("rename"), icon: <Edit2 size={12} />, action: () => startRenameFolder(folder) },
       { separator: true },
@@ -437,7 +437,7 @@ export function Sidebar() {
 
   const groupMenu = (e: React.MouseEvent, group: Group) =>
     openMenu(e, [
-      { label: t("newConnectionMenu"), icon: <Plus size={12} />, action: () => startNewConnection(null, group.id) },
+      { label: t("newConnectionMenu"), icon: <Plus size={12} />, action: () => startNewConnection(null, group.id, t("newConnectionMenu")) },
       { label: t("newFolder"), icon: <FolderPlus size={12} />, action: () => startCreateFolder(null, group.id) },
       { label: t("rename"), icon: <Edit2 size={12} />, action: () => startRenameGroup(group) },
       { separator: true },
@@ -446,7 +446,7 @@ export function Sidebar() {
 
   const duplicate = async (conn: Connection) => {
     const created = await saveConnection({
-      name: `${conn.name}(duplicado)`, type: conn.type, host: conn.host, port: conn.port,
+      name: conn.name, type: conn.type, host: conn.host, port: conn.port,
       username: conn.username, auth_type: conn.auth_type, key_path: conn.key_path,
       folder_id: conn.folder_id, notes: conn.notes, description: conn.description,
       domain: conn.domain, group_id: conn.group_id,
@@ -596,7 +596,7 @@ export function Sidebar() {
           draggable={false}
         />
         <div className="flex gap-0.5">
-          <button onClick={() => startNewConnection()}
+          <button onClick={() => startNewConnection(null, null, t("newConnectionMenu"))}
             className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
             title={t("newConnection")}>
             <Plus size={14} />
@@ -789,7 +789,7 @@ export function Sidebar() {
                   {groupConnCount === 0 && (
                     <div className="px-4 py-3 text-center text-[var(--color-text-muted)] text-xs">
                       <Terminal size={16} className="mx-auto mb-1 opacity-30" />
-                      <button onClick={() => startNewConnection(null, group.id)}
+                      <button onClick={() => startNewConnection(null, group.id, t("newConnectionMenu"))}
                         className="text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] text-[12px]">
                         {t("addFirst")}
                       </button>

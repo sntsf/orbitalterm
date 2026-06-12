@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import type { Connection, ConnectionStatus, Folder, Group, Tab } from "../types";
+import { saveConnection as dbSaveConnection, getConnections as dbGetConnections } from "../lib/commands";
+import { DEFAULT_CONN_ICON } from "../lib/connIcons";
 
 interface AppStore {
   connections: Connection[];
@@ -21,7 +23,7 @@ interface AppStore {
   setSearchQuery: (q: string) => void;
   selectConnection: (id: string | null) => void;
   setIsCreatingNew: (v: boolean) => void;
-  startNewConnection: (folderId?: string | null, groupId?: string | null) => void;
+  startNewConnection: (folderId?: string | null, groupId?: string | null, name?: string) => Promise<void>;
   toggleSidebar: () => void;
 
   openTab: (connection: Connection) => void;
@@ -66,8 +68,33 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   setIsCreatingNew: (isCreatingNew) => set({ isCreatingNew }),
 
-  startNewConnection: (folderId = null, groupId = null) =>
-    set({ isCreatingNew: true, selectedConnectionId: null, newConnectionFolderId: folderId, newConnectionGroupId: groupId }),
+  startNewConnection: async (folderId = null, groupId = null, name = "New Connection") => {
+    const { groups } = get();
+    const resolvedGroupId = groupId ?? groups[0]?.id ?? "";
+    try {
+      const created = await dbSaveConnection({
+        name,
+        type: "ssh",
+        host: "",
+        port: 22,
+        username: "",
+        auth_type: "agent",
+        key_path: "",
+        folder_id: folderId,
+        notes: "",
+        description: "",
+        domain: "",
+        group_id: resolvedGroupId,
+        icon: DEFAULT_CONN_ICON["ssh"],
+        url: "",
+        custom_hosts: "",
+      });
+      const connections = await dbGetConnections();
+      set({ connections, selectedConnectionId: created.id, isCreatingNew: false });
+    } catch (err) {
+      console.error("[startNewConnection]", err);
+    }
+  },
 
   toggleSidebar: () => set((s) => ({ sidebarVisible: !s.sidebarVisible })),
 

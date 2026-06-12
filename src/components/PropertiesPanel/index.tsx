@@ -1,9 +1,8 @@
-import { useEffect, useState } from "react";
-import { Save, Plug, Eye, EyeOff, Info } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Plug, Eye, EyeOff, Info } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore } from "../../store/useI18nStore";
 import {
-  saveConnection,
   updateConnection,
   getConnections,
   savePassword,
@@ -73,15 +72,8 @@ export function PropertiesPanel() {
   const { lang } = useI18nStore();
   const {
     connections,
-    folders,
-    groups,
     selectedConnectionId,
-    isCreatingNew,
-    newConnectionFolderId,
-    newConnectionGroupId,
     setConnections,
-    setIsCreatingNew,
-    selectConnection,
     openTab,
   } = useAppStore();
 
@@ -106,89 +98,20 @@ export function PropertiesPanel() {
   const [icon, setIcon] = useState<string>("");
   const [url, setUrl] = useState("");
   const [customHosts, setCustomHosts] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [connectError, setConnectError] = useState("");
   const [focusedField, setFocusedField] = useState<FieldKey | null>(null);
 
-  useEffect(() => {
-    if (existing) {
-      setName(existing.name);
-      setDescription(existing.description);
-      setType(existing.type);
-      setHost(existing.host);
-      setPort(existing.port);
-      setUsername(existing.username);
-      setDomain(existing.domain);
-      setAuthType(existing.auth_type);
-      setKeyPath(existing.key_path);
-      setFolderId(existing.folder_id ?? "");
-      setGroupId(existing.group_id ?? "");
-      setNotes(existing.notes);
-      setIcon(existing.icon || DEFAULT_CONN_ICON[existing.type]);
-      setUrl(existing.url ?? "");
-      setCustomHosts(existing.custom_hosts ?? "");
-      setPassword("");
-      setError("");
-      if (existing.auth_type === "password") {
-        hasPassword(existing.id).then(setHasSaved).catch(() => setHasSaved(false));
-      } else {
-        setHasSaved(false);
-      }
-    } else if (isCreatingNew) {
-      setName("");
-      setDescription("");
-      setType("ssh");
-      setHost("");
-      setPort(22);
-      setUsername("");
-      setDomain("");
-      setAuthType("password");
-      setKeyPath("");
-      setPassword("");
-      setIcon(DEFAULT_CONN_ICON["ssh"]);
-      setFolderId(newConnectionFolderId ?? "");
-      const folderGroup = newConnectionFolderId
-        ? folders.find((f) => f.id === newConnectionFolderId)?.group_id
-        : null;
-      setGroupId(folderGroup ?? newConnectionGroupId ?? groups[0]?.id ?? "");
-      setNotes("");
-      setUrl("");
-      setCustomHosts("");
-      setHasSaved(false);
-      setError("");
-    }
-  }, [existing?.id, isCreatingNew, newConnectionFolderId, newConnectionGroupId]);
+  // Skip the first auto-save effect run when populating fields from a new selection
+  const skipSaveRef = useRef(false);
 
-  const handleTypeChange = (newType: ConnectionType) => {
-    setType(newType);
-    setPort(DEFAULT_PORTS[newType]);
-    const supportedAuth = AUTH_FOR_TYPE[newType];
-    if (supportedAuth.length === 0) setAuthType("password");
-    else if (!supportedAuth.includes(authType)) setAuthType(supportedAuth[0]);
-    // Auto-update icon if it still matches the old type's default
-    setIcon((prev) => {
-      const oldDefault = DEFAULT_CONN_ICON[type];
-      if (!prev || prev === oldDefault) return DEFAULT_CONN_ICON[newType];
-      return prev;
-    });
-  };
-
-  const handleSave = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    setError("");
-    const isBrowser = type === "browser";
-    if (!name.trim() || (!isBrowser && (!host.trim() || !username.trim()))) {
-      setError(isBrowser ? (lang === "es" ? "El nombre y la URL son obligatorios." : "Name and URL are required.") : t("propRequired"));
-      return;
-    }
-    if (isBrowser && !url.trim()) {
-      setError(lang === "es" ? "El nombre y la URL son obligatorios." : "Name and URL are required.");
-      return;
-    }
-    setSaving(true);
+  // Always-current save function (avoids stale closures in setTimeout)
+  const doSaveRef = useRef<() => Promise<void>>();
+  doSaveRef.current = async () => {
+    if (!existing) return;
     try {
-      const payload = {
-        name: name.trim(),
+      await updateConnection({
+        ...existing,
+        name: name.trim() || existing.name,
         description: description.trim(),
         type,
         host: host.trim(),
@@ -203,38 +126,95 @@ export function PropertiesPanel() {
         icon,
         url: url.trim(),
         custom_hosts: customHosts,
-      };
-
-      let savedId: string;
-      if (existing) {
-        const updated = await updateConnection({ ...existing, ...payload });
-        savedId = updated.id;
-      } else {
-        const created = await saveConnection(payload);
-        savedId = created.id;
-        selectConnection(created.id);
-        setIsCreatingNew(false);
-      }
-
-      if (authType === "password") {
-        if (password) await savePassword(savedId, password);
-      } else {
-        await deletePassword(savedId).catch(() => {});
-      }
-
+      });
       setConnections(await getConnections());
     } catch (err) {
-      setError(String(err));
-    } finally {
-      setSaving(false);
+      console.error("[auto-save]", err);
     }
   };
 
-  const handleConnect = async () => {
-    if (existing) openTab(existing);
+  // Populate fields when selected connection changes
+  useEffect(() => {
+    if (!existing) return;
+    skipSaveRef.current = true;
+    setName(existing.name);
+    setDescription(existing.description);
+    setType(existing.type);
+    setHost(existing.host);
+    setPort(existing.port);
+    setUsername(existing.username);
+    setDomain(existing.domain);
+    setAuthType(existing.auth_type);
+    setKeyPath(existing.key_path);
+    setFolderId(existing.folder_id ?? "");
+    setGroupId(existing.group_id ?? "");
+    setNotes(existing.notes);
+    setIcon(existing.icon || DEFAULT_CONN_ICON[existing.type]);
+    setUrl(existing.url ?? "");
+    setCustomHosts(existing.custom_hosts ?? "");
+    setPassword("");
+    setConnectError("");
+    if (existing.auth_type === "password") {
+      hasPassword(existing.id).then(setHasSaved).catch(() => setHasSaved(false));
+    } else {
+      setHasSaved(false);
+    }
+  }, [existing?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Debounced auto-save: fires 600ms after the last field change
+  useEffect(() => {
+    if (!existing) return;
+    if (skipSaveRef.current) { skipSaveRef.current = false; return; }
+    const timer = setTimeout(() => { doSaveRef.current?.(); }, 600);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts]);
+
+  const handleTypeChange = (newType: ConnectionType) => {
+    setType(newType);
+    setPort(DEFAULT_PORTS[newType]);
+    const supportedAuth = AUTH_FOR_TYPE[newType];
+    if (supportedAuth.length === 0) setAuthType("password");
+    else if (!supportedAuth.includes(authType)) setAuthType(supportedAuth[0]);
+    setIcon((prev) => {
+      const oldDefault = DEFAULT_CONN_ICON[type];
+      if (!prev || prev === oldDefault) return DEFAULT_CONN_ICON[newType];
+      return prev;
+    });
   };
 
-  if (!existing && !isCreatingNew) {
+  // Password is saved on blur (not on debounce) to avoid saving on every keystroke
+  const handlePasswordBlur = async () => {
+    if (!existing || !password) return;
+    try {
+      await savePassword(existing.id, password);
+      setHasSaved(true);
+      setPassword("");
+    } catch (err) {
+      console.error("[save-password]", err);
+    }
+  };
+
+  // Auth type change: delete saved password when switching away from password auth
+  const handleAuthTypeChange = async (newAuth: AuthType) => {
+    setAuthType(newAuth);
+    if (newAuth !== "password" && existing) {
+      await deletePassword(existing.id).catch(() => {});
+      setHasSaved(false);
+    }
+  };
+
+  const handleConnect = () => {
+    if (!existing) return;
+    if (existing.type !== "browser" && (!existing.host.trim() || !existing.username.trim())) {
+      setConnectError(t("propRequired"));
+      return;
+    }
+    setConnectError("");
+    openTab(existing);
+  };
+
+  if (!existing) {
     return (
       <div className="flex flex-col h-full">
         <div className="flex-1 flex items-center justify-center text-[var(--color-text-muted)] text-xs px-4 text-center">
@@ -263,33 +243,21 @@ export function PropertiesPanel() {
   const blur = () => setFocusedField(null);
 
   return (
-    <form onSubmit={handleSave} className="flex flex-col h-full overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--color-border)] shrink-0">
         <span className="text-[12px] uppercase tracking-wider text-[var(--color-text-muted)] font-medium">
-          {isCreatingNew ? t("propNewConnection") : t("propProperties")}
+          {t("propProperties")}
         </span>
-        <div className="flex gap-1">
-          {existing && (
-            <button
-              type="button"
-              onClick={handleConnect}
-              title={t("propConnect")}
-              className="flex items-center gap-1 px-2 py-1 rounded text-[12px] text-[var(--color-success)] hover:bg-[var(--color-success)]/10 transition-colors"
-            >
-              <Plug size={13} />
-              {t("propConnect")}
-            </button>
-          )}
-          <button
-            type="submit"
-            disabled={saving}
-            className="flex items-center gap-1 px-2 py-1 rounded text-[12px] bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white transition-colors disabled:opacity-50"
-          >
-            <Save size={13} />
-            {saving ? t("propSaving") : t("propSave")}
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={handleConnect}
+          title={t("propConnect")}
+          className="flex items-center gap-1 px-2 py-1 rounded text-[12px] text-[var(--color-success)] hover:bg-[var(--color-success)]/10 transition-colors"
+        >
+          <Plug size={13} />
+          {t("propConnect")}
+        </button>
       </div>
 
       {/* Fields */}
@@ -357,7 +325,7 @@ export function PropertiesPanel() {
 
         {showAuthSection && (
           <Row label={t("propAuth")}>
-            <select value={authType} onChange={(e) => setAuthType(e.target.value as AuthType)}
+            <select value={authType} onChange={(e) => handleAuthTypeChange(e.target.value as AuthType)}
               onFocus={focus("auth")} onBlur={blur} className={inp}>
               {supportedAuthTypes.map((a) => (
                 <option key={a} value={a}>{authLabels[a]}</option>
@@ -380,8 +348,9 @@ export function PropertiesPanel() {
                 type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                onBlur={handlePasswordBlur}
                 placeholder={hasSaved ? t("propPasswordSaved") : t("propPasswordPlaceholder")}
-                onFocus={focus("password")} onBlur={blur}
+                onFocus={focus("password")}
                 className={inp + " pr-7"}
               />
               <button
@@ -427,12 +396,12 @@ export function PropertiesPanel() {
           </Row>
         )}
 
-        {error && <p className="text-[var(--color-danger)] text-[12px]">{error}</p>}
+        {connectError && <p className="text-[var(--color-danger)] text-[11px]">{connectError}</p>}
       </div>
 
       {/* Contextual hint */}
       <HintBox hint={hint} hintLang={hintLang} />
-    </form>
+    </div>
   );
 }
 
