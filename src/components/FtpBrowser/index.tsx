@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { flushSync } from "react-dom";
 import {
   Folder, File, Upload, Download, FolderPlus, RefreshCw,
-  HardDrive, ChevronLeft, Pencil, Trash2, WifiOff,
+  ChevronLeft, Pencil, Trash2, WifiOff, Loader,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -267,17 +267,28 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
   const selectedFiles = entries.filter((e) => selected.has(e.path) && !e.is_dir);
   const pct = progress.total > 0 ? Math.round(progress.transferred * 100 / progress.total) : 0;
 
-  // ── disconnected / not connected ───────────────────────────────────────────
+  // ── auto-connecting (parent handles initial connect) ──────────────────────
 
-  if (!sessionId || disconnected) {
+  if (!sessionId && !disconnected) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-3 bg-[var(--color-bg-surface)] text-[var(--color-text-muted)]">
-        {disconnected ? <WifiOff size={28} className="opacity-40" /> : <HardDrive size={32} className="opacity-40" />}
-        <span className="text-xs">{disconnected ? "Sesión FTP perdida" : "FTP no conectado"}</span>
+        <Loader size={28} className="animate-spin opacity-60" />
+        <span className="text-xs">Conectando a FTP…</span>
+      </div>
+    );
+  }
+
+  // ── session lost — show reconnect ─────────────────────────────────────────
+
+  if (disconnected) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-3 bg-[var(--color-bg-surface)] text-[var(--color-text-muted)]">
+        <WifiOff size={28} className="opacity-40" />
+        <span className="text-xs font-medium text-[var(--color-text-primary)]">Sesión FTP perdida</span>
         {error && <p className="text-[var(--color-danger)] text-xs px-4 text-center">{error}</p>}
         <button onClick={handleConnect} disabled={connecting}
           className="px-3 py-1.5 bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white text-xs rounded transition-colors disabled:opacity-50">
-          {connecting ? "Conectando…" : disconnected ? "Reconectar FTP" : "Conectar FTP"}
+          {connecting ? "Reconectando…" : "Reconectar FTP"}
         </button>
       </div>
     );
