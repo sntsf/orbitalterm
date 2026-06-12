@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
   Plus, Search, FolderOpen, Folder, Terminal,
@@ -75,13 +75,21 @@ function buildSearchHint(lang: string) {
 // ── Sidebar ────────────────────────────────────────────────────────────────────
 
 export function Sidebar() {
-  const {
-    connections, folders, groups,
-    setConnections, setFolders, setGroups, setSearchQuery, searchQuery,
-    selectConnection, selectedConnectionId,
-    openTab, toggleFolder, expandFolder, startNewConnection,
-    setSidebarHint,
-  } = useAppStore();
+  // Individual selectors — the sidebar tree is large, so we must NOT re-render
+  // it on unrelated store changes (hover hints, tab status, notifications…).
+  const connections = useAppStore((s) => s.connections);
+  const folders = useAppStore((s) => s.folders);
+  const groups = useAppStore((s) => s.groups);
+  const searchQuery = useAppStore((s) => s.searchQuery);
+  const selectedConnectionId = useAppStore((s) => s.selectedConnectionId);
+  const setConnections = useAppStore((s) => s.setConnections);
+  const setFolders = useAppStore((s) => s.setFolders);
+  const setGroups = useAppStore((s) => s.setGroups);
+  const setSearchQuery = useAppStore((s) => s.setSearchQuery);
+  const selectConnection = useAppStore((s) => s.selectConnection);
+  const openTab = useAppStore((s) => s.openTab);
+  const startNewConnection = useAppStore((s) => s.startNewConnection);
+  const setSidebarHint = useAppStore((s) => s.setSidebarHint);
   const { lang } = useI18nStore();
   const t = useT();
   const { notifs, expanded, show, clearAll: clearAllNotifs } = useNotifStore();
@@ -129,6 +137,25 @@ export function Sidebar() {
 
   // Group expand state: default all expanded
   const [groupExpanded, setGroupExpanded] = useState<Record<string, boolean>>({});
+
+  // Folder expand state — default COLLAPSED and persisted. This is what keeps
+  // huge imported trees fluid: only the folders the user opens are mounted,
+  // instead of rendering thousands of connections at once.
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("orbitalterm:expandedFolders");
+      return new Set<string>(raw ? JSON.parse(raw) : []);
+    } catch { return new Set<string>(); }
+  });
+  useEffect(() => {
+    localStorage.setItem("orbitalterm:expandedFolders", JSON.stringify([...expandedFolders]));
+  }, [expandedFolders]);
+  const toggleFolderExpand = (id: string) =>
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
 
   // Group renaming
   const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
@@ -194,39 +221,48 @@ export function Sidebar() {
     }
   }, [creatingGroup]);
 
-  // Search matches (empty when no query)
-  const searchMatches = searchQuery
-    ? connections.filter(
-        (c) =>
-          c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          c.host.toLowerCase().includes(searchQuery.toLowerCase()),
-      )
-    : [];
+  // Folder full-path resolver (ancestor names), memoized — used both for
+  // matching ("search by folder name") and for showing each result's location.
+  const folderPath = useMemo(() => {
+    const byId = new Map(folders.map((f) => [f.id, f]));
+    const cache = new Map<string | null, string>();
+    const build = (id: string | null): string => {
+      if (!id) return "";
+      if (cache.has(id)) return cache.get(id)!;
+      const f = byId.get(id);
+      const p = f ? (f.parent_id ? `${build(f.parent_id)} / ${f.name}` : f.name) : "";
+      cache.set(id, p);
+      return p;
+    };
+    return build;
+  }, [folders]);
 
-  // When query changes: expand ancestor folders of all matches + jump to first
+  // Search matches (empty when no query). Matches by connection name, host/IP,
+  // OR the name of any ancestor folder. Memoized so we only recompute when the
+  // query or data actually changes — not on every render.
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [];
+    return connections.filter((c) =>
+      c.name.toLowerCase().includes(q) ||
+      c.host.toLowerCase().includes(q) ||
+      folderPath(c.folder_id ?? null).toLowerCase().includes(q),
+    );
+  }, [searchQuery, connections, folderPath]);
+
+  // Reset focus to the first result whenever the query changes, and preview it.
   useEffect(() => {
-    if (!searchQuery) return;
     setSearchFocusIdx(0);
-    const toExpand = new Set<string>();
-    for (const conn of searchMatches) {
-      let fid = conn.folder_id;
-      while (fid) {
-        toExpand.add(fid);
-        const f = folders.find((fo) => fo.id === fid);
-        fid = f?.parent_id ?? null;
-      }
-    }
-    toExpand.forEach((id) => expandFolder(id));
-    if (searchMatches[0]) selectConnection(searchMatches[0].id);
+    if (searchQuery && searchMatches[0]) selectConnection(searchMatches[0].id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery]);
 
-  // Scroll focused match into view whenever focus index changes
+  // Keep the focused result visible — instant (no smooth-scroll jank) and only
+  // within the compact results list, so it jumps straight to the match.
   useEffect(() => {
-    if (!searchQuery || !searchMatches[searchFocusIdx]) return;
-    const id = searchMatches[searchFocusIdx].id;
-    document.querySelector(`[data-conn-id="${id}"]`)
-      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (!searchQuery) return;
+    document.querySelector(`[data-search-row="${searchFocusIdx}"]`)
+      ?.scrollIntoView({ block: "nearest" });
   }, [searchFocusIdx, searchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleGroupExpanded = (groupId: string) => {
@@ -640,7 +676,8 @@ export function Sidebar() {
     allFolders: folders,
     allConnections: connections,
     openTab,
-    toggleFolder,
+    expandedFolders,
+    onToggleFolder: toggleFolderExpand,
     onConnContextMenu: connMenu,
     onFolderContextMenu: folderMenu,
     selectedId: selectedConnectionId,
@@ -759,8 +796,19 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Connection list — always tree view; search highlights matches in-place */}
+      {/* Connection list — tree when browsing, flat result list when searching */}
       <div className="flex-1 overflow-y-auto min-h-0 py-0.5">
+        {searchQuery ? (
+          <SearchResults
+            matches={searchMatches}
+            focusIdx={searchFocusIdx}
+            selectedId={selectedConnectionId}
+            folderPath={folderPath}
+            onFocus={(idx, conn) => { setSearchFocusIdx(idx); selectConnection(conn.id); }}
+            onOpen={openTab}
+            onContextMenu={connMenu}
+          />
+        ) : (<>
         {/* New group input */}
         {creatingGroup && (
           <div className="flex items-center gap-1 px-2 py-1">
@@ -922,6 +970,7 @@ export function Sidebar() {
             </button>
           </div>
         )}
+        </>)}
       </div>
 
       {/* Search — sits between connection list and properties panel */}
@@ -1019,7 +1068,8 @@ interface SharedProps {
   allFolders: FolderType[];
   allConnections: Connection[];
   openTab: (c: Connection) => void;
-  toggleFolder: (id: string) => void;
+  expandedFolders: Set<string>;
+  onToggleFolder: (id: string) => void;
   onConnContextMenu: (e: React.MouseEvent, c: Connection) => void;
   onFolderContextMenu: (e: React.MouseEvent, f: FolderType) => void;
   selectedId: string | null;
@@ -1055,7 +1105,7 @@ function FolderItem({
 }: { folder: FolderType; continuations: boolean[]; isLast: boolean } & SharedProps) {
   const t = useT();
   const {
-    allFolders, allConnections, openTab, toggleFolder,
+    allFolders, allConnections, openTab, expandedFolders, onToggleFolder,
     onConnContextMenu, onFolderContextMenu, selectedId, onSelect, onFolderClick,
     onConnHint, onFolderHint,
     renamingFolderId, renameFolderName, onRenameChange, onRenameConfirm, onRenameCancel, renameInputRef,
@@ -1065,11 +1115,12 @@ function FolderItem({
     searchMatchIds, searchFocusId,
   } = shared;
 
+  const expanded = expandedFolders.has(folder.id);
   const subfolders = allFolders.filter((f) => f.parent_id === folder.id);
   const myConns = allConnections.filter((c) => c.folder_id === folder.id);
 
   const isFolderDropTarget = dropTarget === `folder:${folder.id}`;
-  const Icon = folder.expanded ? FolderOpen : Folder;
+  const Icon = expanded ? FolderOpen : Folder;
   const isRenaming = renamingFolderId === folder.id;
   const creatingSubfolder = creatingFolder && newFolderParentId === folder.id;
   const childContinuations = [...continuations, !isLast];
@@ -1101,7 +1152,7 @@ function FolderItem({
       ) : (
         <button
           data-folder-id={folder.id}
-          onClick={() => { toggleFolder(folder.id); onFolderHint(folder); onFolderClick(folder); }}
+          onClick={() => { onToggleFolder(folder.id); onFolderHint(folder); onFolderClick(folder); }}
           onPointerDown={(e) => onFolderPointerDown(folder, e.clientX, e.clientY)}
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
           className={[
@@ -1114,13 +1165,13 @@ function FolderItem({
           <TreePrefix continuations={continuations} isLast={isLast} />
           <Icon size={12} className="text-amber-400 shrink-0" />
           <span className="text-[13px] truncate flex-1 ml-1 text-left font-medium">{folder.name}</span>
-          {folder.expanded
+          {expanded
             ? <ChevronDown size={9} className="shrink-0 opacity-40 mr-0.5" />
             : <ChevronRight size={9} className="shrink-0 opacity-30 mr-0.5" />}
         </button>
       )}
 
-      {folder.expanded && (
+      {expanded && (
         <div>
           {creatingSubfolder && (
             <div className="flex items-center gap-1 py-0.5 pr-2">
@@ -1245,6 +1296,77 @@ function ConnItem({
       <span className={`text-[10px] uppercase font-semibold px-1 rounded shrink-0 ml-1 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
         {conn.type}
       </span>
+    </div>
+  );
+}
+
+// ── SearchResults (flat, fast) ────────────────────────────────────────────────
+// Rendered instead of the tree while searching. A flat list jumps straight to a
+// result with no tree-expansion or smooth-scroll churn, even with thousands of
+// connections. Capped so a near-empty query can't try to paint everything.
+const SEARCH_RESULT_CAP = 300;
+
+function SearchResults({
+  matches, focusIdx, selectedId, folderPath, onFocus, onOpen, onContextMenu,
+}: {
+  matches: Connection[];
+  focusIdx: number;
+  selectedId: string | null;
+  folderPath: (id: string | null) => string;
+  onFocus: (idx: number, conn: Connection) => void;
+  onOpen: (conn: Connection) => void;
+  onContextMenu: (e: React.MouseEvent, conn: Connection) => void;
+}) {
+  const t = useT();
+  if (matches.length === 0) {
+    return (
+      <div className="px-4 py-6 text-center text-[var(--color-text-muted)] text-xs">
+        <Search size={18} className="mx-auto mb-2 opacity-30" />
+        <p>{t("noResults")}</p>
+      </div>
+    );
+  }
+  const shown = matches.slice(0, SEARCH_RESULT_CAP);
+  return (
+    <div>
+      {shown.map((conn, idx) => {
+        const iconKey = conn.icon || DEFAULT_CONN_ICON[conn.type as keyof typeof DEFAULT_CONN_ICON] || "server";
+        const path = folderPath(conn.folder_id ?? null);
+        const active = idx === focusIdx || conn.id === selectedId;
+        return (
+          <div
+            key={conn.id}
+            role="button"
+            tabIndex={0}
+            data-search-row={idx}
+            onClick={() => onFocus(idx, conn)}
+            onDoubleClick={() => onOpen(conn)}
+            onContextMenu={(e) => onContextMenu(e, conn)}
+            className={[
+              "flex items-center gap-1.5 w-full px-2 py-1 transition-colors text-left cursor-pointer select-none",
+              active
+                ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
+                : "hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]",
+            ].join(" ")}
+          >
+            <ConnIconDisplay iconKey={iconKey} size={16} />
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] truncate text-[var(--color-text-primary)] leading-tight">{conn.name}</div>
+              <div className="text-[10px] truncate text-[var(--color-text-muted)] leading-tight">
+                {path ? `${path} · ` : ""}{conn.host || "—"}
+              </div>
+            </div>
+            <span className={`text-[10px] uppercase font-semibold px-1 rounded shrink-0 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
+              {conn.type}
+            </span>
+          </div>
+        );
+      })}
+      {matches.length > SEARCH_RESULT_CAP && (
+        <div className="px-3 py-2 text-center text-[10px] text-[var(--color-text-muted)] italic">
+          +{matches.length - SEARCH_RESULT_CAP} · {t("refineSearch")}
+        </div>
+      )}
     </div>
   );
 }
