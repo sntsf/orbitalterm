@@ -1,8 +1,6 @@
 import { useRef, useState } from "react";
-import { X, RefreshCw, PanelLeftClose, Bell, Trash2 } from "lucide-react";
+import { X, RefreshCw, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
-import { useI18nStore } from "../../store/useI18nStore";
-import { useNotifStore } from "../../store/useNotifStore";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
 import { dockBack, openDetachedWindow, rdpWindowsVisibility, showRdpTabMenu, storeDetachedSession } from "../../lib/commands";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
@@ -14,8 +12,6 @@ const TEAR_THRESHOLD = 60; // px below bar bottom to trigger tear-out
 
 export function TabBar() {
   const { tabs, activeTabId, setActiveTab, closeTab, reconnectTab, reorderTabs } = useAppStore();
-  const { lang } = useI18nStore();
-  const { notifs, expanded, show, clearAll } = useNotifStore();
   const [menu, setMenu] = useState<MenuState>(null);
   const [dragSrcId, setDragSrcId] = useState<string | null>(null);
   const [dropBefore, setDropBefore] = useState<string | null>(null);
@@ -29,7 +25,7 @@ export function TabBar() {
     insertBefore: string | null; // "__end__" or tab id or null
   } | null>(null);
 
-  if (tabs.length === 0 && notifs.length === 0) return null;
+  if (tabs.length === 0) return null;
 
   const closeMenu = () => setMenu(null);
 
@@ -224,29 +220,6 @@ export function TabBar() {
             </div>
           );
         })}
-
-        {/* Notification badge — always in HTML zone, never covered by native RDP window */}
-        {notifs.length > 0 && !expanded && (
-          <div className="ml-auto flex items-center gap-0.5 shrink-0 pr-1">
-            <button
-              onClick={show}
-              className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 transition-colors"
-              title={lang === "es" ? "Ver notificaciones" : "Show notifications"}
-            >
-              <Bell size={12} />
-              <span className="bg-[var(--color-warning)] text-black text-[9px] font-bold px-1.5 py-px rounded-full leading-none">
-                {notifs.length}
-              </span>
-            </button>
-            <button
-              onClick={clearAll}
-              className="p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 transition-colors"
-              title={lang === "es" ? "Limpiar todas" : "Clear all"}
-            >
-              <Trash2 size={11} />
-            </button>
-          </div>
-        )}
       </div>
 
       {menu && (

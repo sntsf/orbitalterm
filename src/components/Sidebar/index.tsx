@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import {
   Plus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
-  ChevronRight, ChevronDown, Database, X,
+  ChevronRight, ChevronDown, Database, X, Bell,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useI18nStore } from "../../store/useI18nStore";
+import { useNotifStore } from "../../store/useNotifStore";
 import {
   getConnections, getFolders, deleteConnection, saveConnection,
   saveFolder, deleteFolder, getFolders as refetchFolders, reorderConnections,
@@ -56,6 +57,7 @@ export function Sidebar() {
     setSidebarHint,
   } = useAppStore();
   const { lang } = useI18nStore();
+  const { notifs, expanded, show, clearAll: clearAllNotifs } = useNotifStore();
 
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
 
@@ -803,6 +805,30 @@ export function Sidebar() {
       <div className="border-t border-[var(--color-border)] shrink-0 overflow-y-auto" style={{ height: panelHeight }}>
         <PropertiesPanel />
       </div>
+
+      {/* Notification badge — bottom of sidebar, always in HTML zone */}
+      {notifs.length > 0 && !expanded && (
+        <div className="flex items-center gap-1 px-2 py-1 border-t border-[var(--color-warning)]/30 shrink-0 bg-[var(--color-warning)]/8">
+          <button
+            onClick={show}
+            className="flex items-center gap-1.5 flex-1 min-w-0 text-[11px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 rounded px-1 py-0.5 transition-colors"
+            title={lang === "es" ? "Ver notificaciones" : "Show notifications"}
+          >
+            <Bell size={11} className="shrink-0" />
+            <span className="truncate">{lang === "es" ? "Notificaciones" : "Notifications"}</span>
+            <span className="ml-auto shrink-0 bg-[var(--color-warning)] text-black text-[9px] font-bold px-1.5 py-px rounded-full leading-none">
+              {notifs.length}
+            </span>
+          </button>
+          <button
+            onClick={clearAllNotifs}
+            className="shrink-0 p-0.5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 transition-colors"
+            title={lang === "es" ? "Limpiar todas" : "Clear all"}
+          >
+            <Trash2 size={11} />
+          </button>
+        </div>
+      )}
 
       {menu && <ContextMenu {...menu} onClose={closeMenu} />}
     </aside>
