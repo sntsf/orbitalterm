@@ -154,11 +154,20 @@ pub fn save_connection(conn: NewConnection) -> Result<Connection, String> {
         conn.group_id.clone()
     };
 
-    let sort_order: i64 = db.query_row(
-        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM connections",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
+    // New items go to the top of their folder/group context (sort_order = MIN - 1).
+    let sort_order: i64 = if let Some(ref fid) = conn.folder_id {
+        db.query_row(
+            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM connections WHERE folder_id = ?1",
+            params![fid],
+            |row| row.get(0),
+        ).unwrap_or(0)
+    } else {
+        db.query_row(
+            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM connections WHERE folder_id IS NULL AND group_id = ?1",
+            params![group_id],
+            |row| row.get(0),
+        ).unwrap_or(0)
+    };
     db.execute(
         "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
@@ -218,7 +227,7 @@ pub fn reorder_connections(updates: Vec<ReorderItem>) -> Result<(), String> {
 pub fn get_folders() -> Result<Vec<Folder>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, name, parent_id, group_id FROM folders ORDER BY name COLLATE NOCASE")
+        .prepare("SELECT id, name, parent_id, group_id FROM folders ORDER BY rowid DESC")
         .map_err(|e| e.to_string())?;
 
     let rows = stmt.query_map([], |row| {
@@ -274,7 +283,7 @@ pub fn delete_folder(id: String) -> Result<(), String> {
 pub fn get_groups() -> Result<Vec<Group>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, name FROM groups ORDER BY rowid")
+        .prepare("SELECT id, name FROM groups ORDER BY rowid DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| {
         Ok(Group { id: row.get(0)?, name: row.get(1)? })
