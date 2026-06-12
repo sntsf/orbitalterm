@@ -531,6 +531,19 @@ export function Sidebar() {
       icon: conn.icon, url: conn.url ?? "", custom_hosts: conn.custom_hosts ?? "",
     });
     await copyPassword(conn.id, created.id).catch(() => {});
+
+    // Place the duplicate directly after the original in the same scope
+    const freshConns = await getConnections();
+    const siblings = freshConns
+      .filter((c) => c.folder_id === conn.folder_id && c.group_id === conn.group_id)
+      .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
+    const origIdx = siblings.findIndex((c) => c.id === conn.id);
+    const withoutNew = siblings.filter((c) => c.id !== created.id);
+    const insertAt = origIdx >= 0 ? origIdx + 1 : withoutNew.length;
+    withoutNew.splice(insertAt, 0, created);
+    await reorderConnections(
+      withoutNew.map((c, i) => ({ id: c.id, sort_order: i * 10, folder_id: conn.folder_id, group_id: conn.group_id })),
+    ).catch(console.error);
     setConnections(await getConnections());
   };
 
@@ -735,40 +748,6 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Search */}
-      <div className="px-2 py-1.5 border-b border-[var(--color-border)] shrink-0">
-        <div className="flex items-center gap-2 bg-[var(--color-bg-elevated)] rounded px-2 py-1">
-          <Search size={12} className="text-[var(--color-text-muted)] shrink-0" />
-          <input
-            type="text"
-            placeholder={t("searchPlaceholder")}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={handleSearchKeyDown}
-            onFocus={() => setSidebarHint(buildSearchHint(lang))}
-            onBlur={() => setSidebarHint(null)}
-            className="bg-transparent outline-none text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] w-full text-xs"
-          />
-          {searchQuery && (
-            <button onClick={() => setSearchQuery("")} className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">
-              <X size={11} />
-            </button>
-          )}
-        </div>
-        {searchQuery && (
-          <div className="mt-1 text-[11px] text-[var(--color-text-muted)] flex items-center gap-1 px-0.5">
-            {searchMatches.length === 0 ? (
-              <span className="text-[var(--color-danger)]">{t("noResults")}</span>
-            ) : (
-              <>
-                <span className="text-[var(--color-accent)]">{searchFocusIdx + 1}</span>
-                <span className="opacity-50">/{searchMatches.length} · {t("navHint")}</span>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-
       {/* Connection list — always tree view; search highlights matches in-place */}
       <div className="flex-1 overflow-y-auto min-h-0 py-0.5">
         {/* New group input */}
@@ -930,6 +909,40 @@ export function Sidebar() {
               className="mt-1 text-[var(--color-accent)] hover:text-[var(--color-accent-hover)]">
               {t("addFirst")}
             </button>
+          </div>
+        )}
+      </div>
+
+      {/* Search — sits between connection list and properties panel */}
+      <div className="px-2 py-1.5 border-t border-[var(--color-border)] shrink-0">
+        <div className="flex items-center gap-2 bg-[var(--color-bg-elevated)] rounded px-2 py-1">
+          <Search size={12} className="text-[var(--color-text-muted)] shrink-0" />
+          <input
+            type="text"
+            placeholder={t("searchPlaceholder")}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={handleSearchKeyDown}
+            onFocus={() => setSidebarHint(buildSearchHint(lang))}
+            onBlur={() => setSidebarHint(null)}
+            className="bg-transparent outline-none text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] w-full text-xs"
+          />
+          {searchQuery && (
+            <button onClick={() => setSearchQuery("")} className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">
+              <X size={11} />
+            </button>
+          )}
+        </div>
+        {searchQuery && (
+          <div className="mt-1 text-[11px] text-[var(--color-text-muted)] flex items-center gap-1 px-0.5">
+            {searchMatches.length === 0 ? (
+              <span className="text-[var(--color-danger)]">{t("noResults")}</span>
+            ) : (
+              <>
+                <span className="text-[var(--color-accent)]">{searchFocusIdx + 1}</span>
+                <span className="opacity-50">/{searchMatches.length} · {t("navHint")}</span>
+              </>
+            )}
           </div>
         )}
       </div>

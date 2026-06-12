@@ -241,7 +241,7 @@ export function PropertiesPanel() {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-1 border-b border-[var(--color-border)] shrink-0">
+      <div className="flex items-center justify-between px-3 py-0.5 border-b border-[var(--color-border)] shrink-0">
         <span className="text-[11px] uppercase tracking-wider text-[var(--color-text-muted)] font-medium">
           {t("propProperties")}
         </span>
@@ -249,7 +249,7 @@ export function PropertiesPanel() {
           type="button"
           onClick={handleConnect}
           title={t("propConnect")}
-          className="flex items-center gap-1 px-2 py-0.5 rounded text-[12px] text-[var(--color-success)] hover:bg-[var(--color-success)]/10 transition-colors"
+          className="flex items-center gap-1 px-2 py-px rounded text-[12px] text-[var(--color-success)] hover:bg-[var(--color-success)]/10 transition-colors"
         >
           <Plug size={13} />
           {t("propConnect")}
@@ -437,4 +437,4 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 const inp =
-  "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-0.5 text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";
+  "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-px text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";
