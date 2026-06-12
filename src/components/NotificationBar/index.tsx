@@ -7,9 +7,8 @@ import { friendlyConnErrorNotif } from "../../lib/connErrors";
 const AUTO_HIDE_MS = 20_000;
 
 export function NotificationOverlay() {
-  const { notifs, dismiss, clearAll } = useNotifStore();
+  const { notifs, dismiss, clearAll, expanded, show, hide } = useNotifStore();
   const { lang } = useI18nStore();
-  const [showToast, setShowToast] = useState(false);
   const [progressKey, setProgressKey] = useState(0);
   const [idx, setIdx] = useState(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -17,13 +16,13 @@ export function NotificationOverlay() {
 
   const startTimer = () => {
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => setShowToast(false), AUTO_HIDE_MS);
+    timerRef.current = setTimeout(() => hide(), AUTO_HIDE_MS);
     setProgressKey((k) => k + 1);
-    setShowToast(true);
+    show();
   };
 
-  const closeToast = () => {
-    setShowToast(false);
+  const minimize = () => {
+    hide();
     if (timerRef.current) clearTimeout(timerRef.current);
   };
 
@@ -36,11 +35,11 @@ export function NotificationOverlay() {
     prevCountRef.current = notifs.length;
   }, [notifs.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Keep idx in bounds when notifications are removed
+  // Keep idx in bounds; hide bar when all dismissed
   useEffect(() => {
-    if (notifs.length === 0) { setShowToast(false); return; }
+    if (notifs.length === 0) { hide(); return; }
     setIdx((i) => Math.min(i, notifs.length - 1));
-  }, [notifs.length]);
+  }, [notifs.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
@@ -60,13 +59,12 @@ export function NotificationOverlay() {
 
   const dismissCurrent = () => {
     dismiss(current.id);
-    // idx stays or clamps via the useEffect above
   };
 
   return (
     <>
       {/* ── Full notification bar ── */}
-      {showToast && (
+      {expanded && (
         <div className="absolute bottom-0 left-0 right-0 z-50 bg-[var(--color-bg-elevated)] border-t border-[var(--color-warning)]/40 shadow-2xl">
           <ProgressBar key={progressKey} durationMs={AUTO_HIDE_MS} />
 
@@ -128,17 +126,18 @@ export function NotificationOverlay() {
                   <X size={14} />
                 </button>
 
-                {/* Clear all + minimize */}
+                {/* Clear all */}
                 <button
-                  onClick={() => { clearAll(); }}
+                  onClick={() => clearAll()}
                   className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-danger)] transition-colors"
                   title={lang === "es" ? "Limpiar todas" : "Clear all"}
                 >
                   <Trash2 size={13} />
                 </button>
 
+                {/* Minimize (hide bar, keep notifications) */}
                 <button
-                  onClick={closeToast}
+                  onClick={minimize}
                   className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors ml-1"
                   title={lang === "es" ? "Minimizar" : "Minimize"}
                 >
@@ -156,7 +155,7 @@ export function NotificationOverlay() {
       )}
 
       {/* ── Small persistent tab when bar is hidden ── */}
-      {!showToast && (
+      {!expanded && (
         <div className="absolute bottom-0 right-6 z-50 flex items-center rounded-t border border-b-0 shadow-md bg-[var(--color-warning)]/15 border-[var(--color-warning)]/40">
           <button
             onClick={startTimer}

@@ -14,7 +14,7 @@ import {
   rdpWindowsReparent,
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
-import { useNotifStore } from "../../store/useNotifStore";
+import { useNotifStore, NOTIF_H_COLLAPSED, NOTIF_H_EXPANDED } from "../../store/useNotifStore";
 import { useT, useI18nStore } from "../../store/useI18nStore";
 import { friendlyConnError } from "../../lib/connErrors";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
@@ -52,6 +52,10 @@ function WindowsEmbeddedViewer({ sessionId, tabId, transferred }: WindowsViewerP
   const containerRef = useRef<HTMLDivElement>(null);
   const reparentedRef = useRef(false);
   const { activeTabId } = useAppStore();
+  const { notifs, expanded } = useNotifStore();
+  // Reserve space at the bottom so the native Win32 window doesn't cover the
+  // notification bar, which lives in the HTML layer underneath.
+  const notifReserve = notifs.length === 0 ? 0 : expanded ? NOTIF_H_EXPANDED : NOTIF_H_COLLAPSED;
 
   // Show/hide by watching the active tab only. Menus no longer hide the WS_POPUP —
   // instead they carve a SetWindowRgn hole so the HTML menu renders through.
@@ -102,7 +106,11 @@ function WindowsEmbeddedViewer({ sessionId, tabId, transferred }: WindowsViewerP
   return (
     <div
       ref={containerRef}
-      style={{ width: "100%", height: "100%", background: "transparent" }}
+      style={{
+        width: "100%",
+        height: notifReserve > 0 ? `calc(100% - ${notifReserve}px)` : "100%",
+        background: "transparent",
+      }}
     />
   );
 }
