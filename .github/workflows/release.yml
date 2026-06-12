@@ -17,7 +17,7 @@ jobs:
           - platform: ubuntu-24.04
             args: ''
           - platform: windows-latest
-            args: '--config src-tauri/tauri.windows.conf.json'
+            args: ''
 
     runs-on: ${{ matrix.platform }}
 
@@ -83,12 +83,12 @@ jobs:
           :found
           echo Using: %CSC%
           "%CSC%" /nologo /target:exe /platform:x64 /optimize+ ^
-            /out:csharp-rdp-host\OrbitalRdpHost.exe ^
+            /out:src-tauri\OrbitalRdpHost.exe ^
             /r:System.dll /r:System.Core.dll /r:System.Drawing.dll ^
             /r:System.Windows.Forms.dll /r:Microsoft.CSharp.dll ^
             csharp-rdp-host\Program.cs
           if %ERRORLEVEL% neq 0 ( echo BUILD FAILED & exit /b %ERRORLEVEL% )
-          echo BUILD OK
+          echo BUILD OK: src-tauri\OrbitalRdpHost.exe
 
       - name: Install frontend dependencies
         run: pnpm install
