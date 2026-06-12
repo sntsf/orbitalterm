@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, forwardRef } from "react";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -12,6 +12,7 @@ import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
 import { usePrefsStore, THEMES, FONT_SIZES } from "../../store/usePrefsStore";
 import {
   importFromFile, getConnections, getFolders, getGroups, saveGroup,
+  rdpWindowsSetMenuRegion,
 } from "../../lib/commands";
 import { ExportDialog } from "../ExportDialog";
 
@@ -35,7 +36,7 @@ export function MenuBar() {
   const t = useT();
   const { lang, setLang } = useI18nStore();
   const { theme, fontSize, setTheme, setFontSize, resetLayout } = usePrefsStore();
-  const { startNewConnection, setConnections, setFolders, setGroups, toggleSidebar, sidebarVisible } = useAppStore();
+  const { startNewConnection, setConnections, setFolders, setGroups, toggleSidebar, sidebarVisible, tabs, activeTabId } = useAppStore();
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showAbout, setShowAbout] = useState(false);
   const [showExport, setShowExport] = useState(false);
@@ -44,11 +45,35 @@ export function MenuBar() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Sync initial fullscreen state
   useEffect(() => {
     getCurrentWindow().isFullscreen().then(setIsFullscreen).catch(() => {});
   }, []);
+
+  // When a menu bar dropdown opens, carve a hole in the RDP WS_POPUP so the dropdown
+  // shows through without blacking out the RDP.  When closed, restore the full region.
+  useEffect(() => {
+    const activeTab = tabs.find((t) => t.id === activeTabId);
+    const sessionId = activeTab?.session_id;
+    if (!sessionId) return;
+
+    if (openMenuId !== null) {
+      // Measure after the dropdown has rendered
+      requestAnimationFrame(() => {
+        const el = dropdownRef.current;
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        rdpWindowsSetMenuRegion(sessionId, [
+          Math.floor(r.left), Math.floor(r.top),
+          Math.ceil(r.width), Math.ceil(r.height),
+        ]).catch(() => {});
+      });
+    } else {
+      rdpWindowsSetMenuRegion(sessionId, null).catch(() => {});
+    }
+  }, [openMenuId, tabs, activeTabId]);
 
   // Close dropdown on click outside
   useEffect(() => {
@@ -296,7 +321,7 @@ export function MenuBar() {
             </button>
 
             {openMenuId === menu.id && (
-              <Dropdown items={menu.items} onClose={() => setOpenMenuId(null)} />
+              <Dropdown ref={dropdownRef} items={menu.items} onClose={() => setOpenMenuId(null)} />
             )}
           </div>
         ))}
@@ -375,9 +400,10 @@ export function MenuBar() {
 
 // ── Dropdown ──────────────────────────────────────────────────────────────────
 
-function Dropdown({ items, onClose }: { items: MenuItemDef[]; onClose: () => void }) {
+const Dropdown = forwardRef<HTMLDivElement, { items: MenuItemDef[]; onClose: () => void }>(
+function Dropdown({ items, onClose }, ref) {
   return (
-    <div className="absolute top-full left-0 mt-0.5 min-w-[210px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-xl z-50 py-1">
+    <div ref={ref} className="absolute top-full left-0 mt-0.5 min-w-[210px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-xl z-50 py-1">
       {items.map((item, i) => {
         if ("separator" in item) {
           return <div key={i} className="my-1 border-t border-[var(--color-border)]" />;
@@ -416,7 +442,7 @@ function Dropdown({ items, onClose }: { items: MenuItemDef[]; onClose: () => voi
       })}
     </div>
   );
-}
+});
 
 // ── About modal ───────────────────────────────────────────────────────────────
 

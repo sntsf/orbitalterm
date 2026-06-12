@@ -159,6 +159,8 @@ extern "C" {
         width: u16,
         height: u16,
         console_mode: bool,
+        security_mode: std::ffi::c_int,
+        color_depth: u16,
         on_frame: OrbFrameFn,
         on_error: OrbErrorFn,
         user_ctx: *mut std::ffi::c_void,
@@ -364,6 +366,8 @@ pub fn launch(
     width: u16,
     height: u16,
     console_mode: bool,
+    rdp_security: &str,
+    color_depth: u16,
 ) -> Result<FreerdpSession, String> {
     let password = password.ok_or_else(|| {
         "NO_PASSWORD\nNo hay contraseña guardada para esta conexión.\n\
@@ -391,6 +395,14 @@ pub fn launch(
     // Spawn encoder before connecting so frames are never dropped on startup.
     spawn_encoder(app, session_id.to_string(), rx);
 
+    let security_mode: std::ffi::c_int = match rdp_security {
+        "nla"       => 1,
+        "tls"       => 2,
+        "rdp"       => 3,
+        _           => 0, // "negotiate" or any unrecognized value
+    };
+    let depth = if [8u16, 15, 16, 24, 32].contains(&color_depth) { color_depth } else { 32 };
+
     let ptr = unsafe {
         orb_session_new(
             c_host.as_ptr(),
@@ -401,6 +413,8 @@ pub fn launch(
             width,
             height,
             console_mode,
+            security_mode,
+            depth,
             on_frame,
             on_error,
             user_ctx,

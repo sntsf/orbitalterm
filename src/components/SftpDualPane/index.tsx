@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "../../store/useAppStore";
+import { useNotifStore } from "../../store/useNotifStore";
 import {
   sftpConnect, sftpDisconnect, sftpListDir, sftpUpload, sftpDownload,
   sftpMkdir, sftpRename, sftpDelete,
@@ -539,7 +540,7 @@ async function downloadEntryRecursive(sid: string, entry: AnyEntry, localDir: st
 // ── Main dual-pane component ──────────────────────────────────────────────────
 
 export function SftpDualPane({ tab }: { tab: Tab }) {
-  const { getConnectionById, setTabStatus } = useAppStore();
+  const { getConnectionById, setTabStatus, closeTab } = useAppStore();
   const connection = getConnectionById(tab.connection_id);
 
   // SFTP session
@@ -548,6 +549,14 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   const [connError, setConnError] = useState<string | null>(null);
   const [disconnected, setDisconnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+
+  // Auto-close the tab when the SFTP session is lost
+  useEffect(() => {
+    if (disconnected) {
+      const t = setTimeout(() => closeTab(tab.id), 1500);
+      return () => clearTimeout(t);
+    }
+  }, [disconnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Local panel
   const [localPath, setLocalPath] = useState("");
@@ -683,12 +692,18 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
       const home = connection.username ? `/home/${connection.username}` : "/";
       try { await loadRemote(sid, home); } catch { await loadRemote(sid, "/"); }
     } catch (err) {
-      setConnError(String(err));
-      setTabStatus(tab.id, "error");
+      const raw = String(err);
+      useNotifStore.getState().add({
+        connName: connection.name,
+        connType: "sftp",
+        host: connection.host,
+        raw,
+      });
+      closeTab(tab.id);
     } finally {
       setConnecting(false);
     }
-  }, [connection, tab.id, setTabStatus, loadRemote]);
+  }, [connection, tab.id, setTabStatus, loadRemote, closeTab]);
 
   // ── Initial load ────────────────────────────────────────────────────────────
 

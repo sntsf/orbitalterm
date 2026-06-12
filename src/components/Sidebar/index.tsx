@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import {
   Plus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
-  ChevronRight, ChevronDown, Database, X,
+  ChevronRight, ChevronDown, Database, X, Bell,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
-import { useI18nStore } from "../../store/useI18nStore";
+import { useI18nStore, useT } from "../../store/useI18nStore";
+import { useNotifStore } from "../../store/useNotifStore";
 import {
   getConnections, getFolders, deleteConnection, saveConnection,
   saveFolder, deleteFolder, getFolders as refetchFolders, reorderConnections,
@@ -18,31 +19,55 @@ import type { Connection, Folder as FolderType, Group } from "../../types";
 
 // ── Sidebar hint builders ──────────────────────────────────────────────────────
 
-function buildConnHint(conn: Connection, lang: "es" | "en") {
+function buildConnHint(conn: Connection, lang: string) {
   const type = conn.type.toUpperCase();
-  return lang === "es"
-    ? { title: `Conexión: ${conn.name}`, body: `Tipo ${type} · ${conn.host}:${conn.port} · Usuario: ${conn.username}` }
-    : { title: `Connection: ${conn.name}`, body: `Type ${type} · ${conn.host}:${conn.port} · User: ${conn.username}` };
+  const L: Record<string, { title: string; user: string }> = {
+    es: { title: "Conexión",     user: "Usuario" },
+    fr: { title: "Connexion",    user: "Utilisateur" },
+    ru: { title: "Подключение",  user: "Пользователь" },
+    ja: { title: "接続",          user: "ユーザー" },
+  };
+  const l = L[lang] ?? { title: "Connection", user: "User" };
+  return {
+    title: `${l.title}: ${conn.name}`,
+    body: `Type ${type} · ${conn.host}:${conn.port} · ${l.user}: ${conn.username}`,
+  };
 }
 
-function buildFolderHint(folder: FolderType, lang: "es" | "en", allConnections: Connection[]) {
+function buildFolderHint(folder: FolderType, lang: string, allConnections: Connection[]) {
   const count = allConnections.filter((c) => c.folder_id === folder.id).length;
-  return lang === "es"
-    ? { title: `Carpeta: ${folder.name}`, body: `Contiene ${count} conexión${count !== 1 ? "es" : ""}. Haz doble clic en una conexión para abrirla.` }
-    : { title: `Folder: ${folder.name}`, body: `Contains ${count} connection${count !== 1 ? "s" : ""}. Double-click a connection to open it.` };
+  const makeBody: Record<string, () => string> = {
+    es: () => `Contiene ${count} conexión${count !== 1 ? "es" : ""}. Haz doble clic para abrir.`,
+    fr: () => `Contient ${count} connexion${count !== 1 ? "s" : ""}. Double-cliquez pour ouvrir.`,
+    ru: () => `Содержит ${count} подключен${count === 1 ? "ие" : "ий"}. Дважды щёлкните для открытия.`,
+    ja: () => `${count}件の接続。ダブルクリックして開く。`,
+  };
+  const titles: Record<string, string> = { es: "Carpeta", fr: "Dossier", ru: "Папка", ja: "フォルダ" };
+  const body = (makeBody[lang] ?? (() => `Contains ${count} connection${count !== 1 ? "s" : ""}. Double-click to open.`))();
+  return { title: `${titles[lang] ?? "Folder"}: ${folder.name}`, body };
 }
 
-function buildGroupHint(group: Group, lang: "es" | "en", allConnections: Connection[]) {
+function buildGroupHint(group: Group, lang: string, allConnections: Connection[]) {
   const count = allConnections.filter((c) => c.group_id === group.id).length;
-  return lang === "es"
-    ? { title: `Fuente de datos: ${group.name}`, body: `${count} conexión${count !== 1 ? "es" : ""} en esta fuente. Haz clic derecho para ver opciones.` }
-    : { title: `Data source: ${group.name}`, body: `${count} connection${count !== 1 ? "s" : ""} in this source. Right-click for options.` };
+  const makeBody: Record<string, () => string> = {
+    es: () => `${count} conexión${count !== 1 ? "es" : ""} en esta fuente. Clic derecho para opciones.`,
+    fr: () => `${count} connexion${count !== 1 ? "s" : ""} dans cette source. Clic droit pour les options.`,
+    ru: () => `${count} подключен${count === 1 ? "ие" : "ий"} в этом источнике. ПКМ для параметров.`,
+    ja: () => `このソースに${count}件の接続。右クリックでオプション。`,
+  };
+  const titles: Record<string, string> = { es: "Fuente de datos", fr: "Source de données", ru: "Источник данных", ja: "データソース" };
+  const body = (makeBody[lang] ?? (() => `${count} connection${count !== 1 ? "s" : ""} in this source. Right-click for options.`))();
+  return { title: `${titles[lang] ?? "Data source"}: ${group.name}`, body };
 }
 
-function buildSearchHint(lang: "es" | "en") {
-  return lang === "es"
-    ? { title: "Buscador de conexiones", body: "Escribe para filtrar por nombre o dirección IP. Usa ↑↓ para navegar entre resultados y Enter para abrir." }
-    : { title: "Connection search", body: "Type to filter by name or IP address. Use ↑↓ to navigate results and Enter to open." };
+function buildSearchHint(lang: string) {
+  const L: Record<string, { title: string; body: string }> = {
+    es: { title: "Buscador de conexiones", body: "Escribe para filtrar por nombre o IP. Usa ↑↓ para navegar y Enter para abrir." },
+    fr: { title: "Recherche de connexions", body: "Tapez pour filtrer par nom ou IP. Utilisez ↑↓ pour naviguer et Entrée pour ouvrir." },
+    ru: { title: "Поиск подключений", body: "Введите для фильтрации по имени или IP. ↑↓ для навигации, Enter для открытия." },
+    ja: { title: "接続の検索", body: "名前またはIPで絞り込む。↑↓で移動、Enterで開く。" },
+  };
+  return L[lang] ?? { title: "Connection search", body: "Type to filter by name or IP. Use ↑↓ to navigate and Enter to open." };
 }
 
 // ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -56,6 +81,8 @@ export function Sidebar() {
     setSidebarHint,
   } = useAppStore();
   const { lang } = useI18nStore();
+  const t = useT();
+  const { notifs, expanded, show, clearAll: clearAllNotifs } = useNotifStore();
 
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
 
@@ -88,6 +115,11 @@ export function Sidebar() {
 
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+  // Pointer-based DnD refs (avoid stale closures in global listeners)
+  const pDragRef = useRef<{ connId: string; connName: string; startX: number; startY: number; active: boolean } | null>(null);
+  const pDropRef = useRef<string | null>(null);
+  const [ghostPos, setGhostPos] = useState<{ x: number; y: number } | null>(null);
 
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [renameFolderName, setRenameFolderName] = useState("");
@@ -259,7 +291,7 @@ export function Sidebar() {
 
   const removeGroup = async (group: Group) => {
     if (groups.length <= 1) return; // cannot delete last group
-    if (!confirm("¿Eliminar este grupo y todo su contenido?")) return;
+    if (!confirm(t("deleteGroupConfirm"))) return;
     try {
       await deleteGroup(group.id);
       setGroups(await getGroups());
@@ -287,70 +319,129 @@ export function Sidebar() {
     setNewGroupName("");
   };
 
-  const handleDragEnd = () => { setDragId(null); setDropTarget(null); };
 
-  const handleDropOnConn = async (target: Connection) => {
-    if (!dragId || dragId === target.id) { handleDragEnd(); return; }
-    const dragged = connections.find((c) => c.id === dragId);
-    if (!dragged) { handleDragEnd(); return; }
-    // Use target's group_id when moving between groups
-    const targetGroupId = target.group_id;
-    const level = connections
-      .filter((c) => c.folder_id === target.folder_id && c.group_id === targetGroupId)
-      .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
-    const without = level.filter((c) => c.id !== dragId);
-    const idx = without.findIndex((c) => c.id === target.id);
-    without.splice(idx, 0, { ...dragged, folder_id: target.folder_id, group_id: targetGroupId });
-    const updates = without.map((c, i) => ({ id: c.id, sort_order: i * 10, folder_id: target.folder_id, group_id: targetGroupId }));
-    await reorderConnections(updates).catch(console.error);
-    setConnections(await getConnections());
-    handleDragEnd();
+  const DRAG_THRESHOLD = 6;
+
+  // Always-current snapshot of state needed inside the global pointer listeners.
+  // useEffect with [] captures stale closures; reading from this ref is safe.
+  const dndState = useRef({ connections, folders, setConnections });
+  dndState.current = { connections, folders, setConnections };
+
+  // Called when a ConnItem receives pointerdown — arms the pointer-based drag.
+  const startPointerDrag = (conn: Connection, startX: number, startY: number) => {
+    pDragRef.current = { connId: conn.id, connName: conn.name, startX, startY, active: false };
+    pDropRef.current = null;
   };
 
-  // folderId=null + groupId = move to group root
-  const handleDropOnFolder = async (folderId: string | null, groupId?: string) => {
-    if (!dragId) { handleDragEnd(); return; }
-    const dragged = connections.find((c) => c.id === dragId);
-    if (!dragged) { handleDragEnd(); return; }
+  // Global listeners registered once — use refs so they always see current state.
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      const d = pDragRef.current;
+      if (!d) return;
 
-    // Determine target group_id
-    let targetGroupId: string;
-    if (folderId) {
-      const folder = folders.find((f) => f.id === folderId);
-      targetGroupId = folder?.group_id ?? dragged.group_id;
-    } else {
-      targetGroupId = groupId ?? dragged.group_id;
-    }
+      if (!d.active) {
+        if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < DRAG_THRESHOLD) return;
+        d.active = true;
+        setDragId(d.connId);
+      }
 
-    if (dragged.folder_id === folderId && dragged.group_id === targetGroupId) {
-      handleDragEnd();
-      return;
-    }
+      setGhostPos({ x: e.clientX, y: e.clientY });
 
-    const maxSort = connections
-      .filter((c) => c.folder_id === folderId && c.group_id === targetGroupId)
-      .reduce((m, c) => Math.max(m, c.sort_order), -10) + 10;
-    await reorderConnections([{ id: dragId, sort_order: maxSort, folder_id: folderId, group_id: targetGroupId }]).catch(console.error);
-    setConnections(await getConnections());
-    handleDragEnd();
-  };
+      const hits = document.elementsFromPoint(e.clientX, e.clientY);
+      let target: string | null = null;
+      for (const el of hits) {
+        const h = el as HTMLElement;
+        if (h.dataset.folderId) { target = `folder:${h.dataset.folderId}`; break; }
+        if (h.dataset.groupId)  { target = `group:${h.dataset.groupId}`;   break; }
+        if (h.dataset.connId && h.dataset.connId !== d.connId) { target = h.dataset.connId; break; }
+      }
+      pDropRef.current = target;
+      setDropTarget(target);
+    };
+
+    const onUp = async () => {
+      const d  = pDragRef.current;
+      const dt = pDropRef.current;
+      pDragRef.current = null;
+      pDropRef.current = null;
+
+      if (!d?.active) return; // never moved past threshold — normal click, nothing to do
+
+      // Read CURRENT state from ref (avoids stale-closure bugs with [] dependency).
+      const { connections: conns, folders: folderList, setConnections: setConns } = dndState.current;
+
+      const dragged = conns.find((c) => c.id === d.connId);
+
+      const finish = () => { setDragId(null); setDropTarget(null); setGhostPos(null); };
+
+      if (!dragged || !dt) { finish(); return; }
+
+      if (dt.startsWith("folder:") || dt.startsWith("group:")) {
+        const folderId = dt.startsWith("folder:") ? dt.slice(7) : null;
+        const groupId  = dt.startsWith("group:")  ? dt.slice(6)  : undefined;
+
+        let targetGroupId: string;
+        if (folderId) {
+          const folder = folderList.find((f) => f.id === folderId);
+          targetGroupId = folder?.group_id ?? dragged.group_id;
+        } else {
+          targetGroupId = groupId ?? dragged.group_id;
+        }
+
+        if (dragged.folder_id === folderId && dragged.group_id === targetGroupId) {
+          finish(); return;
+        }
+
+        const maxSort = conns
+          .filter((c) => c.folder_id === folderId && c.group_id === targetGroupId)
+          .reduce((m, c) => Math.max(m, c.sort_order), -10) + 10;
+
+        await reorderConnections([{ id: d.connId, sort_order: maxSort, folder_id: folderId, group_id: targetGroupId }]).catch(console.error);
+        setConns(await getConnections());
+      } else {
+        // Drop onto another connection — reorder within the same folder
+        const target = conns.find((c) => c.id === dt);
+        if (!target) { finish(); return; }
+
+        const targetGroupId = target.group_id;
+        const level = conns
+          .filter((c) => c.folder_id === target.folder_id && c.group_id === targetGroupId)
+          .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
+        const without = level.filter((c) => c.id !== d.connId);
+        const idx = without.findIndex((c) => c.id === target.id);
+        without.splice(idx, 0, { ...dragged, folder_id: target.folder_id, group_id: targetGroupId });
+        const updates = without.map((c, i) => ({ id: c.id, sort_order: i * 10, folder_id: target.folder_id, group_id: targetGroupId }));
+        await reorderConnections(updates).catch(console.error);
+        setConns(await getConnections());
+      }
+
+      finish();
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup",   onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup",   onUp);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const folderMenu = (e: React.MouseEvent, folder: FolderType) =>
     openMenu(e, [
-      { label: "New Connection", icon: <Plus size={12} />, action: () => startNewConnection(folder.id, folder.group_id) },
-      { label: "New Subfolder", icon: <FolderPlus size={12} />, action: () => startCreateFolder(folder.id, folder.group_id) },
-      { label: "Rename", icon: <Edit2 size={12} />, action: () => startRenameFolder(folder) },
+      { label: t("newConnectionMenu"), icon: <Plus size={12} />, action: () => startNewConnection(folder.id, folder.group_id) },
+      { label: t("newSubfolder"), icon: <FolderPlus size={12} />, action: () => startCreateFolder(folder.id, folder.group_id) },
+      { label: t("rename"), icon: <Edit2 size={12} />, action: () => startRenameFolder(folder) },
       { separator: true },
-      { label: "Delete", icon: <Trash2 size={12} />, action: () => removeFolder(folder), danger: true },
+      { label: t("delete"), icon: <Trash2 size={12} />, action: () => removeFolder(folder), danger: true },
     ]);
 
   const groupMenu = (e: React.MouseEvent, group: Group) =>
     openMenu(e, [
-      { label: "New Connection", icon: <Plus size={12} />, action: () => startNewConnection(null, group.id) },
-      { label: "New Folder", icon: <FolderPlus size={12} />, action: () => startCreateFolder(null, group.id) },
-      { label: "Rename", icon: <Edit2 size={12} />, action: () => startRenameGroup(group) },
+      { label: t("newConnectionMenu"), icon: <Plus size={12} />, action: () => startNewConnection(null, group.id) },
+      { label: t("newFolder"), icon: <FolderPlus size={12} />, action: () => startCreateFolder(null, group.id) },
+      { label: t("rename"), icon: <Edit2 size={12} />, action: () => startRenameGroup(group) },
       { separator: true },
-      { label: "Delete", icon: <Trash2 size={12} />, action: () => removeGroup(group), danger: true, disabled: groups.length <= 1 },
+      { label: t("delete"), icon: <Trash2 size={12} />, action: () => removeGroup(group), danger: true, disabled: groups.length <= 1 },
     ]);
 
   const duplicate = async (conn: Connection) => {
@@ -358,7 +449,7 @@ export function Sidebar() {
       name: `${conn.name}(duplicado)`, type: conn.type, host: conn.host, port: conn.port,
       username: conn.username, auth_type: conn.auth_type, key_path: conn.key_path,
       folder_id: conn.folder_id, notes: conn.notes, description: conn.description,
-      domain: conn.domain, rdp_admin: conn.rdp_admin, group_id: conn.group_id,
+      domain: conn.domain, group_id: conn.group_id,
       icon: conn.icon, url: conn.url ?? "", custom_hosts: conn.custom_hosts ?? "",
     });
     await copyPassword(conn.id, created.id).catch(() => {});
@@ -373,10 +464,10 @@ export function Sidebar() {
 
   const connMenu = (e: React.MouseEvent, conn: Connection) =>
     openMenu(e, [
-      { label: "Connect", icon: <Plug size={12} />, action: () => openTab(conn) },
-      { label: "Duplicate", icon: <Copy size={12} />, action: () => duplicate(conn) },
+      { label: t("connect"), icon: <Plug size={12} />, action: () => openTab(conn) },
+      { label: t("duplicate"), icon: <Copy size={12} />, action: () => duplicate(conn) },
       { separator: true },
-      { label: "Delete", icon: <Trash2 size={12} />, action: () => remove(conn), danger: true },
+      { label: t("delete"), icon: <Trash2 size={12} />, action: () => remove(conn), danger: true },
     ]);
 
   const onDividerDown = (e: React.MouseEvent) => {
@@ -469,16 +560,22 @@ export function Sidebar() {
     folderInputRef,
     dragId,
     dropTarget,
-    onDragStart: setDragId,
-    onDragEnd: handleDragEnd,
-    onDropTarget: setDropTarget,
-    onDropOnConn: handleDropOnConn,
-    onDropOnFolder: handleDropOnFolder,
+    onConnPointerDown: (conn: Connection, x: number, y: number) => startPointerDrag(conn, x, y),
     searchMatchIds,
     searchFocusId,
   };
 
   return (
+    <>
+    {/* Drag ghost — follows the pointer while dragging a connection */}
+    {ghostPos && pDragRef.current && (
+      <div
+        className="fixed z-[9999] pointer-events-none px-2 py-0.5 rounded text-[12px] text-[var(--color-text-primary)] bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] shadow-xl opacity-90 max-w-[180px] truncate"
+        style={{ left: ghostPos.x + 14, top: ghostPos.y - 10 }}
+      >
+        {pDragRef.current.connName}
+      </div>
+    )}
     <aside
       className="flex flex-col h-full bg-[var(--color-bg-surface)] border-r border-[var(--color-border)] shrink-0 relative"
       style={{ width: sidebarWidth }}
@@ -501,17 +598,17 @@ export function Sidebar() {
         <div className="flex gap-0.5">
           <button onClick={() => startNewConnection()}
             className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
-            title="New connection">
+            title={t("newConnection")}>
             <Plus size={14} />
           </button>
           <button onClick={() => startCreateFolder(null, groups[0]?.id ?? null)}
             className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
-            title="New folder">
+            title={t("newFolder")}>
             <FolderPlus size={14} />
           </button>
           <button onClick={() => setCreatingGroup(true)}
             className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
-            title="New database group">
+            title={t("newGroup")}>
             <Database size={14} />
           </button>
         </div>
@@ -523,7 +620,7 @@ export function Sidebar() {
           <Search size={12} className="text-[var(--color-text-muted)] shrink-0" />
           <input
             type="text"
-            placeholder={lang === "es" ? "Buscar por nombre o IP…" : "Search by name or IP…"}
+            placeholder={t("searchPlaceholder")}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={handleSearchKeyDown}
@@ -540,17 +637,11 @@ export function Sidebar() {
         {searchQuery && (
           <div className="mt-1 text-[11px] text-[var(--color-text-muted)] flex items-center gap-1 px-0.5">
             {searchMatches.length === 0 ? (
-              <span className="text-[var(--color-danger)]">
-                {lang === "es" ? "Sin resultados" : "No results"}
-              </span>
+              <span className="text-[var(--color-danger)]">{t("noResults")}</span>
             ) : (
               <>
                 <span className="text-[var(--color-accent)]">{searchFocusIdx + 1}</span>
-                <span className="opacity-50">
-                  {lang === "es"
-                    ? ` de ${searchMatches.length} · ↑↓ navegar · Enter abrir`
-                    : ` of ${searchMatches.length} · ↑↓ navigate · Enter open`}
-                </span>
+                <span className="opacity-50">/{searchMatches.length} · {t("navHint")}</span>
               </>
             )}
           </div>
@@ -573,7 +664,7 @@ export function Sidebar() {
                 if (e.key === "Escape") cancelCreateGroup();
               }}
               onBlur={cancelCreateGroup}
-              placeholder="Nombre del grupo…"
+              placeholder={t("groupNamePlaceholder")}
               className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[13px] text-[var(--color-text-primary)] outline-none"
             />
           </div>
@@ -609,11 +700,9 @@ export function Sidebar() {
                 </div>
               ) : (
                 <button
+                  data-group-id={group.id}
                   onClick={() => { toggleGroupExpanded(group.id); setSidebarHint(buildGroupHint(group, lang, connections)); }}
                   onContextMenu={(e) => groupMenu(e, group)}
-                  onDragOver={(e) => { e.preventDefault(); setDropTarget(`group:${group.id}`); }}
-                  onDragLeave={() => setDropTarget(null)}
-                  onDrop={(e) => { e.preventDefault(); handleDropOnFolder(null, group.id); }}
                   className={[
                     "flex items-center gap-1.5 w-full px-2 py-1 transition-colors",
                     isGroupDropTarget
@@ -648,7 +737,7 @@ export function Sidebar() {
                           if (e.key === "Escape") cancelCreateFolder();
                         }}
                         onBlur={cancelCreateFolder}
-                        placeholder="Nombre de carpeta…"
+                        placeholder={t("folderNamePlaceholder")}
                         className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[13px] text-[var(--color-text-primary)] outline-none"
                       />
                     </div>
@@ -688,10 +777,7 @@ export function Sidebar() {
                             onHint={() => setSidebarHint(buildConnHint(conn, lang))}
                             dragging={dragId === conn.id}
                             isDropTarget={dropTarget === conn.id}
-                            onDragStart={() => setDragId(conn.id)}
-                            onDragEnd={handleDragEnd}
-                            onDragOver={() => setDropTarget(conn.id)}
-                            onDrop={() => handleDropOnConn(conn)}
+                            onPointerDragStart={(x, y) => startPointerDrag(conn, x, y)}
                             isSearchMatch={searchMatchIds.has(conn.id)}
                             isSearchFocus={searchFocusId === conn.id}
                           />
@@ -705,7 +791,7 @@ export function Sidebar() {
                       <Terminal size={16} className="mx-auto mb-1 opacity-30" />
                       <button onClick={() => startNewConnection(null, group.id)}
                         className="text-[var(--color-accent)] hover:text-[var(--color-accent-hover)] text-[12px]">
-                        Add the first one
+                        {t("addFirst")}
                       </button>
                     </div>
                   )}
@@ -718,10 +804,10 @@ export function Sidebar() {
         {groups.length === 0 && (
           <div className="px-4 py-6 text-center text-[var(--color-text-muted)] text-xs">
             <Terminal size={20} className="mx-auto mb-2 opacity-30" />
-            <p>No connections yet.</p>
+            <p>{t("noConnectionsYet")}</p>
             <button onClick={() => setCreatingGroup(true)}
               className="mt-1 text-[var(--color-accent)] hover:text-[var(--color-accent-hover)]">
-              Add the first one
+              {t("addFirst")}
             </button>
           </div>
         )}
@@ -739,8 +825,33 @@ export function Sidebar() {
         <PropertiesPanel />
       </div>
 
+      {/* Notification badge — bottom of sidebar, always in HTML zone */}
+      {notifs.length > 0 && !expanded && (
+        <div className="flex items-center gap-1 px-2 py-1 border-t border-[var(--color-warning)]/30 shrink-0 bg-[var(--color-warning)]/8">
+          <button
+            onClick={show}
+            className="flex items-center gap-1.5 flex-1 min-w-0 text-[11px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 rounded px-1 py-0.5 transition-colors"
+            title={t("notifLabel")}
+          >
+            <Bell size={11} className="shrink-0" />
+            <span className="truncate">{t("notifLabel")}</span>
+            <span className="ml-auto shrink-0 bg-[var(--color-warning)] text-black text-[9px] font-bold px-1.5 py-px rounded-full leading-none">
+              {notifs.length}
+            </span>
+          </button>
+          <button
+            onClick={clearAllNotifs}
+            className="shrink-0 p-0.5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 transition-colors"
+            title={t("notifClearAll")}
+          >
+            <Trash2 size={11} />
+          </button>
+        </div>
+      )}
+
       {menu && <ContextMenu {...menu} onClose={closeMenu} />}
     </aside>
+    </>
   );
 }
 
@@ -785,11 +896,7 @@ interface SharedProps {
   folderInputRef: React.RefObject<HTMLInputElement>;
   dragId: string | null;
   dropTarget: string | null;
-  onDragStart: (id: string) => void;
-  onDragEnd: () => void;
-  onDropTarget: (id: string | null) => void;
-  onDropOnConn: (c: Connection) => void;
-  onDropOnFolder: (folderId: string | null, groupId?: string) => void;
+  onConnPointerDown: (conn: Connection, x: number, y: number) => void;
   searchMatchIds: Set<string>;
   searchFocusId: string | null;
 }
@@ -799,6 +906,7 @@ interface SharedProps {
 function FolderItem({
   folder, continuations, isLast, ...shared
 }: { folder: FolderType; continuations: boolean[]; isLast: boolean } & SharedProps) {
+  const t = useT();
   const {
     allFolders, allConnections, openTab, toggleFolder,
     onConnContextMenu, onFolderContextMenu, selectedId, onSelect,
@@ -806,7 +914,7 @@ function FolderItem({
     renamingFolderId, renameFolderName, onRenameChange, onRenameConfirm, onRenameCancel, renameInputRef,
     creatingFolder, newFolderParentId, newFolderName,
     onSubfolderNameChange, onSubfolderConfirm, onSubfolderCancel, folderInputRef,
-    dragId, dropTarget, onDragStart, onDragEnd, onDropTarget, onDropOnConn, onDropOnFolder,
+    dragId, dropTarget, onConnPointerDown,
     searchMatchIds, searchFocusId,
   } = shared;
 
@@ -850,11 +958,9 @@ function FolderItem({
         </div>
       ) : (
         <button
+          data-folder-id={folder.id}
           onClick={() => { toggleFolder(folder.id); onFolderHint(folder); }}
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
-          onDragOver={(e) => { e.preventDefault(); onDropTarget(`folder:${folder.id}`); }}
-          onDragLeave={() => onDropTarget(null)}
-          onDrop={(e) => { e.preventDefault(); onDropOnFolder(folder.id); }}
           className={[
             "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
             isFolderDropTarget
@@ -887,7 +993,7 @@ function FolderItem({
                   if (e.key === "Escape") onSubfolderCancel();
                 }}
                 onBlur={onSubfolderCancel}
-                placeholder="Nombre de carpeta…"
+                placeholder={t("folderNamePlaceholder")}
                 className="flex-1 ml-1 bg-[var(--color-bg-elevated)] border border-[var(--color-accent)] rounded px-1 py-0 text-[13px] text-[var(--color-text-primary)] outline-none"
               />
             </div>
@@ -920,10 +1026,7 @@ function FolderItem({
                   onHint={() => onConnHint(conn)}
                   dragging={dragId === conn.id}
                   isDropTarget={dropTarget === conn.id}
-                  onDragStart={() => onDragStart(conn.id)}
-                  onDragEnd={onDragEnd}
-                  onDragOver={() => onDropTarget(conn.id)}
-                  onDrop={() => onDropOnConn(conn)}
+                  onPointerDragStart={(x, y) => onConnPointerDown(conn, x, y)}
                   isSearchMatch={searchMatchIds.has(conn.id)}
                   isSearchFocus={searchFocusId === conn.id}
                 />
@@ -950,7 +1053,7 @@ function ConnItem({
   conn, continuations, isLast, selected, onSelect, onOpen, onContextMenu,
   onHint,
   dragging = false, isDropTarget = false,
-  onDragStart, onDragEnd, onDragOver, onDrop,
+  onPointerDragStart,
   isSearchMatch = false, isSearchFocus = false,
 }: {
   conn: Connection;
@@ -963,36 +1066,29 @@ function ConnItem({
   onHint?: () => void;
   dragging?: boolean;
   isDropTarget?: boolean;
-  onDragStart?: () => void;
-  onDragEnd?: () => void;
-  onDragOver?: () => void;
-  onDrop?: () => void;
+  onPointerDragStart?: (x: number, y: number) => void;
   isSearchMatch?: boolean;
   isSearchFocus?: boolean;
 }) {
   const iconKey = conn.icon || DEFAULT_CONN_ICON[conn.type as keyof typeof DEFAULT_CONN_ICON] || "server";
 
   return (
-    <button
-      draggable
+    <div
+      role="button"
+      tabIndex={0}
       data-conn-id={conn.id}
       onClick={() => { onSelect(); onHint?.(); }}
       onDoubleClick={onOpen}
       onContextMenu={onContextMenu}
-      onDragStart={(e) => {
-        e.stopPropagation();
-        e.dataTransfer.setData("text/plain", conn.id);
-        e.dataTransfer.effectAllowed = "move";
-        onDragStart?.();
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { onSelect(); onHint?.(); } }}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        onPointerDragStart?.(e.clientX, e.clientY);
       }}
-      onDragEnd={onDragEnd}
-      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; onDragOver?.(); }}
-      onDrop={(e) => { e.preventDefault(); onDrop?.(); }}
       className={[
-        "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
+        "flex items-center w-full py-0.5 pr-2 transition-colors text-left cursor-pointer select-none",
         dragging ? "opacity-40" : "",
         isDropTarget ? "border-t-2 border-[var(--color-accent)]" : "",
-        // Search focus takes accent highlight, match gets amber tint, normal gets hover
         isSearchFocus || selected
           ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
           : isSearchMatch
@@ -1006,6 +1102,6 @@ function ConnItem({
       <span className={`text-[10px] uppercase font-semibold px-1 rounded shrink-0 ml-1 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
         {conn.type}
       </span>
-    </button>
+    </div>
   );
 }

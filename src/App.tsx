@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { TabBar, DetachedTabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/Terminal";
@@ -16,12 +16,13 @@ import {
   ftpConnect, ftpDisconnect, getConnections, getFolders, getGroups, getWindowLabel,
   popDetachedSession,
 } from "./lib/commands";
+import { skipDisconnectSessions } from "./lib/sessionTransfer";
 import type { Tab } from "./types";
 
 // ── Standalone FTP pane ────────────────────────────────────────────────────────
 
 function FtpStandalonePane({ tab }: { tab: Tab }) {
-  const { getConnectionById, setTabStatus } = useAppStore();
+  const { getConnectionById, setTabStatus, closeTab } = useAppStore();
   const connection = getConnectionById(tab.connection_id);
   const [sessionId, setSessionId] = useState<string | null>(null);
 
@@ -37,13 +38,13 @@ function FtpStandalonePane({ tab }: { tab: Tab }) {
       .then((sid) => { if (!cancelled) handleConnect(sid); })
       .catch((err) => {
         if (!cancelled) {
-          setTabStatus(tab.id, "error");
           useNotifStore.getState().add({
             connName: connection?.name ?? tab.connection_name,
             connType: "ftp",
             host: connection?.host ?? "",
             raw: String(err),
           });
+          closeTab(tab.id);
         }
       });
     return () => { cancelled = true; };
@@ -60,6 +61,7 @@ function FtpStandalonePane({ tab }: { tab: Tab }) {
       sessionId={sessionId}
       connectionId={tab.connection_id}
       onConnect={handleConnect}
+      onDisconnect={() => closeTab(tab.id)}
     />
   );
 }
@@ -84,6 +86,10 @@ const SessionPane = memo(function SessionPane({ tab }: { tab: Tab }) {
 
 function DetachedApp({ connectionId, windowLabel }: { connectionId: string; windowLabel: string }) {
   const { connections, tabs, activeTabId, openTab, openTabConnected, setConnections, setFolders, setGroups } = useAppStore();
+  // Guard: popDetachedSession removes the entry on first call. React.StrictMode
+  // runs effects twice — the second call returns null and would open a fresh
+  // (blank) connection instead of restoring the transferred session.
+  const didOpenRef = useRef(false);
 
   // Load data (Sidebar not rendered in detached mode, so load here)
   useEffect(() => {
@@ -101,15 +107,21 @@ function DetachedApp({ connectionId, windowLabel }: { connectionId: string; wind
     if (connections.length === 0) return;
     const conn = connections.find((c) => c.id === connectionId);
     if (!conn) return;
+    if (didOpenRef.current) return;
+    didOpenRef.current = true;
     popDetachedSession(windowLabel)
       .then((sessionId) => {
+        console.log("[DetachedApp] popDetachedSession:", sessionId, "label:", windowLabel);
         if (sessionId) {
+          // Protect from React StrictMode's double-invoke cleanup: the first
+          // cleanup fires before reparent and would call disconnectRdp without this.
+          skipDisconnectSessions.add(sessionId);
           openTabConnected(conn, sessionId);
         } else {
           openTab(conn);
         }
       })
-      .catch(() => openTab(conn));
+      .catch((e) => { console.error("[DetachedApp] popDetachedSession error:", e); openTab(conn); });
   }, [connections, connectionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -147,6 +159,7 @@ function MainApp() {
         const conn = getConnectionById(ev.payload.connectionId);
         if (!conn) return;
         if (ev.payload.sessionId) {
+          skipDisconnectSessions.add(ev.payload.sessionId);
           openTabConnected(conn, ev.payload.sessionId);
         } else {
           openTab(conn);

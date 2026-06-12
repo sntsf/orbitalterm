@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { X, RefreshCw, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
-import { dockBack, openDetachedWindow, rdpWindowsVisibility, storeDetachedSession } from "../../lib/commands";
+import { dockBack, openDetachedWindow, rdpWindowsVisibility, showRdpTabMenu, storeDetachedSession } from "../../lib/commands";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import type { Tab } from "../../types";
 
@@ -40,17 +40,23 @@ export function TabBar() {
       const label = `detached-${tab.connection_id}`;
       const isNativeRdp = tab.connection_type === "rdp" && isWindows;
 
+      // Always grab the freshest tab from the store — drag captures stale closure
+      const freshTab = useAppStore.getState().tabs.find(t => t.id === tab.id) ?? tab;
+      console.log("[tearOut] isNativeRdp:", isNativeRdp, "session_id:", freshTab.session_id, "tab_id:", freshTab.id);
+
       if (isNativeRdp) {
-        if (tab.session_id) {
-          await rdpWindowsVisibility(tab.session_id, false).catch(() => {});
+        if (freshTab.session_id) {
+          await rdpWindowsVisibility(freshTab.session_id, false).catch(() => {});
           // Preserve the COM session (don't disconnect on closeTab cleanup)
-          skipDisconnectSessions.add(tab.session_id);
+          skipDisconnectSessions.add(freshTab.session_id);
           // Store session_id so the detached window can retrieve it
-          const label = `detached-${tab.connection_id}`;
-          await storeDetachedSession(label, tab.session_id).catch(() => {});
+          await storeDetachedSession(label, freshTab.session_id).catch((e) => console.error("[tearOut] storeDetachedSession failed:", e));
+          console.log("[tearOut] stored session", freshTab.session_id, "for label", label);
+        } else {
+          console.warn("[tearOut] no session_id — detached window will open fresh connection");
         }
-        closeTab(tab.id);
-        await openDetachedWindow(tab.connection_id, tab.connection_name);
+        closeTab(freshTab.id);
+        await openDetachedWindow(freshTab.connection_id, freshTab.connection_name);
         return;
       }
 
@@ -136,7 +142,7 @@ export function TabBar() {
       const bar = barRef.current;
       const barRect = bar?.getBoundingClientRect();
 
-      if (barRect && ev.clientY > barRect.bottom + TEAR_THRESHOLD) {
+      if (barRect && ev.clientY > barRect.bottom + TEAR_THRESHOLD && !isWindows) {
         tearOut(state.tab);
         return;
       }
@@ -176,9 +182,20 @@ export function TabBar() {
                 if (dragRef.current?.moved) return;
                 setActiveTab(tab.id);
               }}
-              onContextMenu={(e) => {
+              onContextMenu={async (e) => {
                 e.preventDefault();
-                setMenu({ tabId: tab.id, x: e.clientX, y: e.clientY });
+                if (isWindows && tab.connection_type === "rdp") {
+                  // Native Win32 popup menu — sits above the WS_POPUP RDP window
+                  // in z-order so the RDP session stays visible during selection.
+                  const dpr = window.devicePixelRatio || 1;
+                  const sx = Math.round(e.screenX * dpr);
+                  const sy = Math.round(e.screenY * dpr);
+                  const action = await showRdpTabMenu(sx, sy);
+                  if (action === "reconnect") reconnectTab(tab.id);
+                  else if (action === "close") closeTab(tab.id);
+                } else {
+                  setMenu({ tabId: tab.id, x: e.clientX, y: e.clientY });
+                }
               }}
               className={[
                 "flex items-center gap-2 px-3 py-2 border-r border-[var(--color-border)] cursor-pointer shrink-0 group transition-colors min-w-0 max-w-48 touch-none",
@@ -212,17 +229,19 @@ export function TabBar() {
             className="fixed z-50 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded shadow-lg py-1 min-w-36"
             style={{ left: menu.x, top: menu.y }}
           >
-            <button
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
-              onClick={() => {
-                const tab = tabs.find((t) => t.id === menu.tabId);
-                if (tab) tearOut(tab);
-                closeMenu();
-              }}
-            >
-              <PanelLeftClose size={11} />
-              Separar ventana
-            </button>
+            {!isWindows && (
+              <button
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                onClick={() => {
+                  const tab = tabs.find((t) => t.id === menu.tabId);
+                  if (tab) tearOut(tab);
+                  closeMenu();
+                }}
+              >
+                <PanelLeftClose size={11} />
+                Separar ventana
+              </button>
+            )}
             <button
               className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
               onClick={() => { reconnectTab(menu.tabId); closeMenu(); }}

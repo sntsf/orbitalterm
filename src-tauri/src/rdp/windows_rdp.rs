@@ -1,598 +1,405 @@
 #![cfg(target_os = "windows")]
 
-//! Embedded RDP on Windows via COM in-process hosting of mstscax.dll.
-//! No mstsc.exe process is launched — identical to mRemoteNG's approach.
+//! Embedded RDP on Windows by spawning OrbitalRdpHost.exe (C# WinForms + mstscax ActiveX).
 //!
 //! ## Z-order and WebView2
-//! WebView2 renders via DirectComposition (DComp). Traditional WS_CHILD windows
-//! exist in the Win32 z-order which lies BELOW the DComp layer — they appear
-//! as black rectangles regardless of HWND_TOP. The fix is to use a WS_POPUP
-//! window (not WS_CHILD) with an owner relationship (GWLP_HWNDPARENT) so it
-//! sits above the DComp layer while still minimizing/restoring with Tauri.
+//! WebView2 renders via DirectComposition (DComp). Traditional WS_CHILD windows exist in the
+//! Win32 z-order which lies BELOW the DComp layer — they appear as black rectangles. The fix is
+//! a WS_POPUP window owned by the Tauri window so it floats above DComp while still allowing
+//! other apps to come to the foreground. OrbitalRdpHost.exe reparents its own window into this
+//! host popup via --parent <HWND>.
 
-use std::sync::mpsc;
+use std::io::Write;
+use std::os::windows::process::CommandExt;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use windows::Win32::Foundation::{E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::System::Com::*;
+use tauri::Emitter;
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF, SetWindowRgn};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Ole::*;
-use windows::Win32::System::Variant::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{implement, w, BOOL, BSTR, GUID, IUnknown, Interface, OutRef, Ref, PCWSTR};
 
-// MsRdpClient10 (Windows 10+); MsRdpClient9 used as fallback
-const CLSID_MSTSC_10: GUID = GUID::from_values(
-    0xC0EFA91A, 0xEEB7, 0x41C7,
-    [0x97, 0xFA, 0xF0, 0xED, 0x64, 0x5E, 0xFB, 0x24],
-);
-const CLSID_MSTSC_9: GUID = GUID::from_values(
-    0x8B918B82, 0x7985, 0x4C24,
-    [0x89, 0xDF, 0xC3, 0x3A, 0xD2, 0xBB, 0xFB, 0xCD],
-);
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const HOST_CLASS: &str = "OrbRdpHostWnd";
 
-// ── Command channel ───────────────────────────────────────────────────────────
-
-enum ComCmd {
-    Reposition { x: i32, y: i32, width: i32, height: i32 },
-    Show,
-    Hide,
-    Disconnect,
-    Reparent { new_parent: isize, rel_x: i32, rel_y: i32, width: i32, height: i32 },
-}
-
-// ── Session ───────────────────────────────────────────────────────────────────
+// ── Session handle ────────────────────────────────────────────────────────────
 
 pub struct WindowsRdpSession {
-    tx: mpsc::SyncSender<ComCmd>,
+    pub stop:          Arc<AtomicBool>,
+    pub host_hwnd:     Arc<AtomicIsize>,
+    pub parent_hwnd:   Arc<AtomicIsize>,
+    pub rel_x:         Arc<AtomicIsize>,
+    pub rel_y:         Arc<AtomicIsize>,
+    pub width:         Arc<AtomicIsize>,
+    pub height:        Arc<AtomicIsize>,
+    /// Desired visibility — written by show()/hide(), read by the host thread.
+    /// ShowWindow is always called from the host thread that owns the window.
+    pub wants_visible:      Arc<AtomicBool>,
+    pub reposition_pending: Arc<AtomicBool>,
 }
 
+// SAFETY: AtomicIsize/AtomicBool are Send+Sync; HWND is only accessed on the host thread.
 unsafe impl Send for WindowsRdpSession {}
 unsafe impl Sync for WindowsRdpSession {}
 
 impl Drop for WindowsRdpSession {
     fn drop(&mut self) {
-        let _ = self.tx.send(ComCmd::Disconnect);
+        self.stop.store(true, Ordering::SeqCst);
     }
 }
 
-// ── OLE Frame ─────────────────────────────────────────────────────────────────
-//
-// IOleInPlaceFrame represents the outermost application window.
-// Its GetWindow() MUST return the top-level frame (Tauri main window), NOT the
-// container child window — mstscax uses this to know the app boundary.
-// If we return the wrong HWND here, DoVerb(-5) silently fails → black screen.
+// ── Window class ──────────────────────────────────────────────────────────────
 
-#[implement(IOleInPlaceFrame)]
-struct RdpFrame {
-    hwnd: HWND, // top-level application window (Tauri main window)
-}
-
-impl IOleWindow_Impl for RdpFrame_Impl {
-    fn GetWindow(&self) -> windows::core::Result<HWND> { Ok(self.hwnd) }
-    fn ContextSensitiveHelp(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
-}
-
-impl IOleInPlaceUIWindow_Impl for RdpFrame_Impl {
-    fn GetBorder(&self) -> windows::core::Result<RECT> { Err(E_NOTIMPL.into()) }
-    fn RequestBorderSpace(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
-    fn SetBorderSpace(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
-    fn SetActiveObject(
-        &self,
-        _: Ref<'_, IOleInPlaceActiveObject>,
-        _: &PCWSTR,
-    ) -> windows::core::Result<()> { Ok(()) }
-}
-
-impl IOleInPlaceFrame_Impl for RdpFrame_Impl {
-    fn InsertMenus(&self, _: HMENU, _: *mut OLEMENUGROUPWIDTHS) -> windows::core::Result<()> { Ok(()) }
-    fn SetMenu(&self, _: HMENU, _: isize, _: HWND) -> windows::core::Result<()> { Ok(()) }
-    fn RemoveMenus(&self, _: HMENU) -> windows::core::Result<()> { Ok(()) }
-    fn SetStatusText(&self, _: &PCWSTR) -> windows::core::Result<()> { Ok(()) }
-    fn EnableModeless(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
-    fn TranslateAccelerator(&self, _: *const MSG, _: u16) -> windows::core::Result<()> {
-        // S_FALSE tells the control the container didn't handle it → control processes it
-        Err(windows::Win32::Foundation::S_FALSE.into())
-    }
-}
-
-// ── OLE Site ──────────────────────────────────────────────────────────────────
-//
-// IOleClientSite + IOleInPlaceSite represent the immediate container window
-// (host_hwnd). GetWindow() here returns host_hwnd (the popup we own).
-
-#[implement(IOleClientSite, IOleInPlaceSite)]
-struct RdpSite {
-    hwnd: HWND,              // container popup window (host_hwnd)
-    frame: IOleInPlaceFrame, // top-level frame (kept alive for GetWindowContext)
-}
-
-// SAFETY: used exclusively on the dedicated STA COM thread
-unsafe impl Send for RdpSite {}
-
-impl IOleClientSite_Impl for RdpSite_Impl {
-    fn SaveObject(&self) -> windows::core::Result<()> { Err(E_NOTIMPL.into()) }
-    fn GetMoniker(&self, _: &OLEGETMONIKER, _: &OLEWHICHMK) -> windows::core::Result<IMoniker> {
-        Err(E_NOTIMPL.into())
-    }
-    fn GetContainer(&self) -> windows::core::Result<IOleContainer> { Err(E_NOTIMPL.into()) }
-    fn ShowObject(&self) -> windows::core::Result<()> { Ok(()) }
-    fn OnShowWindow(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
-    fn RequestNewObjectLayout(&self) -> windows::core::Result<()> { Err(E_NOTIMPL.into()) }
-}
-
-impl IOleWindow_Impl for RdpSite_Impl {
-    fn GetWindow(&self) -> windows::core::Result<HWND> { Ok(self.hwnd) }
-    fn ContextSensitiveHelp(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
-}
-
-impl IOleInPlaceSite_Impl for RdpSite_Impl {
-    fn CanInPlaceActivate(&self) -> windows::core::Result<()> { Ok(()) }
-    fn OnInPlaceActivate(&self) -> windows::core::Result<()> { Ok(()) }
-    fn OnUIActivate(&self) -> windows::core::Result<()> { Ok(()) }
-    fn GetWindowContext(
-        &self,
-        ppframe: OutRef<'_, IOleInPlaceFrame>,
-        ppdoc: OutRef<'_, IOleInPlaceUIWindow>,
-        lprcposrect: *mut RECT,
-        lprccliprect: *mut RECT,
-        lpframeinfo: *mut OLEINPLACEFRAMEINFO,
-    ) -> windows::core::Result<()> {
-        unsafe {
-            // ppframe → top-level app frame (critical — must be non-null)
-            ppframe.write(Some(self.frame.clone()));
-            // ppdoc → null for SDI (no separate document window)
-            ppdoc.write(None);
-            let mut rc = RECT::default();
-            GetClientRect(self.hwnd, &mut rc).ok();
-            if !lprcposrect.is_null()  { *lprcposrect  = rc; }
-            if !lprccliprect.is_null() { *lprccliprect = rc; }
-            if !lpframeinfo.is_null() {
-                (*lpframeinfo).cb            = std::mem::size_of::<OLEINPLACEFRAMEINFO>() as u32;
-                (*lpframeinfo).fMDIApp       = BOOL(0);
-                (*lpframeinfo).hwndFrame     = self.hwnd;
-                (*lpframeinfo).haccel        = HACCEL::default();
-                (*lpframeinfo).cAccelEntries = 0;
-            }
-        }
-        Ok(())
-    }
-    fn Scroll(&self, _: &windows::Win32::Foundation::SIZE) -> windows::core::Result<()> { Ok(()) }
-    fn OnUIDeactivate(&self, _: BOOL) -> windows::core::Result<()> { Ok(()) }
-    fn OnInPlaceDeactivate(&self) -> windows::core::Result<()> { Ok(()) }
-    fn DiscardUndoState(&self) -> windows::core::Result<()> { Ok(()) }
-    fn DeactivateAndUndo(&self) -> windows::core::Result<()> { Ok(()) }
-    fn OnPosRectChange(&self, _: *const RECT) -> windows::core::Result<()> { Ok(()) }
-}
-
-// ── IDispatch helpers ─────────────────────────────────────────────────────────
-
-fn get_dispid(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
-    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let pcwstr = PCWSTR(wide.as_ptr());
-    let mut id = 0i32;
-    unsafe { disp.GetIDsOfNames(&GUID::zeroed(), &pcwstr, 1, 0x0409, &mut id)?; }
-    Ok(id)
-}
-
-// VARIANT on Win64: u16 vt + u16[3] reserved + 8-byte data = 16 bytes total.
-#[repr(C)]
-union VarData { bstrVal: *mut u16, lVal: i32, boolVal: i16, pdispVal: *mut core::ffi::c_void }
-#[repr(C)]
-struct VarRaw { vt: u16, _r: [u16; 3], data: VarData }
-
-fn put_bstr(disp: &IDispatch, name: &str, value: &str) -> windows::core::Result<()> {
-    let id = get_dispid(disp, name)?;
-    let bval = std::mem::ManuallyDrop::new(BSTR::from(value));
+fn register_host_class(hinstance: windows::Win32::Foundation::HINSTANCE) {
     unsafe {
-        let mut var: VARIANT = std::mem::zeroed();
-        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 8; (*r).data.bstrVal = bval.as_ptr() as *mut u16; }
-        let mut named = DISPID_PROPERTYPUT;
-        let res = disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
-            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
-            None, None, None);
-        VariantClear(&mut var).ok();
-        res
-    }
-}
-
-fn put_i4(disp: &IDispatch, name: &str, value: i32) -> windows::core::Result<()> {
-    let id = get_dispid(disp, name)?;
-    unsafe {
-        let mut var: VARIANT = std::mem::zeroed();
-        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 3; (*r).data.lVal = value; }
-        let mut named = DISPID_PROPERTYPUT;
-        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
-            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
-            None, None, None)
-    }
-}
-
-fn put_bool_prop(disp: &IDispatch, name: &str, value: bool) -> windows::core::Result<()> {
-    let id = get_dispid(disp, name)?;
-    unsafe {
-        let mut var: VARIANT = std::mem::zeroed();
-        { let r = &mut var as *mut VARIANT as *mut VarRaw; (*r).vt = 11; (*r).data.boolVal = if value { -1i16 } else { 0i16 }; }
-        let mut named = DISPID_PROPERTYPUT;
-        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYPUT,
-            &DISPPARAMS { rgvarg: &mut var, rgdispidNamedArgs: &mut named, cArgs: 1, cNamedArgs: 1 },
-            None, None, None)
-    }
-}
-
-fn get_dispatch_sub(disp: &IDispatch, name: &str) -> windows::core::Result<IDispatch> {
-    let id = get_dispid(disp, name)?;
-    unsafe {
-        let mut result: VARIANT = std::mem::zeroed();
-        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_PROPERTYGET,
-            &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
-            Some(&mut result), None, None)?;
-        let r = &result as *const VARIANT as *const VarRaw;
-        if (*r).vt == 9 {
-            let raw = (*r).data.pdispVal;
-            if !raw.is_null() {
-                (*(r as *mut VarRaw)).vt = 0;
-                return Ok(IDispatch::from_raw(raw));
-            }
-        }
-        VariantClear(&mut result).ok();
-        Err(E_NOTIMPL.into())
-    }
-}
-
-fn call_no_args(disp: &IDispatch, name: &str) -> windows::core::Result<()> {
-    let id = get_dispid(disp, name)?;
-    unsafe {
-        disp.Invoke(id, &GUID::zeroed(), 0x0409, DISPATCH_METHOD,
-            &DISPPARAMS { rgvarg: std::ptr::null_mut(), rgdispidNamedArgs: std::ptr::null_mut(), cArgs: 0, cNamedArgs: 0 },
-            None, None, None)
-    }
-}
-
-// ── Coordinate helpers ────────────────────────────────────────────────────────
-
-/// Map a point in `hwnd`'s client coordinates to screen coordinates.
-///
-/// `ClientToScreen` is not exposed by the `windows` crate bindings, so we
-/// derive the same result from `GetWindowRect` (outer position) and
-/// `GetClientRect` (client size).  For standard Win32 windows:
-///   left_border == right_border == bottom_border  (symmetric frame)
-///   top_border = outer_height - client_height - left_border
-///
-/// This is exact for Tauri windows because WebView2 fills the whole client area
-/// and there is no custom client-area padding.
-unsafe fn canvas_to_screen(hwnd: HWND, cx: i32, cy: i32) -> (i32, i32) {
-    let mut outer = RECT::default();
-    let mut inner = RECT::default();
-    GetWindowRect(hwnd, &mut outer).ok();
-    GetClientRect(hwnd, &mut inner).ok();
-    let outer_w = outer.right - outer.left;
-    let outer_h = outer.bottom - outer.top;
-    let client_w = inner.right;  // GetClientRect top-left is always (0,0)
-    let client_h = inner.bottom;
-    let bx = (outer_w - client_w) / 2;  // left/right frame
-    let by = outer_h - client_h - bx;   // top = title bar + top frame
-    (outer.left + bx + cx, outer.top + by + cy)
-}
-
-// ── Host window class ─────────────────────────────────────────────────────────
-
-const HOST_CLASS: PCWSTR = w!("OrbRdpHostWnd");
-
-unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    DefWindowProcW(hwnd, msg, wp, lp)
-}
-
-fn register_host_class() {
-    unsafe {
-        let hmod = GetModuleHandleW(None).unwrap_or_default();
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(host_wnd_proc),
-            lpszClassName: HOST_CLASS,
-            hInstance: hmod.into(),
+        let class_name: Vec<u16> = HOST_CLASS.encode_utf16().chain(std::iter::once(0)).collect();
+        let wc = WNDCLASSEXW {
+            cbSize:        std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc:   Some(host_wnd_proc),
+            hInstance:     hinstance,
+            lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
             ..Default::default()
         };
-        RegisterClassW(&wc);
+        RegisterClassExW(&wc);
     }
 }
 
-// ── STA thread ────────────────────────────────────────────────────────────────
-
-struct LaunchParams {
-    parent_hwnd: isize,
-    host: String,
-    port: u16,
-    username: String,
-    domain: String,
-    password: Option<String>,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    admin_mode: bool,
+unsafe extern "system" fn host_wnd_proc(
+    hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_DESTROY => { PostQuitMessage(0); LRESULT(0) }
+        WM_SETFOCUS => {
+            // Cascade focus to the WinForms/mstscax child so keyboard input reaches the RDP session.
+            if let Ok(child) = GetWindow(hwnd, GW_CHILD) {
+                if !child.0.is_null() { let _ = SetFocus(Some(child)); }
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
 }
 
-fn sta_thread(
-    params: LaunchParams,
-    result_tx: mpsc::SyncSender<Result<mpsc::SyncSender<ComCmd>, String>>,
-) {
+// ── Screen positioning ────────────────────────────────────────────────────────
+
+fn canvas_to_screen(parent: HWND, rel_x: i32, rel_y: i32) -> (i32, i32) {
+    // getBoundingClientRect() returns coords relative to the WebView2 client area.
+    // We must convert from client-area origin to screen by accounting for the
+    // non-client area (title bar + borders). GetWindowRect gives the outer bounds;
+    // GetClientRect gives the client size (always 0-based). The difference is the
+    // non-client offsets on each side.
     unsafe {
-        if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
-            let _ = result_tx.send(Err("CoInitializeEx failed".into()));
+        let mut wr = RECT::default();
+        let mut cr = RECT::default();
+        let _ = GetWindowRect(parent, &mut wr);
+        let _ = GetClientRect(parent, &mut cr);
+        // Horizontal border is symmetric; vertical non-client area = title + top border.
+        let nc_x = ((wr.right - wr.left) - cr.right) / 2;
+        let nc_y = ((wr.bottom - wr.top) - cr.bottom - nc_x).max(0);
+        (wr.left + nc_x + rel_x, wr.top + nc_y + rel_y)
+    }
+}
+
+// ── Helper binary lookup ──────────────────────────────────────────────────────
+
+fn find_helper_exe() -> Option<std::path::PathBuf> {
+    // 1. Env override
+    if let Ok(p) = std::env::var("ORBITAL_RDP_HOST") {
+        let pb = std::path::PathBuf::from(p);
+        if pb.exists() { return Some(pb); }
+    }
+    // 2. Alongside our own exe (packaged: <app>/OrbitalRdpHost.exe)
+    if let Ok(mut p) = std::env::current_exe() {
+        p.pop();
+        p.push("OrbitalRdpHost.exe");
+        if p.exists() { return Some(p); }
+    }
+    // 3. Tauri resources dir (packaged: <app>/resources/OrbitalRdpHost.exe)
+    if let Ok(mut p) = std::env::current_exe() {
+        p.pop();
+        p.push("resources");
+        p.push("OrbitalRdpHost.exe");
+        if p.exists() { return Some(p); }
+    }
+    // 4. Dev: exe is at src-tauri/target/debug/orbitalterm.exe → go up 3 dirs
+    if let Ok(mut p) = std::env::current_exe() {
+        p.pop(); p.pop(); p.pop(); // debug/ → target/ → src-tauri/
+        p.pop();                    // src-tauri/ → project root
+        p.push("csharp-rdp-host");
+        p.push("OrbitalRdpHost.exe");
+        if p.exists() { return Some(p); }
+    }
+    // 5. CWD is project root (tauri dev from root)
+    if let Ok(mut p) = std::env::current_dir() {
+        p.push("csharp-rdp-host");
+        p.push("OrbitalRdpHost.exe");
+        if p.exists() { return Some(p); }
+    }
+    // 6. CWD is src-tauri/ → go up one
+    if let Ok(mut p) = std::env::current_dir() {
+        p.pop();
+        p.push("csharp-rdp-host");
+        p.push("OrbitalRdpHost.exe");
+        if p.exists() { return Some(p); }
+    }
+    None
+}
+
+// ── Launch params ─────────────────────────────────────────────────────────────
+
+struct LaunchParams {
+    app:        tauri::AppHandle,
+    session_id: String,
+    parent_hwnd: isize,
+    host:       String,
+    port:       u16,
+    username:   String,
+    domain:     String,
+    password:   Option<String>,
+    x: i32, y: i32, width: i32, height: i32,
+    admin_mode: bool,
+    rdp_security: String,
+    _color_depth: i32,
+}
+
+// ── Host thread ───────────────────────────────────────────────────────────────
+
+fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
+    let exe = match find_helper_exe() {
+        Some(p) => p,
+        None => {
+            eprintln!("[rdp] OrbitalRdpHost.exe not found");
+            session.finished.store(true, Ordering::SeqCst);
             return;
         }
+    };
 
-        register_host_class();
+    // Build user arg: "domain\user" if domain present, else just user
+    let user_arg = if params.domain.is_empty() {
+        params.username.clone()
+    } else {
+        format!("{}\\{}", params.domain, params.username)
+    };
 
+    // Create WS_POPUP host window (must exist before spawning helper so we have an HWND)
+    let host_hwnd = unsafe {
         let hmod = GetModuleHandleW(None).unwrap_or_default();
-        // parent = Tauri main window (top-level application frame)
-        let mut parent = HWND(params.parent_hwnd as *mut _);
-        let w = params.width.max(640);
-        let h = params.height.max(480);
+        register_host_class(HINSTANCE(hmod.0));
 
-        // Convert canvas-relative coords to screen coords.
-        // The params x/y are relative to the Tauri window's client area.
+        let class_name: Vec<u16> = HOST_CLASS.encode_utf16().chain(std::iter::once(0)).collect();
+        let parent = HWND(params.parent_hwnd as *mut _);
         let (sx, sy) = canvas_to_screen(parent, params.x, params.y);
 
-        // WS_POPUP (not WS_CHILD): floats above WebView2's DirectComposition layer.
-        // WS_CHILD windows sit below DComp and appear black regardless of z-order.
-        // WS_EX_TOOLWINDOW: suppress taskbar entry for this auxiliary window.
-        let host_hwnd = match CreateWindowExW(
-            WS_EX_TOOLWINDOW,
-            HOST_CLASS, w!(""),
-            WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-            sx, sy, w, h,
-            None, None, Some(hmod.into()), None,
-        ) {
-            Ok(hwnd) => hwnd,
-            Err(e) => {
-                let _ = result_tx.send(Err(format!("CreateWindowExW: {e}")));
-                CoUninitialize();
-                return;
-            }
-        };
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            windows::core::PCWSTR(class_name.as_ptr()),
+            windows::core::PCWSTR(std::ptr::null()),
+            WS_POPUP | WS_VISIBLE,
+            sx, sy, params.width, params.height,
+            Some(parent), // owner (not parent — keeps it above DComp)
+            None, Some(HINSTANCE(hmod.0)), None,
+        ).unwrap_or(HWND(std::ptr::null_mut()))
+    };
 
-        // Owner relationship: popup minimizes/restores/always-on-top with Tauri.
-        // This is the GWLP_HWNDPARENT trick — not the same as WS_CHILD parent.
-        SetWindowLongPtrW(host_hwnd, GWLP_HWNDPARENT, parent.0 as isize);
+    if host_hwnd.0.is_null() {
+        eprintln!("[rdp] CreateWindowExW failed");
+        session.finished.store(true, Ordering::SeqCst);
+        return;
+    }
 
-        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, w, h,
-            SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
+    session.host_hwnd.store(host_hwnd.0 as isize, Ordering::Relaxed);
 
-        // Try MsRdpClient10 first, fall back to MsRdpClient9 for older Windows
-        let rdp_unk: IUnknown = match CoCreateInstance(&CLSID_MSTSC_10, None, CLSCTX_INPROC_SERVER)
-            .or_else(|_| CoCreateInstance(&CLSID_MSTSC_9, None, CLSCTX_INPROC_SERVER))
-        {
-            Ok(u) => u,
-            Err(e) => {
-                let _ = result_tx.send(Err(format!(
-                    "mstscax.dll no encontrado ({e})\nInstala Remote Desktop Connection."
-                )));
-                DestroyWindow(host_hwnd).ok();
-                CoUninitialize();
-                return;
-            }
-        };
+    // Spawn the C# helper, embedding its window inside our popup
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--parent").arg((host_hwnd.0 as isize).to_string())
+       .arg("--server").arg(&params.host)
+       .arg("--port").arg(params.port.to_string())
+       .arg("--user").arg(&user_arg)
+       .arg("--width").arg(params.width.to_string())
+       .arg("--height").arg(params.height.to_string())
+       .arg("--security").arg(&params.rdp_security);
+    if params.admin_mode { cmd.arg("--admin"); }
+    cmd.stdin(Stdio::piped())
+       .stdout(Stdio::piped())
+       .stderr(Stdio::null())
+       .creation_flags(CREATE_NO_WINDOW);
 
-        let ole_obj: IOleObject = match rdp_unk.cast() {
-            Ok(o) => o,
-            Err(e) => {
-                let _ = result_tx.send(Err(format!("IOleObject QI: {e}")));
-                DestroyWindow(host_hwnd).ok();
-                CoUninitialize();
-                return;
-            }
-        };
-
-        // frame → top-level application window (Tauri main window).
-        // IOleInPlaceFrame::GetWindow MUST return the top-level frame, not the
-        // container. mstscax validates this to create its rendering surface.
-        let frame: IOleInPlaceFrame = RdpFrame { hwnd: parent }.into();
-        let site: IOleClientSite = RdpSite { hwnd: host_hwnd, frame: frame.clone() }.into();
-
-        if let Err(e) = ole_obj.SetClientSite(Some(&site)) {
-            let _ = result_tx.send(Err(format!("SetClientSite: {e}")));
-            DestroyWindow(host_hwnd).ok();
-            CoUninitialize();
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[rdp] failed to spawn helper: {e}");
+            session.finished.store(true, Ordering::SeqCst);
+            unsafe { let _ = DestroyWindow(host_hwnd); }
             return;
         }
+    };
 
-        let _ = OleSetContainedObject(&rdp_unk, true);
-        let _ = ole_obj.SetHostNames(w!("OrbitalTerm"), w!(""));
+    // Send password via stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        let pw = params.password.clone().unwrap_or_default();
+        let _ = writeln!(stdin, "{pw}");
+    }
 
-        let mut rc = RECT { left: 0, top: 0, right: w, bottom: h };
-
-        let dv_result = ole_obj.DoVerb(-5i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
-        if dv_result.is_err() {
-            let _ = ole_obj.DoVerb(-1i32, std::ptr::null(), &site, 0, host_hwnd, &rc);
-        }
-
-        if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
-            let _ = ipo.SetObjectRects(&rc, &rc);
-        }
-
-        let disp: IDispatch = match rdp_unk.cast() {
-            Ok(d) => d,
-            Err(e) => {
-                let _ = result_tx.send(Err(format!("IDispatch QI: {e}")));
-                DestroyWindow(host_hwnd).ok();
-                CoUninitialize();
-                return;
-            }
-        };
-
-        // ── Store credentials in Windows Credential Manager ───────────────────
-        // NLA/CredSSP reads from Credential Manager to suppress the credential
-        // prompt even when ClearTextPassword is also set.
-        if let Some(ref pw) = params.password {
-            let target = format!("TERMSRV/{}", params.host);
-            let user = if params.domain.is_empty() {
-                params.username.clone()
-            } else {
-                format!("{}\\{}", params.domain, params.username)
-            };
-            #[cfg(target_os = "windows")]
-            {
-                use std::os::windows::process::CommandExt;
-                let _ = std::process::Command::new("cmdkey")
-                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                    .args([
-                        &format!("/add:{}", target),
-                        &format!("/user:{}", user),
-                        &format!("/pass:{}", pw),
-                    ])
-                    .status();
-            }
-        }
-
-        // ── RDP properties ────────────────────────────────────────────────────
-        let _ = put_bstr(&disp, "Server", &params.host);
-        let _ = put_i4(&disp, "RDPPort", params.port as i32);
-        let _ = put_bstr(&disp, "UserName", &params.username);
-        if !params.domain.is_empty() {
-            let _ = put_bstr(&disp, "Domain", &params.domain);
-        }
-        let _ = put_i4(&disp, "DesktopWidth", w);
-        let _ = put_i4(&disp, "DesktopHeight", h);
-        let _ = put_bool_prop(&disp, "FullScreen", false);
-        // IMsRdpClient5::AuthenticationLevel = 0 → connect without certificate warning.
-        // Setting it here on the main client AND on AdvancedSettings ensures both
-        // interfaces suppress the "Precaución: conexión remota desconocida" dialog.
-        let _ = put_i4(&disp, "AuthenticationLevel", 0);
-
-        // AdvancedSettings: password, security layer, and AuthenticationLevel.
-        // AuthenticationLevel MUST be set on AdvancedSettings (not the main
-        // client object) to actually suppress the "unknown certificate" warning.
-        let adv = get_dispatch_sub(&disp, "AdvancedSettings9")
-            .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings7"))
-            .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings5"))
-            .or_else(|_| get_dispatch_sub(&disp, "AdvancedSettings2"));
-        if let Ok(ref adv) = adv {
-            if let Some(ref pw) = params.password {
-                let _ = put_bstr(adv, "ClearTextPassword", pw);
-            }
-            let _ = put_i4(adv, "RDPPort", params.port as i32);
-            let _ = put_bool_prop(adv, "EnableCredSspSupport", true);
-            let _ = put_bool_prop(adv, "SmartSizing", true);
-            // 0 = always connect even if cert doesn't match → suppresses warning dialog
-            let _ = put_i4(adv, "AuthenticationLevel", 0);
-            if params.admin_mode {
-                let _ = put_i4(adv, "ConnectToAdministerServer", 1);
-            }
-        }
-
-        if let Err(e) = call_no_args(&disp, "Connect") {
-            let _ = result_tx.send(Err(format!("RDP Connect(): {e}")));
-            DestroyWindow(host_hwnd).ok();
-            CoUninitialize();
-            return;
-        }
-
-        let (tx, rx) = mpsc::sync_channel::<ComCmd>(16);
-        let _ = result_tx.send(Ok(tx));
-
-        // Track canvas-relative position so we can re-apply ClientToScreen
-        // when the parent moves (e.g. window drag).
-        let mut rel_x = params.x;
-        let mut rel_y = params.y;
-        let mut last_parent_rect = RECT::default();
-        GetWindowRect(parent, &mut last_parent_rect).ok();
-
-        // ── Message / command loop ─────────────────────────────────────────────
-        let mut msg = MSG::default();
-        let mut tick = 0u32;
-        'outer: loop {
-            // Drain the command channel
-            loop {
-                match rx.try_recv() {
-                    Ok(ComCmd::Reposition { x, y, width, height }) => {
-                        rel_x = x;
-                        rel_y = y;
-                        let (sx, sy) = canvas_to_screen(parent, x, y);
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, width, height,
-                            SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
-                        if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
-                            let r = RECT { left: 0, top: 0, right: width, bottom: height };
-                            let _ = ipo.SetObjectRects(&r, &r);
+    // Background thread: read STATE: lines from helper stdout.
+    // ERROR: lines are captured and forwarded to the frontend as rdp-error events.
+    let connected  = Arc::clone(&session.connected);
+    let finished   = Arc::clone(&session.finished);
+    let last_error: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+    let last_error_clone = Arc::clone(&last_error);
+    if let Some(stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            for line in BufReader::new(stdout).lines().flatten() {
+                if line.contains("STATE:connected") || line.contains("OnLoginComplete") {
+                    connected.store(true, Ordering::SeqCst);
+                }
+                if line.contains("STATE:disconnected") || line.starts_with("ERROR:") {
+                    if line.starts_with("ERROR:") {
+                        if let Ok(mut e) = last_error_clone.lock() {
+                            *e = line[6..].trim().to_string();
                         }
                     }
-                    Ok(ComCmd::Show) => {
-                        ShowWindow(host_hwnd, SW_SHOW);
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), 0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE).ok();
-                    }
-                    Ok(ComCmd::Hide) => { ShowWindow(host_hwnd, SW_HIDE); }
-                    Ok(ComCmd::Reparent { new_parent, rel_x: new_rel_x, rel_y: new_rel_y, width, height }) => {
-                        let new_hwnd = HWND(new_parent as *mut _);
-                        // Change owner so WS_POPUP minimizes/restores with the new window
-                        SetWindowLongPtrW(host_hwnd, GWLP_HWNDPARENT, new_parent);
-                        parent = new_hwnd;
-                        GetWindowRect(parent, &mut last_parent_rect).ok();
-                        rel_x = new_rel_x;
-                        rel_y = new_rel_y;
-                        let (sx, sy) = canvas_to_screen(parent, rel_x, rel_y);
-                        SetWindowPos(host_hwnd, Some(HWND_TOP), sx, sy, width, height,
-                            SWP_NOACTIVATE | SWP_SHOWWINDOW).ok();
-                        if let Ok(ipo) = rdp_unk.cast::<IOleInPlaceObject>() {
-                            let r = RECT { left: 0, top: 0, right: width, bottom: height };
-                            let _ = ipo.SetObjectRects(&r, &r);
-                        }
-                    }
-                    Ok(ComCmd::Disconnect) | Err(mpsc::TryRecvError::Disconnected) => {
-                        let _ = call_no_args(&disp, "Disconnect");
-                        PostQuitMessage(0);
-                        break 'outer;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
+                    finished.store(true, Ordering::SeqCst);
                 }
             }
+            finished.store(true, Ordering::SeqCst);
+        });
+    }
 
-            // Pump the COM STA message queue
+    // ── Host event loop ───────────────────────────────────────────────────────
+    let parent = HWND(params.parent_hwnd as *mut _);
+    let mut last_parent_rect = RECT::default();
+    let mut ever_connected = false;
+    let mut cur_visible = false; // tracks actual SW state so we only call ShowWindow on change
+
+    unsafe {
+        ShowWindow(host_hwnd, SW_HIDE);
+
+        let mut msg = MSG::default();
+        loop {
+            // Drain Win32 messages
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == WM_QUIT { break 'outer; }
-                TranslateMessage(&msg);
+                if msg.message == WM_QUIT { break; }
+                let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
 
-            // Every ~100ms: check parent liveness and reposition if it moved.
-            // Required because WS_POPUP doesn't automatically follow its owner.
-            tick += 1;
-            if tick % 6 == 0 {
-                // If the owner window (Tauri) was destroyed (e.g. detached window
-                // closed without going through disconnect_rdp), clean up and exit
-                // so the WS_POPUP doesn't orphan on the screen.
-                if !IsWindow(Some(parent)).as_bool() {
-                    let _ = call_no_args(&disp, "Disconnect");
-                    PostQuitMessage(0);
-                    break 'outer;
-                }
+            if session.stop.load(Ordering::SeqCst)
+                || session.finished.load(Ordering::SeqCst)
+            {
+                break;
+            }
 
-                let mut cur = RECT::default();
-                GetWindowRect(parent, &mut cur).ok();
-                if cur.left != last_parent_rect.left || cur.top != last_parent_rect.top {
-                    let (sx, sy) = canvas_to_screen(parent, rel_x, rel_y);
-                    SetWindowPos(host_hwnd, None, sx, sy, 0, 0,
-                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE).ok();
-                    last_parent_rect = cur;
+            // Auto-show on first connection by setting wants_visible.
+            // After that, wants_visible is driven entirely by show()/hide().
+            if session.connected.load(Ordering::SeqCst) && !ever_connected {
+                ever_connected = true;
+                session.wants_visible.store(true, Ordering::SeqCst);
+            }
+
+            // Apply pending visibility change — always from this owner thread.
+            let wants = session.wants_visible.load(Ordering::SeqCst);
+            if wants != cur_visible {
+                cur_visible = wants;
+                if wants {
+                    ShowWindow(host_hwnd, SW_SHOW);
+                    // Transfer the foreground to the RDP popup so the OS routes keyboard
+                    // input to its thread.  SetFocus alone doesn't work from a non-foreground
+                    // thread; SetForegroundWindow is required first.  This process owns the
+                    // Tauri window (the current foreground), so the call is allowed.
+                    // WM_SETFOCUS will be delivered to host_wnd_proc which cascades to the
+                    // WinForms child; the C# WndProc then focuses the deepest mstscax child.
+                    let _ = SetForegroundWindow(host_hwnd);
+                } else {
+                    ShowWindow(host_hwnd, SW_HIDE);
+                    // Return keyboard focus to the Tauri parent window.
+                    let _ = SetForegroundWindow(parent);
                 }
+            }
+
+            // Apply pending reposition — also from owner thread.
+            if session.reposition_pending.swap(false, Ordering::SeqCst) {
+                let x  = session.rel_x.load(Ordering::Relaxed) as i32;
+                let y  = session.rel_y.load(Ordering::Relaxed) as i32;
+                let w  = session.width.load(Ordering::Relaxed)  as i32;
+                let h  = session.height.load(Ordering::Relaxed) as i32;
+                let p  = HWND(session.parent_hwnd.load(Ordering::Relaxed) as *mut _);
+                let (sx, sy) = canvas_to_screen(p, x, y);
+                let _ = SetWindowPos(host_hwnd, None, sx, sy, w, h,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+                last_parent_rect = RECT::default(); // force re-check on next tick
+            }
+
+            // Follow parent window movement
+            let p = HWND(session.parent_hwnd.load(Ordering::Relaxed) as *mut _);
+            let rel_x = session.rel_x.load(Ordering::Relaxed) as i32;
+            let rel_y = session.rel_y.load(Ordering::Relaxed) as i32;
+            let mut cur = RECT::default();
+            let _ = GetWindowRect(p, &mut cur);
+            if cur.left != last_parent_rect.left || cur.top != last_parent_rect.top {
+                let (sx, sy) = canvas_to_screen(p, rel_x, rel_y);
+                let _ = SetWindowPos(host_hwnd, None, sx, sy, 0, 0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                last_parent_rect = cur;
             }
 
             std::thread::sleep(Duration::from_millis(16));
         }
 
-        let _ = ole_obj.SetClientSite(None);
+        // Cleanup
+        let _ = child.kill();
         DestroyWindow(host_hwnd).ok();
-        drop(disp);
-        drop(ole_obj);
-        drop(site);
-        drop(frame);
-        CoUninitialize();
     }
+
+    if ever_connected {
+        // Clean logoff or unexpected disconnect after a real session.
+        params.app.emit(
+            &format!("rdp-disconnected-{}", params.session_id),
+            (),
+        ).ok();
+    } else {
+        // The session ended before connecting (server off, port closed, auth failed, etc.).
+        // Emit rdp-error so the frontend can show a specific error and notification.
+        let raw_err = last_error.lock().map(|e| e.clone()).unwrap_or_default();
+        let err_msg = if raw_err.is_empty() {
+            "connection timed out".to_string()
+        } else {
+            raw_err
+        };
+        params.app.emit(
+            &format!("rdp-error-{}", params.session_id),
+            err_msg,
+        ).ok();
+    }
+
+    session.finished.store(true, Ordering::SeqCst);
+}
+
+// ── Shared atomics (between host thread and public API) ───────────────────────
+
+struct SessionShared {
+    connected:          Arc<AtomicBool>,
+    finished:           Arc<AtomicBool>,
+    stop:               Arc<AtomicBool>,
+    host_hwnd:          Arc<AtomicIsize>,
+    parent_hwnd:        Arc<AtomicIsize>,
+    rel_x:              Arc<AtomicIsize>,
+    rel_y:              Arc<AtomicIsize>,
+    width:              Arc<AtomicIsize>,
+    height:             Arc<AtomicIsize>,
+    wants_visible:      Arc<AtomicBool>,
+    reposition_pending: Arc<AtomicBool>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn launch(
+    app: tauri::AppHandle,
+    session_id: &str,
     parent_hwnd: HWND,
     host: &str,
     port: u16,
@@ -604,8 +411,38 @@ pub fn launch(
     width: i32,
     height: i32,
     admin_mode: bool,
+    rdp_security: &str,
+    color_depth: i32,
 ) -> Result<WindowsRdpSession, String> {
+    let shared = Arc::new(SessionShared {
+        connected:          Arc::new(AtomicBool::new(false)),
+        finished:           Arc::new(AtomicBool::new(false)),
+        stop:               Arc::new(AtomicBool::new(false)),
+        host_hwnd:          Arc::new(AtomicIsize::new(0)),
+        parent_hwnd:        Arc::new(AtomicIsize::new(parent_hwnd.0 as isize)),
+        rel_x:              Arc::new(AtomicIsize::new(x as isize)),
+        rel_y:              Arc::new(AtomicIsize::new(y as isize)),
+        width:              Arc::new(AtomicIsize::new(width as isize)),
+        height:             Arc::new(AtomicIsize::new(height as isize)),
+        wants_visible:      Arc::new(AtomicBool::new(false)),
+        reposition_pending: Arc::new(AtomicBool::new(false)),
+    });
+
+    let session = WindowsRdpSession {
+        stop:               Arc::clone(&shared.stop),
+        host_hwnd:          Arc::clone(&shared.host_hwnd),
+        parent_hwnd:        Arc::clone(&shared.parent_hwnd),
+        rel_x:              Arc::clone(&shared.rel_x),
+        rel_y:              Arc::clone(&shared.rel_y),
+        width:              Arc::clone(&shared.width),
+        height:             Arc::clone(&shared.height),
+        wants_visible:      Arc::clone(&shared.wants_visible),
+        reposition_pending: Arc::clone(&shared.reposition_pending),
+    };
+
     let params = LaunchParams {
+        app,
+        session_id: session_id.to_string(),
         parent_hwnd: parent_hwnd.0 as isize,
         host: host.to_string(),
         port,
@@ -614,30 +451,88 @@ pub fn launch(
         password: password.map(str::to_string),
         x, y, width, height,
         admin_mode,
+        rdp_security: rdp_security.to_string(),
+        _color_depth: color_depth,
     };
-    let (result_tx, result_rx) = mpsc::sync_channel::<Result<mpsc::SyncSender<ComCmd>, String>>(1);
-    std::thread::spawn(move || sta_thread(params, result_tx));
-    let tx = result_rx
-        .recv_timeout(Duration::from_secs(20))
-        .map_err(|_| "El hilo COM-RDP no respondió a tiempo".to_string())??;
-    Ok(WindowsRdpSession { tx })
+
+    let shared_thread = Arc::clone(&shared);
+    std::thread::spawn(move || host_thread(params, shared_thread));
+
+    Ok(session)
 }
 
 pub fn reposition(session: &WindowsRdpSession, x: i32, y: i32, width: i32, height: i32) {
-    let _ = session.tx.try_send(ComCmd::Reposition { x, y, width, height });
+    session.rel_x.store(x as isize, Ordering::Relaxed);
+    session.rel_y.store(y as isize, Ordering::Relaxed);
+    session.width.store(width as isize, Ordering::Relaxed);
+    session.height.store(height as isize, Ordering::Relaxed);
+    session.reposition_pending.store(true, Ordering::SeqCst);
 }
 
 pub fn show(session: &WindowsRdpSession) {
-    let _ = session.tx.try_send(ComCmd::Show);
+    session.wants_visible.store(true, Ordering::SeqCst);
 }
 
 pub fn hide(session: &WindowsRdpSession) {
-    let _ = session.tx.try_send(ComCmd::Hide);
+    session.wants_visible.store(false, Ordering::SeqCst);
 }
 
 pub fn reparent(session: &WindowsRdpSession, new_parent: HWND, rel_x: i32, rel_y: i32, width: i32, height: i32) {
-    let _ = session.tx.try_send(ComCmd::Reparent {
-        new_parent: new_parent.0 as isize,
-        rel_x, rel_y, width, height,
-    });
+    session.parent_hwnd.store(new_parent.0 as isize, Ordering::Relaxed);
+    reposition(session, rel_x, rel_y, width, height);
+}
+
+/// Carve a rectangular hole in the WS_POPUP so an HTML menu rendered inside WebView2
+/// shows through it.  `menu_rect` is in viewport (WebView2 client-area) coordinates
+/// matching `getBoundingClientRect()`.  Pass `None` to restore the full region.
+///
+/// SetWindowRgn may be called safely from any thread; the region update is immediate.
+pub fn set_menu_region(session: &WindowsRdpSession, menu_rect: Option<[i32; 4]>) {
+    let host_hwnd = HWND(session.host_hwnd.load(Ordering::Relaxed) as *mut _);
+    if host_hwnd.0.is_null() {
+        return;
+    }
+    unsafe {
+        match menu_rect {
+            None => {
+                // NULL region → entire window is visible
+                let _ = SetWindowRgn(host_hwnd, None, true);
+            }
+            Some([menu_vp_x, menu_vp_y, menu_vp_w, menu_vp_h]) => {
+                let popup_vp_x = session.rel_x.load(Ordering::Relaxed) as i32;
+                let popup_vp_y = session.rel_y.load(Ordering::Relaxed) as i32;
+                let popup_w    = session.width.load(Ordering::Relaxed) as i32;
+                let popup_h    = session.height.load(Ordering::Relaxed) as i32;
+
+                // Compute the ACTUAL intersection of the menu and the WS_POPUP in viewport
+                // coordinates, then convert to WS_POPUP-local coordinates for the hole.
+                // Using the full menu rect directly would carve a hole larger than the overlap,
+                // making the WS_POPUP show dark WebView2 background beyond the menu edge.
+                let inter_left   = menu_vp_x.max(popup_vp_x);
+                let inter_top    = menu_vp_y.max(popup_vp_y);
+                let inter_right  = (menu_vp_x + menu_vp_w).min(popup_vp_x + popup_w);
+                let inter_bottom = (menu_vp_y + menu_vp_h).min(popup_vp_y + popup_h);
+
+                if inter_right <= inter_left || inter_bottom <= inter_top {
+                    // No overlap — menu is entirely outside the WS_POPUP; nothing to carve.
+                    return;
+                }
+
+                // Convert intersection to WS_POPUP local (nc offsets cancel out).
+                let lx = inter_left   - popup_vp_x;
+                let ly = inter_top    - popup_vp_y;
+                let rx = inter_right  - popup_vp_x;
+                let by = inter_bottom - popup_vp_y;
+
+                // Build: full_region MINUS hole_region
+                let full = CreateRectRgn(0, 0, popup_w, popup_h);
+                let hole = CreateRectRgn(lx, ly, rx, by);
+                CombineRgn(Some(full), Some(full), Some(hole), RGN_DIFF);
+                // After SetWindowRgn succeeds the OS owns full — do NOT delete it.
+                let _ = SetWindowRgn(host_hwnd, Some(full), true);
+                // hole is ours; delete it.
+                let _ = DeleteObject(hole.into());
+            }
+        }
+    }
 }

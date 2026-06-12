@@ -1,12 +1,13 @@
 import { create } from "zustand";
 
-export type Theme = "dark" | "light" | "nord";
+export type Theme = "dark" | "light" | "nord" | "system";
 export type FontSize = 12 | 13 | 15 | 18;
 
 export const THEMES: { value: Theme; label: string; labelEs: string }[] = [
-  { value: "dark",  label: "Dark",  labelEs: "Oscuro" },
-  { value: "light", label: "Light", labelEs: "Claro"  },
-  { value: "nord",  label: "Nord",  labelEs: "Nord"   },
+  { value: "system", label: "System", labelEs: "Sistema" },
+  { value: "dark",   label: "Dark",   labelEs: "Oscuro"  },
+  { value: "light",  label: "Light",  labelEs: "Claro"   },
+  { value: "nord",   label: "Nord",   labelEs: "Nord"    },
 ];
 
 export const FONT_SIZES: { value: FontSize; label: string }[] = [
@@ -17,7 +18,7 @@ export const FONT_SIZES: { value: FontSize; label: string }[] = [
 ];
 
 // CSS variable sets for each theme
-const THEME_VARS: Record<Theme, Record<string, string>> = {
+const THEME_VARS: Record<Exclude<Theme, "system">, Record<string, string>> = {
   dark: {
     "--color-bg-base":      "#0f1117",
     "--color-bg-surface":   "#161b22",
@@ -34,30 +35,33 @@ const THEME_VARS: Record<Theme, Record<string, string>> = {
     "color-scheme":         "dark",
   },
   light: {
-    "--color-bg-base":      "#ffffff",
-    "--color-bg-surface":   "#f6f8fa",
-    "--color-bg-elevated":  "#eaeef2",
-    "--color-bg-hover":     "#e0e6eb",
-    "--color-border":       "#d0d7de",
-    "--color-text-primary": "#1f2328",
-    "--color-text-muted":   "#6e7781",
+    // Slightly tinted grey base instead of pure white — much easier on the eyes.
+    // Elevated surfaces are white so dropdowns/cards pop against the grey base.
+    "--color-bg-base":      "#eef0f4",
+    "--color-bg-surface":   "#f5f7fa",
+    "--color-bg-elevated":  "#ffffff",
+    "--color-bg-hover":     "#e2e6ec",
+    "--color-border":       "#c8cdd6",
+    "--color-text-primary": "#111827",
+    "--color-text-muted":   "#4b5563",
     "--color-accent":       "#0969da",
     "--color-accent-hover": "#0550ae",
-    "--color-success":      "#1a7f37",
-    "--color-warning":      "#9a6700",
-    "--color-danger":       "#cf222e",
+    "--color-success":      "#16a34a",
+    "--color-warning":      "#b45309",
+    "--color-danger":       "#dc2626",
     "color-scheme":         "light",
   },
   nord: {
-    "--color-bg-base":      "#2e3440",
-    "--color-bg-surface":   "#3b4252",
-    "--color-bg-elevated":  "#434c5e",
-    "--color-bg-hover":     "#4c566a",
-    "--color-border":       "#4c566a",
+    // Deeper polar-night shades — less glare, more separation between layers.
+    "--color-bg-base":      "#1e2430",
+    "--color-bg-surface":   "#252b38",
+    "--color-bg-elevated":  "#2e3440",
+    "--color-bg-hover":     "#3b4252",
+    "--color-border":       "#343d4f",
     "--color-text-primary": "#eceff4",
-    "--color-text-muted":   "#81a1c1",
-    "--color-accent":       "#88c0d0",
-    "--color-accent-hover": "#8fbcbb",
+    "--color-text-muted":   "#7b92aa",
+    "--color-accent":       "#5e81ac",
+    "--color-accent-hover": "#81a1c1",
     "--color-success":      "#a3be8c",
     "--color-warning":      "#ebcb8b",
     "--color-danger":       "#bf616a",
@@ -66,7 +70,7 @@ const THEME_VARS: Record<Theme, Record<string, string>> = {
 };
 
 // Terminal color palettes per theme
-export const TERM_THEMES: Record<Theme, object> = {
+export const TERM_THEMES: Record<Exclude<Theme, "system">, object> = {
   dark: {
     background: "#0f1117", foreground: "#e6edf3", cursor: "#58a6ff",
     selectionBackground: "#388bfd44",
@@ -80,33 +84,47 @@ export const TERM_THEMES: Record<Theme, object> = {
     brightCyan: "#56d4dd",  brightWhite: "#f0f6fc",
   },
   light: {
-    background: "#ffffff", foreground: "#1f2328", cursor: "#0969da",
+    background: "#eef0f4", foreground: "#111827", cursor: "#0969da",
     selectionBackground: "#0969da33",
-    black: "#24292f",       red: "#cf222e",
-    green: "#116329",       yellow: "#9a6700",
-    blue: "#0969da",        magenta: "#8250df",
-    cyan: "#1b7c83",        white: "#6e7781",
-    brightBlack: "#57606a", brightRed: "#a40e26",
-    brightGreen: "#1a7f37", brightYellow: "#633c01",
-    brightBlue: "#0550ae",  brightMagenta: "#6639ba",
-    brightCyan: "#3192aa",  brightWhite: "#8c959f",
+    black: "#1f2937",       red: "#dc2626",
+    green: "#16a34a",       yellow: "#b45309",
+    blue: "#0969da",        magenta: "#7c3aed",
+    cyan: "#0891b2",        white: "#4b5563",
+    brightBlack: "#6b7280", brightRed: "#b91c1c",
+    brightGreen: "#15803d", brightYellow: "#92400e",
+    brightBlue: "#0550ae",  brightMagenta: "#6d28d9",
+    brightCyan: "#0e7490",  brightWhite: "#374151",
   },
   nord: {
-    background: "#2e3440", foreground: "#d8dee9", cursor: "#88c0d0",
-    selectionBackground: "#88c0d044",
-    black: "#3b4252",       red: "#bf616a",
+    background: "#1e2430", foreground: "#d8dee9", cursor: "#88c0d0",
+    selectionBackground: "#5e81ac44",
+    black: "#2e3440",       red: "#bf616a",
     green: "#a3be8c",       yellow: "#ebcb8b",
-    blue: "#81a1c1",        magenta: "#b48ead",
+    blue: "#5e81ac",        magenta: "#b48ead",
     cyan: "#88c0d0",        white: "#e5e9f0",
-    brightBlack: "#4c566a", brightRed: "#bf616a",
+    brightBlack: "#3b4252", brightRed: "#bf616a",
     brightGreen: "#a3be8c", brightYellow: "#ebcb8b",
     brightBlue: "#81a1c1",  brightMagenta: "#b48ead",
     brightCyan: "#8fbcbb",  brightWhite: "#eceff4",
   },
 };
 
+/** Returns the actual vars to apply, resolving "system" to dark or light. */
+function resolvedVars(theme: Theme): Record<string, string> {
+  if (theme !== "system") return THEME_VARS[theme];
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  return THEME_VARS[prefersDark ? "dark" : "light"];
+}
+
+/** Returns the resolved terminal theme, resolving "system". */
+export function resolvedTermTheme(theme: Theme): object {
+  if (theme !== "system") return TERM_THEMES[theme];
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  return TERM_THEMES[prefersDark ? "dark" : "light"];
+}
+
 function applyTheme(theme: Theme) {
-  const vars = THEME_VARS[theme];
+  const vars = resolvedVars(theme);
   const root = document.documentElement;
   for (const [key, val] of Object.entries(vars)) {
     if (key === "color-scheme") {
@@ -129,8 +147,13 @@ export const usePrefsStore = create<PrefsStore>((set) => {
   const savedTheme = (localStorage.getItem("orbitalterm:theme") as Theme | null) ?? "dark";
   const savedSize = Number(localStorage.getItem("orbitalterm:fontSize") ?? "13") as FontSize;
 
-  // Apply saved theme immediately on store creation
   applyTheme(savedTheme);
+
+  // For "system" theme: re-apply whenever the OS preference changes.
+  if (savedTheme === "system") {
+    window.matchMedia("(prefers-color-scheme: dark)")
+      .addEventListener("change", () => applyTheme("system"));
+  }
 
   return {
     theme: savedTheme,
@@ -140,6 +163,15 @@ export const usePrefsStore = create<PrefsStore>((set) => {
       localStorage.setItem("orbitalterm:theme", theme);
       applyTheme(theme);
       set({ theme });
+
+      // Wire up (or remove) the OS-preference listener.
+      const mq = window.matchMedia("(prefers-color-scheme: dark)");
+      const handler = () => applyTheme("system");
+      if (theme === "system") {
+        mq.addEventListener("change", handler);
+      } else {
+        mq.removeEventListener("change", handler);
+      }
     },
 
     setFontSize: (fontSize) => {

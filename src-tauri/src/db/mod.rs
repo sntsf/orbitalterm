@@ -182,5 +182,17 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE schema_version SET version=4", [])?;
     }
 
+    if ver < 5 {
+        conn.execute(
+            "ALTER TABLE connections ADD COLUMN rdp_security TEXT NOT NULL DEFAULT 'negotiate'",
+            [],
+        ).ok();
+        conn.execute(
+            "ALTER TABLE connections ADD COLUMN rdp_color_depth INTEGER NOT NULL DEFAULT 32",
+            [],
+        ).ok();
+        conn.execute("UPDATE schema_version SET version=5", [])?;
+    }
+
     Ok(())
 }

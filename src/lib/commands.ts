@@ -156,6 +156,22 @@ export async function rdpWindowsVisibility(sessionId: string, visible: boolean):
   return invoke("rdp_windows_visibility", { sessionId, visible });
 }
 
+// Show a native Win32 popup menu at the given physical screen coordinates.
+// Returns "reconnect" | "close" or null if dismissed.  On non-Windows this
+// always returns null; the caller should fall back to the CSS context menu.
+export async function showRdpTabMenu(x: number, y: number): Promise<string | null> {
+  return invoke("show_rdp_tab_menu", { x, y });
+}
+
+/** Carve a hole in the RDP WS_POPUP so an HTML menu shows through without hiding the RDP.
+ *  `rect` = [vp_x, vp_y, vp_w, vp_h] in WebView2 viewport coords; null clears the hole. */
+export async function rdpWindowsSetMenuRegion(
+  sessionId: string,
+  rect: [number, number, number, number] | null,
+): Promise<void> {
+  return invoke("rdp_windows_set_menu_region", { sessionId, rect });
+}
+
 export async function rdpWindowsReparent(
   sessionId: string,
   x: number,

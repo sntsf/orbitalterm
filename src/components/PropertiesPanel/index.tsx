@@ -101,7 +101,6 @@ export function PropertiesPanel() {
   const [showPassword, setShowPassword] = useState(false);
   const [hasSaved, setHasSaved] = useState(false);
   const [folderId, setFolderId] = useState("");
-  const [rdpAdmin, setRdpAdmin] = useState(false);
   const [notes, setNotes] = useState("");
   const [groupId, setGroupId] = useState("");
   const [icon, setIcon] = useState<string>("");
@@ -120,7 +119,6 @@ export function PropertiesPanel() {
       setPort(existing.port);
       setUsername(existing.username);
       setDomain(existing.domain);
-      setRdpAdmin(existing.rdp_admin ?? false);
       setAuthType(existing.auth_type);
       setKeyPath(existing.key_path);
       setFolderId(existing.folder_id ?? "");
@@ -144,7 +142,6 @@ export function PropertiesPanel() {
       setPort(22);
       setUsername("");
       setDomain("");
-      setRdpAdmin(false);
       setAuthType("password");
       setKeyPath("");
       setPassword("");
@@ -198,7 +195,6 @@ export function PropertiesPanel() {
         port,
         username: username.trim(),
         domain: domain.trim(),
-        rdp_admin: rdpAdmin,
         auth_type: authType,
         key_path: keyPath.trim(),
         folder_id: folderId || null,
@@ -244,7 +240,7 @@ export function PropertiesPanel() {
         <div className="flex-1 flex items-center justify-center text-[var(--color-text-muted)] text-xs px-4 text-center">
           {t("propSelectOrCreate")}
         </div>
-        <HintBox hint={sidebarHint} lang={lang} />
+        <HintBox hint={sidebarHint} hintLang={lang === "es" ? "es" : "en"} />
       </div>
     );
   }
@@ -261,7 +257,8 @@ export function PropertiesPanel() {
   const showPasswordField = authType === "password";
   const showKeyField = authType === "key";
 
-  const hint = focusedField ? HINTS[lang][focusedField] : sidebarHint;
+  const hintLang = lang === "es" ? "es" : "en";
+  const hint = focusedField ? HINTS[hintLang][focusedField] : sidebarHint;
   const focus = (f: FieldKey) => () => setFocusedField(f);
   const blur = () => setFocusedField(null);
 
@@ -434,12 +431,13 @@ export function PropertiesPanel() {
       </div>
 
       {/* Contextual hint */}
-      <HintBox hint={hint} lang={lang} />
+      <HintBox hint={hint} hintLang={hintLang} />
     </form>
   );
 }
 
-function HintBox({ hint, lang }: { hint: { title: string; body: string } | null; lang: "es" | "en" }) {
+function HintBox({ hint, hintLang: _hintLang }: { hint: { title: string; body: string } | null; hintLang: "es" | "en" }) {
+  const t = useT();
   return (
     <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 min-h-[72px]">
       {hint ? (
@@ -456,9 +454,7 @@ function HintBox({ hint, lang }: { hint: { title: string; body: string } | null;
         <div className="flex gap-2 items-start opacity-40">
           <Info size={13} className="text-[var(--color-text-muted)] shrink-0 mt-0.5" />
           <p className="text-[11px] text-[var(--color-text-muted)] leading-snug italic">
-            {lang === "es"
-              ? "Haz clic en un campo para ver su descripción."
-              : "Click any field to see its description."}
+            {t("hintClickField")}
           </p>
         </div>
       )}

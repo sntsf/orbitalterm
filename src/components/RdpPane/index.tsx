@@ -14,7 +14,9 @@ import {
   rdpWindowsReparent,
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
-import { useNotifStore } from "../../store/useNotifStore";
+import { useNotifStore, NOTIF_H_EXPANDED } from "../../store/useNotifStore";
+import { useT, useI18nStore } from "../../store/useI18nStore";
+import { friendlyConnError } from "../../lib/connErrors";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import type { Tab } from "../../types";
 
@@ -39,84 +41,86 @@ interface RdpPaneProps {
 
 interface WindowsViewerProps {
   sessionId: string;
+  tabId: string;
   transferred?: boolean;
-  onSessionEnded: () => void;
 }
 
-function WindowsEmbeddedViewer({ sessionId, transferred, onSessionEnded }: WindowsViewerProps) {
+// Renders a transparent placeholder that tracks its own position and drives
+// the native WS_POPUP window to stay in sync. Disconnect detection is handled
+// by RdpPane directly so the listener is registered once and never re-created.
+function WindowsEmbeddedViewer({ sessionId, tabId, transferred }: WindowsViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const reparentedRef = useRef(false);
+  const { activeTabId } = useAppStore();
+  const { notifs, expanded } = useNotifStore();
+  // Only reserve space when the bar is expanded. When minimized the badge lives
+  // in the TabBar (always in the HTML zone, never covered by the native window).
+  const notifReserve = expanded && notifs.length > 0 ? NOTIF_H_EXPANDED : 0;
 
-  // Keep the native mstsc window in sync with this placeholder's position.
-  // When the tab is hidden (display:none), getBoundingClientRect returns 0,0 —
-  // we use that signal to hide the native window, and show it again when visible.
+  // Show/hide by watching the active tab only. Menus no longer hide the WS_POPUP —
+  // instead they carve a SetWindowRgn hole so the HTML menu renders through.
+  useEffect(() => {
+    const isActive = activeTabId === tabId;
+    if (isActive) {
+      rdpWindowsVisibility(sessionId, true).catch(() => {});
+      requestAnimationFrame(() => {
+        const el = containerRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        if (transferred && !reparentedRef.current) {
+          reparentedRef.current = true;
+          rdpWindowsReparent(sessionId, Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height))
+            .catch((e) => console.error("[WinViewer] reparent failed:", e));
+        } else {
+          rdpWindowsReposition(sessionId, Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)).catch(() => {});
+        }
+      });
+    } else {
+      rdpWindowsVisibility(sessionId, false).catch(() => {});
+    }
+  }, [activeTabId, tabId, sessionId, transferred]);
+
+  // Reposition on window resize while this tab is active.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    let lastVisible = false;
 
     const sync = () => {
       const rect = el.getBoundingClientRect();
-      const visible = rect.width > 0 && rect.height > 0;
-      if (visible) {
-        if (!lastVisible && transferred) {
-          // First sync of a transferred session — reparent WS_POPUP to this window.
-          // This changes the owner HWND and repositions in one atomic COM command.
-          rdpWindowsReparent(
-            sessionId,
-            Math.round(rect.left),
-            Math.round(rect.top),
-            Math.round(rect.width),
-            Math.round(rect.height),
-          ).catch(() => {});
-        } else {
-          rdpWindowsReposition(
-            sessionId,
-            Math.round(rect.left),
-            Math.round(rect.top),
-            Math.round(rect.width),
-            Math.round(rect.height),
-          ).catch(() => {});
-          if (!lastVisible) {
-            rdpWindowsVisibility(sessionId, true).catch(() => {});
-          }
-        }
-      } else if (lastVisible) {
-        rdpWindowsVisibility(sessionId, false).catch(() => {});
+      if (rect.width > 0 && rect.height > 0) {
+        rdpWindowsReposition(sessionId, Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)).catch(() => {});
       }
-      lastVisible = visible;
     };
 
     const ro = new ResizeObserver(sync);
     ro.observe(el);
     window.addEventListener("resize", sync);
-    sync();
 
     return () => {
       ro.disconnect();
       window.removeEventListener("resize", sync);
-      rdpWindowsVisibility(sessionId, false).catch(() => {});
     };
   }, [sessionId]);
 
-  // Listen for mstsc disconnect (process exits)
-  useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const s = await rdpStatus(sessionId);
-        if (s === "disconnected") {
-          clearInterval(interval);
-          onSessionEnded();
-        }
-      } catch { /* ignore */ }
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [sessionId, onSessionEnded]);
-
   return (
-    <div
-      ref={containerRef}
-      style={{ width: "100%", height: "100%", background: "transparent" }}
-    />
+    <>
+      <div
+        ref={containerRef}
+        style={{
+          width: "100%",
+          height: notifReserve > 0 ? `calc(100% - ${notifReserve}px)` : "100%",
+          background: "transparent",
+        }}
+      />
+      {notifReserve > 0 && (
+        <div style={{
+          height: `${notifReserve}px`,
+          background: "var(--color-bg-elevated)",
+          borderTop: "1px solid var(--color-border)",
+        }} />
+      )}
+    </>
   );
 }
 
@@ -280,17 +284,21 @@ export function RdpPane({ tab }: RdpPaneProps) {
   const [status, setStatus] = useState<"connecting" | "connected" | "error">("connecting");
   const [errorMsg, setErrorMsg] = useState("");
   const [embedded, setEmbedded] = useState(false);
-  const [nativeWindow, setNativeWindow] = useState(false); // true = Windows mstsc reparented
+  const [nativeWindow, setNativeWindow] = useState(false);
+  useEffect(() => { nativeWindowRef.current = nativeWindow; }, [nativeWindow]);
   const [frameSize, setFrameSize] = useState({ width: 1280, height: 800 });
   const sessionIdRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const nativeWindowRef = useRef(false);
   // Generation counter: incremented each time a new connect() is initiated
   // (including by the useEffect cleanup on unmount/re-mount). Any in-flight
   // connect() that finds its generation outdated discards the session it
   // created. This prevents React 18 StrictMode's double-invoke from opening
   // two simultaneous RDP connections to the same server.
   const connectGenRef = useRef(0);
-  const { setTabStatus, setTabSessionId, getConnectionById } = useAppStore();
+  const { setTabStatus, setTabSessionId, getConnectionById, closeTab } = useAppStore();
+  const t = useT();
+  const { lang } = useI18nStore();
   const isWindows = /Windows/i.test(navigator.userAgent);
 
   const connect = async (isRetry = false, adminMode = false) => {
@@ -358,11 +366,12 @@ export function RdpPane({ tab }: RdpPaneProps) {
     } catch (err) {
       if (gen === connectGenRef.current) {
         const raw = String(err);
-        setErrorMsg(raw);
-        setStatus("error");
-        setTabStatus(tab.id, "error");
-        // Don't notify for cases that have their own inline UI (missing client / no password)
-        if (!raw.startsWith("NO_RDP_CLIENT") && !raw.startsWith("NO_PASSWORD")) {
+        if (raw.startsWith("NO_RDP_CLIENT") || raw.startsWith("NO_PASSWORD")) {
+          // Show inline UI for these special cases (package not installed / no credentials)
+          setErrorMsg(raw);
+          setStatus("error");
+          setTabStatus(tab.id, "error");
+        } else {
           const conn = getConnectionById(tab.connection_id);
           useNotifStore.getState().add({
             connName: tab.connection_name,
@@ -370,6 +379,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
             host: conn?.host ?? "",
             raw,
           });
+          closeTab(tab.id);
         }
       }
     }
@@ -401,6 +411,16 @@ export function RdpPane({ tab }: RdpPaneProps) {
       if (sid) {
         if (skipDisconnectSessions.has(sid)) {
           skipDisconnectSessions.delete(sid);
+        } else if (nativeWindowRef.current) {
+          // Windows embedded RDP: check whether this is a tab switch (tab still
+          // in store) or a tab close (tab removed). On switch, hide but keep the
+          // session alive so switching back restores without reconnecting.
+          const tabStillOpen = useAppStore.getState().tabs.some((t) => t.id === tab.id);
+          if (tabStillOpen) {
+            rdpWindowsVisibility(sid, false).catch(() => {});
+          } else {
+            disconnectRdp(sid).catch(console.error);
+          }
         } else {
           disconnectRdp(sid).catch(console.error);
         }
@@ -432,18 +452,48 @@ export function RdpPane({ tab }: RdpPaneProps) {
     [],
   );
 
+  // Register the rdp-disconnected listener here (not inside WindowsEmbeddedViewer)
+  // so it is set up ONCE when nativeWindow becomes true and never re-created due
+  // to inline callback churn. The STA thread emits this event after the loop exits
+  // regardless of the exit reason (logoff, WM_QUIT, parent destroyed, etc.).
+  useEffect(() => {
+    if (!nativeWindow) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    const unlistens: UnlistenFn[] = [];
+
+    // Normal session end (user logged off after a real connection) — just close the tab
+    listen(`rdp-disconnected-${sid}`, () => {
+      const s = sessionIdRef.current;
+      if (s) { disconnectRdp(s).catch(() => {}); sessionIdRef.current = null; }
+      closeTab(tab.id);
+    }).then((fn) => unlistens.push(fn));
+
+    // Connection failed before ever connecting (server off, port closed, etc.)
+    listen<string>(`rdp-error-${sid}`, (e) => {
+      const s = sessionIdRef.current;
+      if (s) { disconnectRdp(s).catch(() => {}); sessionIdRef.current = null; }
+      const raw = e.payload || "connection timed out";
+      const conn = getConnectionById(tab.connection_id);
+      useNotifStore.getState().add({
+        connName: tab.connection_name,
+        connType: "rdp",
+        host: conn?.host ?? "",
+        raw,
+      });
+      closeTab(tab.id);
+    }).then((fn) => unlistens.push(fn));
+
+    return () => { unlistens.forEach((fn) => fn()); };
+  }, [nativeWindow]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Windows native window: transparent placeholder that drives mstsc position
   if (status === "connected" && embedded && nativeWindow && sessionIdRef.current) {
     return (
       <WindowsEmbeddedViewer
         sessionId={sessionIdRef.current}
+        tabId={tab.id}
         transferred={!!tab.session_id}
-        onSessionEnded={() => {
-          setEmbedded(false);
-          setNativeWindow(false);
-          setStatus("error");
-          setErrorMsg("SESSION_ENDED");
-        }}
       />
     );
   }
@@ -456,10 +506,6 @@ export function RdpPane({ tab }: RdpPaneProps) {
         width={frameSize.width}
         height={frameSize.height}
         onSessionError={(msg) => {
-          setEmbedded(false);
-          setNativeWindow(false);
-          setStatus("error");
-          setErrorMsg(msg);
           if (msg !== "SESSION_ENDED") {
             const conn = getConnectionById(tab.connection_id);
             useNotifStore.getState().add({
@@ -469,6 +515,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
               raw: msg,
             });
           }
+          closeTab(tab.id);
         }}
         onResize={handleResize}
       />
@@ -503,7 +550,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
 
       {status === "connecting" && (
         <p className="text-sm text-[var(--color-text-muted)] animate-pulse">
-          Launching RDP client…
+          {t("rdpLaunching")}
         </p>
       )}
 
@@ -511,18 +558,17 @@ export function RdpPane({ tab }: RdpPaneProps) {
         <div className="flex flex-col items-center gap-3">
           <div className="flex items-center gap-2 text-[var(--color-success)] text-sm">
             <CheckCircle size={15} />
-            RDP session active in external window
+            {t("rdpSessionExternal")}
           </div>
           <p className="text-xs text-[var(--color-text-muted)] max-w-xs">
-            The RDP client was launched. Close it to end the session, or use
-            Reconnect to open a new window.
+            {t("rdpExternalHint")}
           </p>
           <button
             onClick={() => connect(true)}
             className="flex items-center gap-2 px-3 py-1.5 rounded text-xs border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
           >
             <RefreshCw size={12} />
-            Reconnect
+            {t("connReconnect")}
           </button>
         </div>
       )}
@@ -533,14 +579,14 @@ export function RdpPane({ tab }: RdpPaneProps) {
             <div className="flex flex-col items-center gap-3 max-w-sm text-center">
               <CheckCircle size={28} className="text-[var(--color-text-muted)] opacity-50" />
               <p className="text-sm text-[var(--color-text-muted)]">
-                Sesión finalizada
+                {t("connSessionEnded")}
               </p>
               <button
                 onClick={() => connect(true)}
                 className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
               >
                 <RefreshCw size={12} />
-                Reconectar
+                {t("connReconnect")}
               </button>
             </div>
           );
@@ -550,12 +596,10 @@ export function RdpPane({ tab }: RdpPaneProps) {
             <div className="flex flex-col items-center gap-3 max-w-sm text-center">
               <AlertCircle size={28} className="text-[var(--color-warning)]" />
               <p className="text-sm font-medium text-[var(--color-text-primary)]">
-                Contraseña no guardada
+                {t("rdpNoPasswordTitle")}
               </p>
               <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
-                Para conectarte en modo embebido necesitás guardar la contraseña.
-                Cerrá esta pestaña, seleccioná la conexión en el sidebar,
-                ingresá la contraseña en Propiedades y guardá.
+                {t("rdpNoPasswordDesc")}
               </p>
             </div>
           );
@@ -566,14 +610,14 @@ export function RdpPane({ tab }: RdpPaneProps) {
             <div className="flex flex-col items-center gap-4 max-w-sm text-center">
               <div className="flex items-center gap-2 text-[var(--color-warning)]">
                 <PackageOpen size={18} />
-                <span className="text-sm font-medium">No RDP client installed</span>
+                <span className="text-sm font-medium">{t("rdpMissingClientTitle")}</span>
               </div>
               <p className="text-xs text-[var(--color-text-muted)] whitespace-pre-line leading-relaxed">
                 {missing.rest.split("\n").slice(1).join("\n")}
               </p>
               <div className="flex flex-col gap-2 w-full">
                 <p className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider">
-                  Install command
+                  {t("rdpInstallCmd")}
                 </p>
                 <code
                   className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-3 py-2 text-xs font-mono text-[var(--color-text-primary)] text-left cursor-pointer select-all"
@@ -583,7 +627,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
                   sudo apt install freerdp3-x11
                 </code>
                 <p className="text-[10px] text-[var(--color-text-muted)]">
-                  After installing, click Retry below.
+                  {t("rdpInstallHint")}
                 </p>
               </div>
               <button
@@ -591,7 +635,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
                 className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
               >
                 <RefreshCw size={12} />
-                Retry
+                {t("connRetry")}
               </button>
             </div>
           );
@@ -600,14 +644,14 @@ export function RdpPane({ tab }: RdpPaneProps) {
           <div className="flex flex-col items-center gap-3 max-w-sm">
             <div className="flex items-start gap-2 text-[var(--color-danger)] text-sm text-left">
               <AlertCircle size={15} className="shrink-0 mt-0.5" />
-              <span className="whitespace-pre-line">{errorMsg}</span>
+              <span className="whitespace-pre-line">{friendlyConnError(errorMsg, lang, "rdp")}</span>
             </div>
             <button
               onClick={() => connect(true)}
               className="flex items-center gap-2 px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white font-medium transition-colors"
             >
               <RefreshCw size={12} />
-              Retry
+              {t("connRetry")}
             </button>
           </div>
         );

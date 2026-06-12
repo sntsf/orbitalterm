@@ -21,7 +21,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
     db.query_row(
         "SELECT id, name, type, host, port, username, auth_type, key_path,
                 folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
-                sort_order, group_id, icon, url, custom_hosts
+                sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -46,6 +46,8 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 icon: row.get::<_, String>(17).unwrap_or_default(),
                 url: row.get::<_, String>(18).unwrap_or_default(),
                 custom_hosts: row.get::<_, String>(19).unwrap_or_default(),
+                rdp_security: row.get::<_, String>(20).unwrap_or_else(|_| "negotiate".to_string()),
+                rdp_color_depth: row.get::<_, i64>(21).unwrap_or(32),
             })
         },
     )
@@ -151,7 +153,7 @@ pub async fn connect_ssh(
 
     cmd.arg(format!("{}@{}", connection.username, connection.host));
 
-    let _child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
 
     let raw_writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(raw_writer));
@@ -162,6 +164,7 @@ pub async fn connect_ssh(
     let app_handle = app.clone();
     let writer_ref = Arc::clone(&writer);
 
+    // Thread 1: stream PTY output to the frontend as ssh-data events.
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         let mut password_injected = false;
@@ -179,7 +182,6 @@ pub async fn connect_ssh(
                                 || lower.contains("passphrase for")
                             {
                                 if let Ok(mut w) = writer_ref.lock() {
-                                    // PTY raw mode: Enter key is \r, not \n
                                     let _ = write!(w, "{}\r", pass);
                                     let _ = w.flush();
                                     password_injected = true;
@@ -192,8 +194,24 @@ pub async fn connect_ssh(
                 }
             }
         }
+        // On Linux the PTY reader reaches EOF when the process exits, which
+        // is sufficient. On Windows the ConPTY may not signal EOF reliably,
+        // so this path is a fallback — Thread 2 is the primary mechanism.
         app_handle.emit(&format!("ssh-closed-{sid}"), ()).ok();
     });
+
+    // Thread 2: wait for the child process to exit, then emit ssh-closed.
+    // This is the primary exit detection on Windows, where ConPTY does not
+    // reliably deliver EOF to the PTY reader when the ssh process exits.
+    {
+        let app2 = app.clone();
+        let sid2 = session_id.clone();
+        std::thread::spawn(move || {
+            let mut c = child;
+            let _ = c.wait(); // blocks until ssh process exits
+            app2.emit(&format!("ssh-closed-{sid2}"), ()).ok();
+        });
+    }
 
     sessions.lock().unwrap().insert(
         session_id.clone(),
@@ -288,6 +306,8 @@ pub async fn connect_rdp(
             w,
             h,
             connection.rdp_admin || admin_mode.unwrap_or(false),
+            &connection.rdp_security,
+            connection.rdp_color_depth as u16,
         )?;
         let width = session.width;
         let height = session.height;
@@ -307,8 +327,11 @@ pub async fn connect_rdp(
         // detached window. Hardcoding "main" would place the WS_POPUP over
         // the wrong window when RDP is opened in a torn-out window.
         let parent_hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        let session_id = Uuid::new_v4().to_string();
 
         let session = crate::rdp::windows_rdp::launch(
+            app.clone(),
+            &session_id,
             parent_hwnd,
             &connection.host,
             connection.port as u16,
@@ -320,9 +343,10 @@ pub async fn connect_rdp(
             w,
             h,
             connection.rdp_admin || admin_mode.unwrap_or(false),
+            &connection.rdp_security,
+            connection.rdp_color_depth as i32,
         )?;
 
-        let session_id = Uuid::new_v4().to_string();
         embedded_sessions.lock().unwrap().insert(session_id.clone(), session);
         let _ = (rdp_sessions, app, window);
         return Ok(RdpConnectResult { session_id, embedded: true, native_window: true, width: w as u16, height: h as u16 });
@@ -543,6 +567,70 @@ pub async fn rdp_windows_reposition(
     Ok(())
 }
 
+/// Show a native Win32 popup menu for an RDP tab.  The menu window is created
+/// at the OS level (Win32 menu layer), which sits above the WS_POPUP RDP window
+/// in z-order, so the RDP session remains visible during the interaction.
+/// Returns the selected action ("reconnect" | "close") or null if dismissed.
+#[tauri::command]
+pub async fn show_rdp_tab_menu(
+    window: tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            AppendMenuW, CreatePopupMenu, DestroyMenu, SetForegroundWindow,
+            TrackPopupMenuEx, MF_SEPARATOR, MF_STRING,
+            TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+        };
+        use windows::core::w;
+
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        let hwnd_raw = hwnd.0 as isize;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Option<String>>(1);
+
+        window.run_on_main_thread(move || {
+            let hwnd = HWND(hwnd_raw as *mut _);
+            let result = unsafe {
+                let Ok(hmenu) = CreatePopupMenu() else {
+                    let _ = tx.send(None);
+                    return;
+                };
+                AppendMenuW(hmenu, MF_STRING, 1, w!("Reconectar")).ok();
+                AppendMenuW(hmenu, MF_SEPARATOR, 0, w!("")).ok();
+                AppendMenuW(hmenu, MF_STRING, 2, w!("Cerrar")).ok();
+                // SetForegroundWindow is required so the menu disappears when
+                // the user clicks outside (standard Win32 popup menu pattern).
+                SetForegroundWindow(hwnd).ok();
+                let cmd = TrackPopupMenuEx(
+                    hmenu,
+                    (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY).0,
+                    x, y,
+                    hwnd,
+                    None,
+                );
+                DestroyMenu(hmenu).ok();
+                match cmd.0 {
+                    1 => Some("reconnect".to_string()),
+                    2 => Some("close".to_string()),
+                    _ => None,
+                }
+            };
+            let _ = tx.send(result);
+        }).map_err(|e| e.to_string())?;
+
+        return rx.recv().map_err(|e| e.to_string());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, x, y);
+        Ok(None)
+    }
+}
+
 /// Show or hide the embedded mstsc window (used when switching tabs on Windows).
 #[tauri::command]
 pub async fn rdp_windows_visibility(
@@ -562,6 +650,27 @@ pub async fn rdp_windows_visibility(
         }
     }
     let _ = (embedded_sessions, session_id, visible);
+    Ok(())
+}
+
+/// Carve a rectangular hole in the RDP WS_POPUP so an HTML menu (sidebar context menu or
+/// menubar dropdown) rendered inside WebView2 shows through without hiding the RDP.
+/// `rect` is `[vp_x, vp_y, vp_w, vp_h]` in WebView2 viewport coordinates from
+/// `getBoundingClientRect()`.  Pass null/None to restore the full visible region.
+#[tauri::command]
+pub async fn rdp_windows_set_menu_region(
+    embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
+    session_id: String,
+    rect: Option<[i32; 4]>,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let map = embedded_sessions.lock().unwrap();
+        if let Some(session) = map.get(&session_id) {
+            crate::rdp::windows_rdp::set_menu_region(session, rect);
+        }
+    }
+    let _ = (embedded_sessions, session_id, rect);
     Ok(())
 }
 

@@ -8,8 +8,10 @@ import { HardDrive } from "lucide-react";
 import { connectSsh, disconnectSsh, resizePty, sendInput, sftpConnect, sftpDisconnect } from "../../lib/commands";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import { useAppStore } from "../../store/useAppStore";
-import { usePrefsStore, TERM_THEMES } from "../../store/usePrefsStore";
+import { usePrefsStore, resolvedTermTheme } from "../../store/usePrefsStore";
 import { useNotifStore } from "../../store/useNotifStore";
+import { useI18nStore } from "../../store/useI18nStore";
+import { friendlyConnError } from "../../lib/connErrors";
 import { SftpBrowser } from "../SftpBrowser";
 import type { Tab } from "../../types";
 
@@ -75,7 +77,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
 
     const term = new XTerm({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      theme: TERM_THEMES[theme] as any,
+      theme: resolvedTermTheme(theme) as any,
       fontFamily: '"JetBrains Mono","Fira Code","Cascadia Code",monospace',
       fontSize,
       lineHeight: 1.4,
@@ -95,9 +97,10 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
     const cleanups: Array<() => void> = [];
 
     const init = async () => {
+      const { t, lang } = useI18nStore.getState();
       const connection = getConnectionById(tab.connection_id);
       if (!connection) {
-        term.writeln("\x1b[31mConnection not found.\x1b[0m");
+        term.writeln(`\x1b[31m${t("sshConnNotFound")}\x1b[0m`);
         setTabStatus(tab.id, "error");
         return;
       }
@@ -109,10 +112,10 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         sessionId = tab.session_id;
         sessionIdRef.current = sessionId;
         setTabStatus(tab.id, "connected");
-        term.writeln("\x1b[2m[Session resumed]\x1b[0m");
+        term.writeln(`\x1b[2m[${t("sshSessionResumed")}]\x1b[0m`);
       } else {
         term.writeln(
-          `\x1b[2mConnecting to \x1b[0m\x1b[33m${connection.username}@${connection.host}\x1b[0m\x1b[2m...\x1b[0m`
+          `\x1b[2m${t("sshConnecting")} \x1b[0m\x1b[33m${connection.username}@${connection.host}\x1b[0m\x1b[2m...\x1b[0m`
         );
         try {
           sessionId = await connectSsh(connection.id);
@@ -121,7 +124,8 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
           setTabStatus(tab.id, "connected");
         } catch (err) {
           const raw = String(err);
-          term.writeln(`\r\n\x1b[31m[Connection failed: ${raw}]\x1b[0m`);
+          const friendly = friendlyConnError(raw, lang, "ssh");
+          term.writeln(`\r\n\x1b[31m[${t("sshConnFailed")}: ${friendly}]\x1b[0m`);
           setTabStatus(tab.id, "error");
           useNotifStore.getState().add({
             connName: connection.name,
@@ -141,15 +145,42 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         sftpSessionIdRef.current = sid;
       }).catch(console.error);
 
+      // Buffer SSH output to detect connection errors emitted by the ssh process.
+      // connectSsh() returns immediately after spawning; errors appear as PTY text.
+      let sshConnError: string | null = null;
+      const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/[\r\n]+/g, " ").trim();
+
       // Stream SSH output into xterm
       const unlistenData = await listen<string>(`ssh-data-${sessionId}`, (e) => {
         term.write(e.payload);
+        if (!sshConnError) {
+          const plain = stripAnsi(e.payload).toLowerCase();
+          if (
+            plain.includes("connection refused") || plain.includes("no route to host") ||
+            plain.includes("connection timed out") || plain.includes("network is unreachable") ||
+            plain.includes("host unreachable") || plain.includes("could not resolve") ||
+            plain.includes("name or service not known") || plain.includes("ssh: connect to host") ||
+            plain.includes("permission denied") || plain.includes("host key verification failed") ||
+            plain.includes("too many authentication failures") || plain.includes("port 22: ")
+          ) {
+            sshConnError = stripAnsi(e.payload);
+          }
+        }
       });
       cleanups.push(unlistenData);
 
-      // Handle SSH process exit — close SFTP and the tab
+      // Handle SSH process exit — notify if a connection error was detected, then close tab
       const unlistenClosed = await listen(`ssh-closed-${sessionId}`, () => {
-        term.writeln("\r\n\x1b[2m[Connection closed]\x1b[0m");
+        const { t: tNow } = useI18nStore.getState();
+        term.writeln(`\r\n\x1b[2m[${tNow("sshConnClosed")}]\x1b[0m`);
+        if (sshConnError) {
+          useNotifStore.getState().add({
+            connName: connection.name,
+            connType: "ssh",
+            host: connection.host,
+            raw: sshConnError,
+          });
+        }
         if (sftpSessionIdRef.current) {
           sftpDisconnect(sftpSessionIdRef.current).catch(console.error);
           sftpSessionIdRef.current = null;

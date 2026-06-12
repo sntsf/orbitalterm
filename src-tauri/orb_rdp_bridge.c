@@ -453,6 +453,8 @@ OrbRdpSession *orb_session_new(const char   *host,
                                 uint16_t      width,
                                 uint16_t      height,
                                 bool          console_mode,
+                                int           security_mode,
+                                uint16_t      color_depth,
                                 orb_frame_fn  on_frame,
                                 orb_error_fn  on_error,
                                 void         *user_ctx)
@@ -500,6 +502,32 @@ OrbRdpSession *orb_session_new(const char   *host,
 
     if (console_mode)
         freerdp_settings_set_bool(settings, FreeRDP_ConsoleSession, TRUE);
+
+    /* Security mode */
+    switch (security_mode) {
+        case ORB_SEC_NLA:
+            freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity,  TRUE);
+            freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity,  FALSE);
+            freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity,  FALSE);
+            break;
+        case ORB_SEC_TLS:
+            freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity,  FALSE);
+            freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity,  TRUE);
+            freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity,  FALSE);
+            break;
+        case ORB_SEC_RDP:
+            freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity,         FALSE);
+            freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity,         FALSE);
+            freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity,         TRUE);
+            freerdp_settings_set_bool(settings, FreeRDP_UseRdpSecurityLayer, TRUE);
+            break;
+        default: /* ORB_SEC_NEGOTIATE: let FreeRDP negotiate */
+            break;
+    }
+
+    /* Color depth */
+    if (color_depth >= 8 && color_depth <= 32)
+        freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, color_depth);
 
     freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, TRUE);
     freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard,     TRUE);
