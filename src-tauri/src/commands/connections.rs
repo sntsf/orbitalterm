@@ -665,12 +665,54 @@ fn mrng_icon(icon: &str, conn_type: &str) -> &'static str {
     }
 }
 
+/// Progress payload emitted to the frontend during a (potentially large) import
+/// so it can render a non-blocking progress indicator.
+#[derive(Serialize, Clone)]
+struct ImportProgress {
+    name: String,
+    done: usize,
+    total: usize,
+}
+
+/// Count how many `Connection` nodes the tree holds, for progress totals.
+fn mrng_count_connections(node: roxmltree::Node) -> usize {
+    node.children()
+        .filter(|n| n.is_element() && n.has_tag_name("Node"))
+        .map(|child| match child.attribute("Type").unwrap_or("") {
+            "Connection" => 1,
+            "Container" => mrng_count_connections(child),
+            _ => 0,
+        })
+        .sum()
+}
+
 struct MrngCtx<'a> {
     db: &'a rusqlite::Connection,
     group_id: &'a str,
     password: &'a str,
     iterations: u32,
-    count: usize,
+    count: usize,             // connections actually inserted
+    processed: usize,         // connection nodes seen (incl. skipped) — drives %
+    total: usize,
+    last_emit: usize,
+    app: Option<&'a tauri::AppHandle>,
+    name: &'a str,
+}
+
+impl MrngCtx<'_> {
+    /// Emit a throttled progress event (every ~20 nodes, plus the final one).
+    fn maybe_emit(&mut self) {
+        let Some(app) = self.app else { return };
+        if self.processed - self.last_emit >= 20 || self.processed >= self.total {
+            use tauri::Emitter;
+            self.last_emit = self.processed;
+            let _ = app.emit("mrng-import-progress", ImportProgress {
+                name: self.name.to_string(),
+                done: self.processed,
+                total: self.total,
+            });
+        }
+    }
 }
 
 /// Recurse into the mRemoteNG XML tree, translating only the fields OrbitalTerm
@@ -691,6 +733,8 @@ fn mrng_process_node(node: roxmltree::Node, parent_folder_id: Option<&str>, ctx:
                 mrng_process_node(child, Some(&folder_id), ctx);
             }
             "Connection" => {
+                ctx.processed += 1;
+                ctx.maybe_emit();
                 let proto = child.attribute("Protocol").unwrap_or("SSH2");
                 let conn_type = match mrng_protocol_to_type(proto) {
                     Some(t) => t,
@@ -748,9 +792,15 @@ fn mrng_process_node(node: roxmltree::Node, parent_folder_id: Option<&str>, ctx:
     }
 }
 
-#[tauri::command]
-pub fn import_from_mremoteng(path: String, password: Option<String>) -> Result<usize, String> {
-    let xml = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+/// Core mRemoteNG import. When `app` is provided, throttled progress events are
+/// emitted as `mrng-import-progress`. Runs synchronously; callers that need it
+/// off the UI thread spawn it on a background thread (see the command below).
+fn run_mrng_import(
+    app: Option<&tauri::AppHandle>,
+    path: &str,
+    password: Option<String>,
+) -> Result<usize, String> {
+    let xml = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
     let root = doc.root_element();
 
@@ -766,13 +816,19 @@ pub fn import_from_mremoteng(path: String, password: Option<String>) -> Result<u
 
     // The migration lands in its own fresh connections DB (group), named after
     // the imported file, instead of polluting the user's existing DB.
-    let group_name = std::path::Path::new(&path)
+    let group_name = std::path::Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .unwrap_or("mRemoteNG")
         .to_string();
+
+    let total = mrng_count_connections(root);
+    if let Some(app) = app {
+        use tauri::Emitter;
+        let _ = app.emit("mrng-import-progress", ImportProgress { name: group_name.clone(), done: 0, total });
+    }
 
     let mut db = db::open().map_err(|e| e.to_string())?;
 
@@ -791,11 +847,35 @@ pub fn import_from_mremoteng(path: String, password: Option<String>) -> Result<u
         password: &pw,
         iterations,
         count: 0,
+        processed: 0,
+        total,
+        last_emit: 0,
+        app,
+        name: &group_name,
     };
     mrng_process_node(root, None, &mut ctx);
     let count = ctx.count;
     tx.commit().map_err(|e| e.to_string())?;
+
+    if let Some(app) = app {
+        use tauri::Emitter;
+        let _ = app.emit("mrng-import-progress", ImportProgress { name: group_name, done: total, total });
+    }
     Ok(count)
+}
+
+/// Imports an mRemoteNG file on a background thread so the UI (and any live RDP
+/// session) stays responsive. Progress, completion and errors are delivered via
+/// the `mrng-import-progress` / `mrng-import-done` / `mrng-import-error` events.
+#[tauri::command]
+pub fn import_from_mremoteng(app: tauri::AppHandle, path: String, password: Option<String>) {
+    std::thread::spawn(move || {
+        use tauri::Emitter;
+        match run_mrng_import(Some(&app), &path, password) {
+            Ok(count) => { let _ = app.emit("mrng-import-done", count); }
+            Err(e)    => { let _ = app.emit("mrng-import-error", e); }
+        }
+    });
 }
 
 // ── File helpers ──────────────────────────────────────────────────────────────
@@ -880,7 +960,7 @@ pub fn import_from_file(path: String) -> Result<usize, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     // Detect format by file extension
     if path.to_lowercase().ends_with(".xml") {
-        import_from_mremoteng(path, None)
+        run_mrng_import(None, &path, None)
     } else {
         import_connections(content)
     }

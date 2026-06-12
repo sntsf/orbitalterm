@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, forwardRef } from "react";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import {
   Plus, FolderPlus, Upload, Download, LogOut,
   Globe, Info, Bug, Check, X, Maximize2, PanelLeftClose,
@@ -10,6 +11,7 @@ import {
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
 import { usePrefsStore, THEMES, FONT_SIZES } from "../../store/usePrefsStore";
+import { useImportStore, type ImportProgress } from "../../store/useImportStore";
 import {
   importFromFile, importFromMremoteng, getConnections, getFolders, getGroups, saveGroup,
   rdpWindowsSetMenuRegion,
@@ -138,19 +140,47 @@ export function MenuBar() {
     }
   };
 
-  // mRemoteNG migration import (.xml)
+  // mRemoteNG migration import (.xml). Runs on a background thread in Rust and
+  // reports progress via events, so the app (and any live RDP session) stays
+  // responsive even for files with thousands of connections.
   const handleImportMremoteng = async () => {
     setOpenMenuId(null);
+    if (useImportStore.getState().progress) {
+      showToast(t("importInProgress"), false);
+      return;
+    }
     try {
       const path = await dialogOpen({
         multiple: false,
         filters: [{ name: "mRemoteNG", extensions: ["xml"] }],
       });
       if (!path || typeof path !== "string") return;
-      const count = await importFromMremoteng(path);
-      await refreshAfterImport();
-      showToast(`${count} ${t("importedOk")}`);
+
+      const setProgress = useImportStore.getState().setProgress;
+      const fileName = path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "mRemoteNG";
+      setProgress({ name: fileName, done: 0, total: 0 });
+
+      const unlisten: Array<() => void> = [];
+      const cleanup = () => unlisten.forEach((u) => u());
+
+      unlisten.push(await listen<ImportProgress>("mrng-import-progress", (e) => {
+        setProgress(e.payload);
+      }));
+      unlisten.push(await listen<number>("mrng-import-done", async (e) => {
+        cleanup();
+        await refreshAfterImport();
+        setProgress(null);
+        showToast(`${e.payload} ${t("importedOk")}`);
+      }));
+      unlisten.push(await listen<string>("mrng-import-error", (e) => {
+        cleanup();
+        setProgress(null);
+        showToast(String(e.payload), false);
+      }));
+
+      await importFromMremoteng(path);
     } catch (err) {
+      useImportStore.getState().setProgress(null);
       showToast(String(err), false);
     }
   };
