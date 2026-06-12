@@ -104,14 +104,23 @@ function WindowsEmbeddedViewer({ sessionId, tabId, transferred }: WindowsViewerP
   }, [sessionId]);
 
   return (
-    <div
-      ref={containerRef}
-      style={{
-        width: "100%",
-        height: notifReserve > 0 ? `calc(100% - ${notifReserve}px)` : "100%",
-        background: "transparent",
-      }}
-    />
+    <>
+      <div
+        ref={containerRef}
+        style={{
+          width: "100%",
+          height: notifReserve > 0 ? `calc(100% - ${notifReserve}px)` : "100%",
+          background: "transparent",
+        }}
+      />
+      {notifReserve > 0 && (
+        <div style={{
+          height: `${notifReserve}px`,
+          background: "var(--color-bg-elevated)",
+          borderTop: "1px solid var(--color-border)",
+        }} />
+      )}
+    </>
   );
 }
 
