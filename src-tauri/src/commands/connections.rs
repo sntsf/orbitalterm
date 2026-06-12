@@ -719,16 +719,21 @@ impl MrngCtx<'_> {
 /// actually uses and dropping the rest of mRemoteNG's extensive per-node config.
 /// `parent_folder_id` = the OrbitalTerm folder ID to put children into (None = root).
 fn mrng_process_node(node: roxmltree::Node, parent_folder_id: Option<&str>, ctx: &mut MrngCtx) {
+    // Position among siblings, shared between folders and connections, so the
+    // original XML ordering (and its folder/connection interleaving) is kept
+    // instead of being re-sorted alphabetically on first import.
+    let mut sort_order: i64 = 0;
     for child in node.children().filter(|n| n.is_element() && n.has_tag_name("Node")) {
         let node_type = child.attribute("Type").unwrap_or("");
         let name = child.attribute("Name").unwrap_or("Imported");
+        let sort_order = { let s = sort_order; sort_order += 1; s };
 
         match node_type {
             "Container" => {
                 let folder_id = Uuid::new_v4().to_string();
                 let _ = ctx.db.execute(
-                    "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id) VALUES (?1, ?2, ?3, ?4)",
-                    params![folder_id, name, parent_folder_id, ctx.group_id],
+                    "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![folder_id, name, parent_folder_id, ctx.group_id, sort_order],
                 );
                 mrng_process_node(child, Some(&folder_id), ctx);
             }
@@ -766,12 +771,12 @@ fn mrng_process_node(node: roxmltree::Node, parent_folder_id: Option<&str>, ctx:
                 let id = Uuid::new_v4().to_string();
                 let ok = ctx.db.execute(
                     "INSERT OR IGNORE INTO connections
-                     (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id,icon,url)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                     (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id,icon,url,sort_order)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                     params![
                         id, name, conn_type, host, port, username,
                         "password", "", parent_folder_id,
-                        "", description, domain, ctx.group_id, icon, url,
+                        "", description, domain, ctx.group_id, icon, url, sort_order,
                     ],
                 ).is_ok();
 
