@@ -43,7 +43,7 @@
     },
     "windows": {
       "nsis": {
-        "languages": ["Spanish", "English"],
+        "languages": ["Spanish", "English", "French", "Russian", "Japanese"],
         "displayLanguageSelector": true
       }
     },

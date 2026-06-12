@@ -17,7 +17,7 @@ jobs:
           - platform: ubuntu-24.04
             args: ''
           - platform: windows-latest
-            args: ''
+            args: '--config src-tauri/tauri.windows.conf.json'
 
     runs-on: ${{ matrix.platform }}
 
@@ -63,6 +63,32 @@ jobs:
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
           choco install strawberryperl -y
           refreshenv
+
+      - name: Build OrbitalRdpHost.exe (Windows only)
+        if: matrix.platform == 'windows-latest'
+        shell: cmd
+        run: |
+          set "CSC="
+          for %%d in (
+            "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319"
+            "%WINDIR%\Microsoft.NET\Framework\v4.0.30319"
+          ) do (
+            if exist "%%~d\csc.exe" (
+              set "CSC=%%~d\csc.exe"
+              goto :found
+            )
+          )
+          echo ERROR: csc.exe not found
+          exit /b 1
+          :found
+          echo Using: %CSC%
+          "%CSC%" /nologo /target:exe /platform:x64 /optimize+ ^
+            /out:csharp-rdp-host\OrbitalRdpHost.exe ^
+            /r:System.dll /r:System.Core.dll /r:System.Drawing.dll ^
+            /r:System.Windows.Forms.dll /r:Microsoft.CSharp.dll ^
+            csharp-rdp-host\Program.cs
+          if %ERRORLEVEL% neq 0 ( echo BUILD FAILED & exit /b %ERRORLEVEL% )
+          echo BUILD OK
 
       - name: Install frontend dependencies
         run: pnpm install

@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../csharp-rdp-host/OrbitalRdpHost.exe": "OrbitalRdpHost.exe"
+    }
+  }
+}
