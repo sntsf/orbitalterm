@@ -143,6 +143,9 @@ const T = {
     // Hint box
     hintClickField: "Haz clic en un campo para ver su descripción.",
     folderNamePlaceholder: "Nombre de carpeta…",
+    // Quick-create toolbar
+    quickFolder: "Carpeta",
+    quickDb: "BD",
   },
   en: {
     menuFile: "File",
@@ -266,6 +269,9 @@ const T = {
     // Hint box
     hintClickField: "Click any field to see its description.",
     folderNamePlaceholder: "Folder name…",
+    // Quick-create toolbar
+    quickFolder: "Folder",
+    quickDb: "DB",
   },
   fr: {
     menuFile: "Fichier",
@@ -381,6 +387,9 @@ const T = {
     notifNext: "Suivant",
     hintClickField: "Cliquez sur un champ pour voir sa description.",
     folderNamePlaceholder: "Nom du dossier…",
+    // Quick-create toolbar
+    quickFolder: "Dossier",
+    quickDb: "BD",
   },
   ru: {
     menuFile: "Файл",
@@ -496,6 +505,9 @@ const T = {
     notifNext: "Вперёд",
     hintClickField: "Нажмите на поле, чтобы увидеть описание.",
     folderNamePlaceholder: "Имя папки…",
+    // Quick-create toolbar
+    quickFolder: "Папка",
+    quickDb: "БД",
   },
   ja: {
     menuFile: "ファイル",
@@ -611,6 +623,9 @@ const T = {
     notifNext: "次へ",
     hintClickField: "フィールドをクリックして説明を表示。",
     folderNamePlaceholder: "フォルダ名…",
+    // Quick-create toolbar
+    quickFolder: "フォルダ",
+    quickDb: "DB",
   },
 } as const;
 

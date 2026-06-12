@@ -15,6 +15,7 @@ import {
 import { ContextMenu, useContextMenu } from "../ContextMenu";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
+import { TuxIcon, WindowsIcon } from "../ConnectionIcons";
 import type { Connection, Folder as FolderType, Group } from "../../types";
 
 // ── Sidebar hint builders ──────────────────────────────────────────────────────
@@ -588,28 +589,68 @@ export function Sidebar() {
       />
 
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--color-border)] shrink-0">
-        <img
-          src="/logo_icon.png"
-          alt="OrbitalTerm"
-          className="h-6 w-auto object-contain select-none"
-          draggable={false}
-        />
-        <div className="flex gap-0.5">
-          <button onClick={() => startNewConnection(null, null, t("newConnectionMenu"))}
-            className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
-            title={t("newConnection")}>
-            <Plus size={14} />
+      <div className="border-b border-[var(--color-border)] shrink-0">
+        {/* Logo row */}
+        <div className="flex items-center px-3 py-2">
+          <img
+            src="/logo_icon.png"
+            alt="OrbitalTerm"
+            className="h-6 w-auto object-contain select-none"
+            draggable={false}
+          />
+        </div>
+        {/* Quick-create toolbar */}
+        <div className="flex divide-x divide-[var(--color-border)] border-t border-[var(--color-border)]">
+          {/* Nuevo RDP */}
+          <button
+            onClick={() => startNewConnection(null, null, t("welcomeNewRdp"), "rdp")}
+            className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+            title={t("welcomeNewRdp")}
+          >
+            <span className="relative inline-flex items-center justify-center">
+              <WindowsIcon size={13} />
+              <span className="absolute -bottom-1 -right-1 w-[9px] h-[9px] rounded-full bg-[var(--color-accent)] text-white text-[6px] font-bold flex items-center justify-center leading-none">+</span>
+            </span>
+            <span className="text-[7.5px] leading-tight text-center font-medium">{t("welcomeNewRdp")}</span>
           </button>
-          <button onClick={() => startCreateFolder(null, groups[0]?.id ?? null)}
-            className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
-            title={t("newFolder")}>
-            <FolderPlus size={14} />
+          {/* Nuevo SSH */}
+          <button
+            onClick={() => startNewConnection(null, null, t("welcomeNewSsh"), "ssh")}
+            className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+            title={t("welcomeNewSsh")}
+          >
+            <span className="relative inline-flex items-center justify-center">
+              <TuxIcon size={13} />
+              <span className="absolute -bottom-1 -right-1 w-[9px] h-[9px] rounded-full bg-[var(--color-accent)] text-white text-[6px] font-bold flex items-center justify-center leading-none">+</span>
+            </span>
+            <span className="text-[7.5px] leading-tight text-center font-medium">{t("welcomeNewSsh")}</span>
           </button>
-          <button onClick={() => setCreatingGroup(true)}
-            className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
-            title={t("newGroup")}>
-            <Database size={14} />
+          {/* Nueva Conexión genérica */}
+          <button
+            onClick={() => startNewConnection(null, null, t("newConnectionMenu"))}
+            className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+            title={t("newConnection")}
+          >
+            <Plus size={13} />
+            <span className="text-[7.5px] leading-tight text-center font-medium">{t("newConnection")}</span>
+          </button>
+          {/* Nueva Carpeta */}
+          <button
+            onClick={() => startCreateFolder(null, groups[0]?.id ?? null)}
+            className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+            title={t("newFolder")}
+          >
+            <FolderPlus size={13} />
+            <span className="text-[7.5px] leading-tight text-center font-medium">{t("quickFolder")}</span>
+          </button>
+          {/* Nueva BD */}
+          <button
+            onClick={() => setCreatingGroup(true)}
+            className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+            title={t("newGroup")}
+          >
+            <Database size={13} />
+            <span className="text-[7.5px] leading-tight text-center font-medium">{t("quickDb")}</span>
           </button>
         </div>
       </div>
