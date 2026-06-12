@@ -139,6 +139,15 @@ export function Sidebar() {
   const [newGroupName, setNewGroupName] = useState("");
   const newGroupInputRef = useRef<HTMLInputElement>(null);
 
+  // Quick-create context: tracks which folder/group the user last clicked,
+  // so the toolbar buttons create inside the right place.
+  const [quickCtxFolderId, setQuickCtxFolderId] = useState<string | null>(null);
+  const [quickCtxGroupId, setQuickCtxGroupId] = useState<string>("");
+  // Initialise groupId from the first group once groups load
+  useEffect(() => {
+    if (quickCtxGroupId === "" && groups.length > 0) setQuickCtxGroupId(groups[0].id);
+  }, [groups, quickCtxGroupId]);
+
   // Search keyboard navigation
   const [searchFocusIdx, setSearchFocusIdx] = useState(0);
 
@@ -543,7 +552,15 @@ export function Sidebar() {
     onConnContextMenu: connMenu,
     onFolderContextMenu: folderMenu,
     selectedId: selectedConnectionId,
-    onSelect: selectConnection,
+    onSelect: (id: string) => {
+      selectConnection(id);
+      const conn = connections.find((c) => c.id === id);
+      if (conn) { setQuickCtxFolderId(conn.folder_id); setQuickCtxGroupId(conn.group_id); }
+    },
+    onFolderClick: (folder: FolderType) => {
+      setQuickCtxFolderId(folder.id);
+      setQuickCtxGroupId(folder.group_id);
+    },
     onConnHint: (conn: Connection) => setSidebarHint(buildConnHint(conn, lang)),
     onFolderHint: (folder: FolderType) => setSidebarHint(buildFolderHint(folder, lang, connections)),
     renamingFolderId,
@@ -590,29 +607,52 @@ export function Sidebar() {
 
       {/* Header */}
       <div className="border-b border-[var(--color-border)] shrink-0">
-        {/* Logo row */}
-        <div className="flex items-center px-3 py-2">
+        {/* Logo row — logo on left, utility icons on right */}
+        <div className="flex items-center px-3 py-2 gap-1">
           <img
             src="/logo_icon.png"
             alt="OrbitalTerm"
             className="h-6 w-auto object-contain select-none"
             draggable={false}
           />
+          <div className="ml-auto flex items-center gap-0.5">
+            <button
+              onClick={() => startNewConnection(quickCtxFolderId, quickCtxGroupId || groups[0]?.id, t("newConnectionMenu"))}
+              className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+              title={t("newConnection")}
+            >
+              <Plus size={14} />
+            </button>
+            <button
+              onClick={() => startCreateFolder(quickCtxFolderId, quickCtxGroupId || groups[0]?.id)}
+              className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+              title={t("newFolder")}
+            >
+              <FolderPlus size={14} />
+            </button>
+            <button
+              onClick={() => setCreatingGroup(true)}
+              className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+              title={t("newGroup")}
+            >
+              <Database size={14} />
+            </button>
+          </div>
         </div>
-        {/* Quick-create toolbar */}
+        {/* Quick-create toolbar for specific connection types */}
         <div className="flex divide-x divide-[var(--color-border)] border-t border-[var(--color-border)]">
           {(
             [
-              { type: "rdp",     Icon: WindowsIcon, label: t("welcomeNewRdp"),    name: t("welcomeNewRdp") },
-              { type: "ssh",     Icon: TuxIcon,     label: t("welcomeNewSsh"),    name: t("welcomeNewSsh") },
-              { type: "vnc",     Icon: VncIcon,     label: "VNC",                 name: "VNC" },
-              { type: "sftp",    Icon: SftpIcon,    label: "SFTP",                name: "SFTP" },
-              { type: "browser", Icon: Globe,        label: t("quickBrowser"),     name: t("quickBrowser") },
+              { type: "rdp",     Icon: WindowsIcon, label: t("welcomeNewRdp") },
+              { type: "ssh",     Icon: TuxIcon,     label: t("welcomeNewSsh") },
+              { type: "vnc",     Icon: VncIcon,     label: "VNC"              },
+              { type: "sftp",    Icon: SftpIcon,    label: "SFTP"             },
+              { type: "browser", Icon: Globe,        label: t("quickBrowser")  },
             ] as const
-          ).map(({ type, Icon, label, name }) => (
+          ).map(({ type, Icon, label }) => (
             <button
               key={type}
-              onClick={() => startNewConnection(null, null, name, type)}
+              onClick={() => startNewConnection(quickCtxFolderId, quickCtxGroupId || groups[0]?.id, label, type)}
               className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
               title={label}
             >
@@ -713,7 +753,7 @@ export function Sidebar() {
               ) : (
                 <button
                   data-group-id={group.id}
-                  onClick={() => { toggleGroupExpanded(group.id); setSidebarHint(buildGroupHint(group, lang, connections)); }}
+                  onClick={() => { toggleGroupExpanded(group.id); setSidebarHint(buildGroupHint(group, lang, connections)); setQuickCtxFolderId(null); setQuickCtxGroupId(group.id); }}
                   onContextMenu={(e) => groupMenu(e, group)}
                   className={[
                     "flex items-center gap-1.5 w-full px-2 py-1 transition-colors",
@@ -759,8 +799,8 @@ export function Sidebar() {
                     const groupChildren: Array<
                       { kind: "folder"; item: FolderType } | { kind: "conn"; item: Connection }
                     > = [
-                      ...groupFolders.map((f) => ({ kind: "folder" as const, item: f })),
                       ...groupRootConns.map((c) => ({ kind: "conn" as const, item: c })),
+                      ...groupFolders.map((f) => ({ kind: "folder" as const, item: f })),
                     ];
                     return groupChildren.map((child, idx) => {
                       const childIsLast = idx === groupChildren.length - 1;
@@ -891,6 +931,7 @@ interface SharedProps {
   onFolderContextMenu: (e: React.MouseEvent, f: FolderType) => void;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onFolderClick: (folder: FolderType) => void;
   onConnHint: (conn: Connection) => void;
   onFolderHint: (folder: FolderType) => void;
   renamingFolderId: string | null;
@@ -921,7 +962,7 @@ function FolderItem({
   const t = useT();
   const {
     allFolders, allConnections, openTab, toggleFolder,
-    onConnContextMenu, onFolderContextMenu, selectedId, onSelect,
+    onConnContextMenu, onFolderContextMenu, selectedId, onSelect, onFolderClick,
     onConnHint, onFolderHint,
     renamingFolderId, renameFolderName, onRenameChange, onRenameConfirm, onRenameCancel, renameInputRef,
     creatingFolder, newFolderParentId, newFolderName,
@@ -945,8 +986,8 @@ function FolderItem({
   const childContinuations = [...continuations, !isLast];
 
   const childItems: Array<{ kind: "folder"; item: FolderType } | { kind: "conn"; item: Connection }> = [
-    ...subfolders.map((f) => ({ kind: "folder" as const, item: f })),
     ...myConns.map((c) => ({ kind: "conn" as const, item: c })),
+    ...subfolders.map((f) => ({ kind: "folder" as const, item: f })),
   ];
 
   return (
@@ -971,7 +1012,7 @@ function FolderItem({
       ) : (
         <button
           data-folder-id={folder.id}
-          onClick={() => { toggleFolder(folder.id); onFolderHint(folder); }}
+          onClick={() => { toggleFolder(folder.id); onFolderHint(folder); onFolderClick(folder); }}
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
           className={[
             "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
