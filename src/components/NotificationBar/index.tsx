@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, X, ChevronDown, ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 import { useNotifStore } from "../../store/useNotifStore";
-import { useI18nStore } from "../../store/useI18nStore";
+import { useI18nStore, useT } from "../../store/useI18nStore";
 import { friendlyConnErrorNotif } from "../../lib/connErrors";
 
 const AUTO_HIDE_MS = 20_000;
@@ -9,6 +9,7 @@ const AUTO_HIDE_MS = 20_000;
 export function NotificationOverlay() {
   const { notifs, dismiss, clearAll, expanded, show, hide } = useNotifStore();
   const { lang } = useI18nStore();
+  const t = useT();
   const [progressKey, setProgressKey] = useState(0);
   const [idx, setIdx] = useState(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -68,7 +69,7 @@ export function NotificationOverlay() {
           {/* Top row */}
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[13px] font-semibold text-[var(--color-warning)] shrink-0">
-              {lang === "es" ? "Error de conexión" : "Connection error"}
+              {t("notifConnError")}
             </span>
             <div className="w-px h-4 bg-[var(--color-border)] shrink-0" />
             <span className="text-[13px] font-semibold text-[var(--color-text-primary)] shrink-0">
@@ -92,7 +93,7 @@ export function NotificationOverlay() {
                   onClick={goPrev}
                   disabled={safeIdx === 0}
                   className="p-0.5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] disabled:opacity-30 transition-colors"
-                  title={lang === "es" ? "Anterior" : "Previous"}
+                  title={t("notifPrev")}
                 >
                   <ChevronLeft size={13} />
                 </button>
@@ -103,7 +104,7 @@ export function NotificationOverlay() {
                   onClick={goNext}
                   disabled={safeIdx === notifs.length - 1}
                   className="p-0.5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] disabled:opacity-30 transition-colors"
-                  title={lang === "es" ? "Siguiente" : "Next"}
+                  title={t("notifNext")}
                 >
                   <ChevronRight size={13} />
                 </button>
@@ -114,7 +115,7 @@ export function NotificationOverlay() {
             <button
               onClick={minimize}
               className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
-              title={lang === "es" ? "Minimizar" : "Minimize"}
+              title={t("notifMinimize")}
             >
               <ChevronDown size={15} />
             </button>
@@ -123,7 +124,7 @@ export function NotificationOverlay() {
             <button
               onClick={() => dismiss(current.id)}
               className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] transition-colors"
-              title={lang === "es" ? "Descartar esta" : "Dismiss this"}
+              title={t("notifDismiss")}
             >
               <X size={14} />
             </button>
@@ -132,7 +133,7 @@ export function NotificationOverlay() {
             <button
               onClick={clearAll}
               className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-danger)] transition-colors"
-              title={lang === "es" ? "Limpiar todas" : "Clear all"}
+              title={t("notifClearAll")}
             >
               <Trash2 size={13} />
             </button>

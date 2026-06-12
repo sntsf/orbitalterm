@@ -5,7 +5,7 @@ import {
   ChevronRight, ChevronDown, Database, X, Bell,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
-import { useI18nStore } from "../../store/useI18nStore";
+import { useI18nStore, useT } from "../../store/useI18nStore";
 import { useNotifStore } from "../../store/useNotifStore";
 import {
   getConnections, getFolders, deleteConnection, saveConnection,
@@ -19,28 +19,28 @@ import type { Connection, Folder as FolderType, Group } from "../../types";
 
 // ── Sidebar hint builders ──────────────────────────────────────────────────────
 
-function buildConnHint(conn: Connection, lang: "es" | "en") {
+function buildConnHint(conn: Connection, lang: string) {
   const type = conn.type.toUpperCase();
   return lang === "es"
     ? { title: `Conexión: ${conn.name}`, body: `Tipo ${type} · ${conn.host}:${conn.port} · Usuario: ${conn.username}` }
     : { title: `Connection: ${conn.name}`, body: `Type ${type} · ${conn.host}:${conn.port} · User: ${conn.username}` };
 }
 
-function buildFolderHint(folder: FolderType, lang: "es" | "en", allConnections: Connection[]) {
+function buildFolderHint(folder: FolderType, lang: string, allConnections: Connection[]) {
   const count = allConnections.filter((c) => c.folder_id === folder.id).length;
   return lang === "es"
     ? { title: `Carpeta: ${folder.name}`, body: `Contiene ${count} conexión${count !== 1 ? "es" : ""}. Haz doble clic en una conexión para abrirla.` }
     : { title: `Folder: ${folder.name}`, body: `Contains ${count} connection${count !== 1 ? "s" : ""}. Double-click a connection to open it.` };
 }
 
-function buildGroupHint(group: Group, lang: "es" | "en", allConnections: Connection[]) {
+function buildGroupHint(group: Group, lang: string, allConnections: Connection[]) {
   const count = allConnections.filter((c) => c.group_id === group.id).length;
   return lang === "es"
     ? { title: `Fuente de datos: ${group.name}`, body: `${count} conexión${count !== 1 ? "es" : ""} en esta fuente. Haz clic derecho para ver opciones.` }
     : { title: `Data source: ${group.name}`, body: `${count} connection${count !== 1 ? "s" : ""} in this source. Right-click for options.` };
 }
 
-function buildSearchHint(lang: "es" | "en") {
+function buildSearchHint(lang: string) {
   return lang === "es"
     ? { title: "Buscador de conexiones", body: "Escribe para filtrar por nombre o dirección IP. Usa ↑↓ para navegar entre resultados y Enter para abrir." }
     : { title: "Connection search", body: "Type to filter by name or IP address. Use ↑↓ to navigate results and Enter to open." };
@@ -57,6 +57,7 @@ export function Sidebar() {
     setSidebarHint,
   } = useAppStore();
   const { lang } = useI18nStore();
+  const t = useT();
   const { notifs, expanded, show, clearAll: clearAllNotifs } = useNotifStore();
 
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
@@ -812,10 +813,10 @@ export function Sidebar() {
           <button
             onClick={show}
             className="flex items-center gap-1.5 flex-1 min-w-0 text-[11px] font-medium text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 rounded px-1 py-0.5 transition-colors"
-            title={lang === "es" ? "Ver notificaciones" : "Show notifications"}
+            title={t("notifLabel")}
           >
             <Bell size={11} className="shrink-0" />
-            <span className="truncate">{lang === "es" ? "Notificaciones" : "Notifications"}</span>
+            <span className="truncate">{t("notifLabel")}</span>
             <span className="ml-auto shrink-0 bg-[var(--color-warning)] text-black text-[9px] font-bold px-1.5 py-px rounded-full leading-none">
               {notifs.length}
             </span>
@@ -823,7 +824,7 @@ export function Sidebar() {
           <button
             onClick={clearAllNotifs}
             className="shrink-0 p-0.5 rounded text-[var(--color-text-muted)] hover:text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10 transition-colors"
-            title={lang === "es" ? "Limpiar todas" : "Clear all"}
+            title={t("notifClearAll")}
           >
             <Trash2 size={11} />
           </button>

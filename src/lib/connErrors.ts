@@ -1,4 +1,4 @@
-export function friendlyConnError(raw: string, lang: "es" | "en", connType?: string): string {
+export function friendlyConnError(raw: string, lang: string, connType?: string): string {
   const r = raw.toLowerCase();
 
   // ── Special markers ──────────────────────────────────────────────────────────
@@ -252,7 +252,7 @@ export function friendlyConnError(raw: string, lang: "es" | "en", connType?: str
 }
 
 /** Returns just the first line — suitable for single-line notification toasts. */
-export function friendlyConnErrorShort(raw: string, lang: "es" | "en", connType?: string): string {
+export function friendlyConnErrorShort(raw: string, lang: string, connType?: string): string {
   return friendlyConnError(raw, lang, connType).split("\n")[0];
 }
 
@@ -272,13 +272,18 @@ function isRefused(r: string) { return r.includes("connection refused"); }
  *   Line 1 — short title
  *   Line 2 — numbered causes joined with "  ·  "
  */
-export function friendlyConnErrorNotif(raw: string, lang: "es" | "en", connType?: string): string {
+export function friendlyConnErrorNotif(raw: string, lang: string, connType?: string): string {
   const r = raw.toLowerCase();
 
+  // ── session_ended ─────────────────────────────────────────────────────────────
   if (r === "session_ended" || r.startsWith("session_ended")) {
+    if (lang === "fr") return "Session terminée.";
+    if (lang === "ru") return "Сессия завершена.";
+    if (lang === "ja") return "セッションが終了しました。";
     return lang === "es" ? "Sesión finalizada." : "Session ended.";
   }
 
+  // ── Spanish ───────────────────────────────────────────────────────────────────
   if (lang === "es") {
     if (isUnreachable(r)) {
       if (connType === "rdp")
@@ -305,7 +310,88 @@ export function friendlyConnErrorNotif(raw: string, lang: "es" | "en", connType?
     return friendlyConnErrorShort(raw, lang, connType);
   }
 
-  // English
+  // ── French ────────────────────────────────────────────────────────────────────
+  if (lang === "fr") {
+    if (isUnreachable(r)) {
+      if (connType === "rdp")
+        return "Impossible de se connecter à l'ordinateur distant.\n1) Ordinateur éteint ou hors réseau  ·  2) Port 3389 bloqué ou modifié  ·  3) Bureau à distance (RDP) non activé sur le serveur";
+      if (connType === "ssh" || connType === "sftp")
+        return "Impossible de se connecter au serveur SSH.\n1) Ordinateur éteint ou hors réseau  ·  2) Port SSH bloqué  ·  3) Service SSH (sshd) arrêté";
+      if (connType === "vnc")
+        return "Impossible de se connecter au serveur VNC.\n1) Ordinateur éteint ou hors réseau  ·  2) Port VNC bloqué  ·  3) Serveur VNC arrêté";
+      if (connType === "ftp")
+        return "Impossible de se connecter au serveur FTP.\n1) Ordinateur éteint ou hors réseau  ·  2) Port FTP bloqué  ·  3) Serveur FTP arrêté";
+      return "Délai d'attente dépassé — l'hôte n'a pas répondu.";
+    }
+    if (isRefused(r)) {
+      if (connType === "rdp")
+        return "Connexion refusée sur le port RDP.\n1) Ordinateur éteint ou hors réseau  ·  2) Port 3389 bloqué ou modifié  ·  3) Bureau à distance (RDP) non activé";
+      if (connType === "ssh" || connType === "sftp")
+        return "Connexion refusée sur le port SSH.\n1) Ordinateur éteint ou hors réseau  ·  2) Service SSH (sshd) arrêté  ·  3) Port SSH bloqué";
+      if (connType === "vnc")
+        return "Connexion refusée sur le port VNC.\n1) Ordinateur éteint ou hors réseau  ·  2) Serveur VNC arrêté  ·  3) Port VNC bloqué";
+      if (connType === "ftp")
+        return "Connexion refusée sur le port FTP.\n1) Ordinateur éteint ou hors réseau  ·  2) Serveur FTP arrêté  ·  3) Port FTP bloqué";
+      return "Connexion refusée — le port est fermé ou le service n'est pas actif.";
+    }
+    return friendlyConnErrorShort(raw, "en", connType);
+  }
+
+  // ── Russian ───────────────────────────────────────────────────────────────────
+  if (lang === "ru") {
+    if (isUnreachable(r)) {
+      if (connType === "rdp")
+        return "Невозможно подключиться к удалённому компьютеру.\n1) Компьютер выключен или недоступен  ·  2) Порт 3389 заблокирован или изменён  ·  3) Удалённый рабочий стол (RDP) не включён";
+      if (connType === "ssh" || connType === "sftp")
+        return "Невозможно подключиться к SSH-серверу.\n1) Компьютер выключен или недоступен  ·  2) SSH-порт заблокирован  ·  3) Служба SSH (sshd) не запущена";
+      if (connType === "vnc")
+        return "Невозможно подключиться к VNC-серверу.\n1) Компьютер выключен или недоступен  ·  2) VNC-порт заблокирован  ·  3) VNC-сервер не запущен";
+      if (connType === "ftp")
+        return "Невозможно подключиться к FTP-серверу.\n1) Компьютер выключен или недоступен  ·  2) FTP-порт заблокирован  ·  3) FTP-сервер не запущен";
+      return "Время ожидания истекло — хост не ответил.";
+    }
+    if (isRefused(r)) {
+      if (connType === "rdp")
+        return "Подключение отклонено на RDP-порту.\n1) Компьютер выключен или недоступен  ·  2) Порт 3389 заблокирован или изменён  ·  3) Удалённый рабочий стол (RDP) не включён";
+      if (connType === "ssh" || connType === "sftp")
+        return "Подключение отклонено на SSH-порту.\n1) Компьютер выключен или недоступен  ·  2) Служба SSH (sshd) не запущена  ·  3) SSH-порт заблокирован";
+      if (connType === "vnc")
+        return "Подключение отклонено на VNC-порту.\n1) Компьютер выключен или недоступен  ·  2) VNC-сервер не запущен  ·  3) VNC-порт заблокирован";
+      if (connType === "ftp")
+        return "Подключение отклонено на FTP-порту.\n1) Компьютер выключен или недоступен  ·  2) FTP-сервер не запущен  ·  3) FTP-порт заблокирован";
+      return "Подключение отклонено — порт закрыт или служба не запущена.";
+    }
+    return friendlyConnErrorShort(raw, "en", connType);
+  }
+
+  // ── Japanese ──────────────────────────────────────────────────────────────────
+  if (lang === "ja") {
+    if (isUnreachable(r)) {
+      if (connType === "rdp")
+        return "リモートコンピュータに接続できません。\n1) コンピュータがオフまたはネットワーク不可  ·  2) ポート3389がブロックまたは変更  ·  3) リモートデスクトップ(RDP)が無効";
+      if (connType === "ssh" || connType === "sftp")
+        return "SSHサーバーに接続できません。\n1) コンピュータがオフまたはネットワーク不可  ·  2) SSHポートがブロック  ·  3) SSHサービス(sshd)が停止";
+      if (connType === "vnc")
+        return "VNCサーバーに接続できません。\n1) コンピュータがオフまたはネットワーク不可  ·  2) VNCポートがブロック  ·  3) VNCサーバーが停止";
+      if (connType === "ftp")
+        return "FTPサーバーに接続できません。\n1) コンピュータがオフまたはネットワーク不可  ·  2) FTPポートがブロック  ·  3) FTPサーバーが停止";
+      return "接続タイムアウト — ホストが応答しませんでした。";
+    }
+    if (isRefused(r)) {
+      if (connType === "rdp")
+        return "RDPポートで接続が拒否されました。\n1) コンピュータがオフまたはネットワーク不可  ·  2) ポート3389がブロックまたは変更  ·  3) リモートデスクトップ(RDP)が無効";
+      if (connType === "ssh" || connType === "sftp")
+        return "SSHポートで接続が拒否されました。\n1) コンピュータがオフまたはネットワーク不可  ·  2) SSHサービス(sshd)が停止  ·  3) SSHポートがブロック";
+      if (connType === "vnc")
+        return "VNCポートで接続が拒否されました。\n1) コンピュータがオフまたはネットワーク不可  ·  2) VNCサーバーが停止  ·  3) VNCポートがブロック";
+      if (connType === "ftp")
+        return "FTPポートで接続が拒否されました。\n1) コンピュータがオフまたはネットワーク不可  ·  2) FTPサーバーが停止  ·  3) FTPポートがブロック";
+      return "接続が拒否されました — ポートが閉じているかサービスが停止しています。";
+    }
+    return friendlyConnErrorShort(raw, "en", connType);
+  }
+
+  // ── English (default) ─────────────────────────────────────────────────────────
   if (isUnreachable(r)) {
     if (connType === "rdp")
       return "Cannot connect to the remote computer.\n1) Computer off or no network  ·  2) Port 3389 blocked or changed  ·  3) Remote Desktop (RDP) not enabled on server";
