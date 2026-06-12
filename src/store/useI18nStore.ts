@@ -140,6 +140,9 @@ const T = {
     notifLabel: "Notificaciones",
     notifPrev: "Anterior",
     notifNext: "Siguiente",
+    // Hint box
+    hintClickField: "Haz clic en un campo para ver su descripción.",
+    folderNamePlaceholder: "Nombre de carpeta…",
   },
   en: {
     menuFile: "File",
@@ -260,6 +263,9 @@ const T = {
     notifLabel: "Notifications",
     notifPrev: "Previous",
     notifNext: "Next",
+    // Hint box
+    hintClickField: "Click any field to see its description.",
+    folderNamePlaceholder: "Folder name…",
   },
   fr: {
     menuFile: "Fichier",
@@ -373,6 +379,8 @@ const T = {
     notifLabel: "Notifications",
     notifPrev: "Précédent",
     notifNext: "Suivant",
+    hintClickField: "Cliquez sur un champ pour voir sa description.",
+    folderNamePlaceholder: "Nom du dossier…",
   },
   ru: {
     menuFile: "Файл",
@@ -486,6 +494,8 @@ const T = {
     notifLabel: "Уведомления",
     notifPrev: "Назад",
     notifNext: "Вперёд",
+    hintClickField: "Нажмите на поле, чтобы увидеть описание.",
+    folderNamePlaceholder: "Имя папки…",
   },
   ja: {
     menuFile: "ファイル",
@@ -599,6 +609,8 @@ const T = {
     notifLabel: "通知",
     notifPrev: "前へ",
     notifNext: "次へ",
+    hintClickField: "フィールドをクリックして説明を表示。",
+    folderNamePlaceholder: "フォルダ名…",
   },
 } as const;
 

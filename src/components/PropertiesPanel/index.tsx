@@ -436,7 +436,8 @@ export function PropertiesPanel() {
   );
 }
 
-function HintBox({ hint, hintLang }: { hint: { title: string; body: string } | null; hintLang: "es" | "en" }) {
+function HintBox({ hint, hintLang: _hintLang }: { hint: { title: string; body: string } | null; hintLang: "es" | "en" }) {
+  const t = useT();
   return (
     <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 min-h-[72px]">
       {hint ? (
@@ -453,9 +454,7 @@ function HintBox({ hint, hintLang }: { hint: { title: string; body: string } | n
         <div className="flex gap-2 items-start opacity-40">
           <Info size={13} className="text-[var(--color-text-muted)] shrink-0 mt-0.5" />
           <p className="text-[11px] text-[var(--color-text-muted)] leading-snug italic">
-            {hintLang === "es"
-              ? "Haz clic en un campo para ver su descripción."
-              : "Click any field to see its description."}
+            {t("hintClickField")}
           </p>
         </div>
       )}
