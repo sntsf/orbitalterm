@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import {
   Plus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
@@ -271,6 +272,11 @@ export function Sidebar() {
   const cancelRenameFolder = () => { setRenamingFolderId(null); setRenameFolderName(""); };
 
   const removeFolder = async (folder: FolderType) => {
+    const ok = await ask(t("deleteFolderConfirm").replace("{name}", folder.name), {
+      title: t("delete"),
+      kind: "warning",
+    });
+    if (!ok) return;
     try {
       await deleteFolder(folder.id);
       setFolders(await refetchFolders());
@@ -302,7 +308,11 @@ export function Sidebar() {
   };
 
   const removeGroup = async (group: Group) => {
-    if (!confirm(t("deleteGroupConfirm"))) return;
+    const ok = await ask(t("deleteGroupConfirm").replace("{name}", group.name), {
+      title: t("delete"),
+      kind: "warning",
+    });
+    if (!ok) return;
     try {
       await deleteGroup(group.id);
       setGroups(await getGroups());
