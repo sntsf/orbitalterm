@@ -93,6 +93,13 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
+      - name: Write Windows bundle config (Windows only)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          echo '{"bundle":{"resources":{"OrbitalRdpHost.exe":"OrbitalRdpHost.exe"}}}' \
+            > src-tauri/tauri.windows.conf.json
+
       - name: Build
         uses: tauri-apps/tauri-action@v0
         env:

@@ -35,6 +35,7 @@ export interface Folder {
   parent_id: string | null;
   expanded: boolean;
   group_id: string;
+  sort_order: number;
 }
 
 export interface Tab {

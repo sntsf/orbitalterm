@@ -82,6 +82,14 @@ pub struct ReorderItem {
     pub group_id: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FolderReorderItem {
+    pub id: String,
+    pub sort_order: i64,
+    pub parent_id: Option<String>,
+    pub group_id: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Folder {
     pub id: String,
@@ -89,6 +97,7 @@ pub struct Folder {
     pub parent_id: Option<String>,
     pub expanded: bool,
     pub group_id: String,
+    pub sort_order: i64,
 }
 
 fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
@@ -154,11 +163,28 @@ pub fn save_connection(conn: NewConnection) -> Result<Connection, String> {
         conn.group_id.clone()
     };
 
-    let sort_order: i64 = db.query_row(
-        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM connections",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
+    // New connection goes to the top of its context, above connections AND folders.
+    let sort_order: i64 = if let Some(ref fid) = conn.folder_id {
+        db.query_row(
+            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM (
+                SELECT sort_order FROM connections WHERE folder_id = ?1
+                UNION ALL
+                SELECT sort_order FROM folders WHERE parent_id = ?1
+            )",
+            params![fid],
+            |row| row.get(0),
+        ).unwrap_or(0)
+    } else {
+        db.query_row(
+            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM (
+                SELECT sort_order FROM connections WHERE folder_id IS NULL AND group_id = ?1
+                UNION ALL
+                SELECT sort_order FROM folders WHERE parent_id IS NULL AND group_id = ?1
+            )",
+            params![group_id],
+            |row| row.get(0),
+        ).unwrap_or(0)
+    };
     db.execute(
         "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
@@ -215,10 +241,83 @@ pub fn reorder_connections(updates: Vec<ReorderItem>) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn reorder_folders(updates: Vec<FolderReorderItem>) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    for item in updates {
+        db.execute(
+            "UPDATE folders SET sort_order=?1, parent_id=?2, group_id=?3 WHERE id=?4",
+            params![item.sort_order, item.parent_id, item.group_id, item.id],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn collect_subfolders(db: &rusqlite::Connection, parent_id: &str, result: &mut Vec<String>) -> Result<(), String> {
+    let mut stmt = db.prepare("SELECT id FROM folders WHERE parent_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let ids: Vec<String> = stmt.query_map(params![parent_id], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    for id in ids {
+        collect_subfolders(db, &id, result)?;
+        result.push(id);
+    }
+    Ok(())
+}
+
+/// Move a folder (and all its descendants + their connections) to the root of a target group.
+#[tauri::command]
+pub fn move_folder_to_group(folder_id: String, target_group_id: String) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+
+    // Collect all descendant folder IDs
+    let mut subfolder_ids: Vec<String> = Vec::new();
+    collect_subfolders(&db, &folder_id, &mut subfolder_ids)?;
+
+    // Place root folder at the top of the target group root scope
+    let sort_order: i64 = db.query_row(
+        "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM (
+            SELECT sort_order FROM connections WHERE folder_id IS NULL AND group_id = ?1
+            UNION ALL
+            SELECT sort_order FROM folders WHERE parent_id IS NULL AND group_id = ?1
+        )",
+        params![target_group_id],
+        |row| row.get(0),
+    ).unwrap_or(-1);
+
+    // Move the root folder to target group at root level
+    db.execute(
+        "UPDATE folders SET group_id=?1, parent_id=NULL, sort_order=?2 WHERE id=?3",
+        params![target_group_id, sort_order, folder_id],
+    ).map_err(|e| e.to_string())?;
+
+    // Update group_id for all subfolders (keep their relative parent_id)
+    for sid in &subfolder_ids {
+        db.execute(
+            "UPDATE folders SET group_id=?1 WHERE id=?2",
+            params![target_group_id, sid],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    // Update group_id for all connections inside the moved folder tree
+    let mut all_folder_ids = vec![folder_id];
+    all_folder_ids.extend(subfolder_ids);
+    for fid in &all_folder_ids {
+        db.execute(
+            "UPDATE connections SET group_id=?1 WHERE folder_id=?2",
+            params![target_group_id, fid],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_folders() -> Result<Vec<Folder>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, name, parent_id, group_id FROM folders ORDER BY name COLLATE NOCASE")
+        .prepare("SELECT id, name, parent_id, group_id, sort_order FROM folders ORDER BY sort_order ASC, name COLLATE NOCASE")
         .map_err(|e| e.to_string())?;
 
     let rows = stmt.query_map([], |row| {
@@ -228,6 +327,7 @@ pub fn get_folders() -> Result<Vec<Folder>, String> {
             parent_id: row.get(2)?,
             expanded: true,
             group_id: row.get::<_, String>(3).unwrap_or_default(),
+            sort_order: row.get(4).unwrap_or(0),
         })
     })
     .map_err(|e| e.to_string())?
@@ -252,12 +352,35 @@ pub fn save_folder(name: String, parent_id: Option<String>, group_id: Option<Str
         group_id.ok_or_else(|| "group_id is required for root folders".to_string())?
     };
 
+    // New folder appears at the top of its context (unified sort with connections).
+    let sort_order: i64 = if let Some(ref pid) = parent_id {
+        db.query_row(
+            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM (
+                SELECT sort_order FROM connections WHERE folder_id = ?1
+                UNION ALL
+                SELECT sort_order FROM folders WHERE parent_id = ?1
+            )",
+            params![pid],
+            |row| row.get(0),
+        ).unwrap_or(-1)
+    } else {
+        db.query_row(
+            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM (
+                SELECT sort_order FROM connections WHERE folder_id IS NULL AND group_id = ?1
+                UNION ALL
+                SELECT sort_order FROM folders WHERE parent_id IS NULL AND group_id = ?1
+            )",
+            params![resolved_group_id],
+            |row| row.get(0),
+        ).unwrap_or(-1)
+    };
+
     db.execute(
-        "INSERT INTO folders (id, name, parent_id, group_id) VALUES (?1,?2,?3,?4)",
-        params![id, name, parent_id, resolved_group_id],
+        "INSERT INTO folders (id, name, parent_id, group_id, sort_order) VALUES (?1,?2,?3,?4,?5)",
+        params![id, name, parent_id, resolved_group_id, sort_order],
     )
     .map_err(|e| e.to_string())?;
-    Ok(Folder { id, name, parent_id, expanded: true, group_id: resolved_group_id })
+    Ok(Folder { id, name, parent_id, expanded: true, group_id: resolved_group_id, sort_order })
 }
 
 #[tauri::command]
@@ -274,7 +397,7 @@ pub fn delete_folder(id: String) -> Result<(), String> {
 pub fn get_groups() -> Result<Vec<Group>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, name FROM groups ORDER BY rowid")
+        .prepare("SELECT id, name FROM groups ORDER BY rowid DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| {
         Ok(Group { id: row.get(0)?, name: row.get(1)? })
