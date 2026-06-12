@@ -241,15 +241,15 @@ export function PropertiesPanel() {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-[var(--color-border)] shrink-0">
-        <span className="text-[12px] uppercase tracking-wider text-[var(--color-text-muted)] font-medium">
+      <div className="flex items-center justify-between px-3 py-1 border-b border-[var(--color-border)] shrink-0">
+        <span className="text-[11px] uppercase tracking-wider text-[var(--color-text-muted)] font-medium">
           {t("propProperties")}
         </span>
         <button
           type="button"
           onClick={handleConnect}
           title={t("propConnect")}
-          className="flex items-center gap-1 px-2 py-1 rounded text-[12px] text-[var(--color-success)] hover:bg-[var(--color-success)]/10 transition-colors"
+          className="flex items-center gap-1 px-2 py-0.5 rounded text-[12px] text-[var(--color-success)] hover:bg-[var(--color-success)]/10 transition-colors"
         >
           <Plug size={13} />
           {t("propConnect")}
@@ -257,7 +257,7 @@ export function PropertiesPanel() {
       </div>
 
       {/* Fields */}
-      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2 min-h-0">
+      <div className="flex-1 overflow-y-auto px-3 py-1.5 space-y-1.5 min-h-0">
         <Row label={t("propType")}>
           <select
             value={type}
@@ -404,7 +404,7 @@ export function PropertiesPanel() {
 function HintBox({ hint, hintLang: _hintLang }: { hint: { title: string; body: string } | null; hintLang: "es" | "en" }) {
   const t = useT();
   return (
-    <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2 min-h-[72px]">
+    <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 min-h-[64px]">
       {hint ? (
         <div className="flex gap-2">
           <Info size={13} className="text-[var(--color-accent)] shrink-0 mt-0.5" />
@@ -429,12 +429,12 @@ function HintBox({ hint, hintLang: _hintLang }: { hint: { title: string; body: s
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="grid grid-cols-[80px_1fr] items-start gap-1.5">
-      <span className="text-[12px] text-[var(--color-text-muted)] pt-1.5 truncate">{label}</span>
+    <div className="grid grid-cols-[76px_1fr] items-start gap-1">
+      <span className="text-[11px] text-[var(--color-text-muted)] pt-1 truncate">{label}</span>
       <div>{children}</div>
     </div>
   );
 }
 
 const inp =
-  "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-1 text-[13px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";
+  "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-0.5 text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";

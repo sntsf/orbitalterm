@@ -252,6 +252,67 @@ pub fn reorder_folders(updates: Vec<FolderReorderItem>) -> Result<(), String> {
     Ok(())
 }
 
+fn collect_subfolders(db: &rusqlite::Connection, parent_id: &str, result: &mut Vec<String>) -> Result<(), String> {
+    let mut stmt = db.prepare("SELECT id FROM folders WHERE parent_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let ids: Vec<String> = stmt.query_map(params![parent_id], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    for id in ids {
+        collect_subfolders(db, &id, result)?;
+        result.push(id);
+    }
+    Ok(())
+}
+
+/// Move a folder (and all its descendants + their connections) to the root of a target group.
+#[tauri::command]
+pub fn move_folder_to_group(folder_id: String, target_group_id: String) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+
+    // Collect all descendant folder IDs
+    let mut subfolder_ids: Vec<String> = Vec::new();
+    collect_subfolders(&db, &folder_id, &mut subfolder_ids)?;
+
+    // Place root folder at the top of the target group root scope
+    let sort_order: i64 = db.query_row(
+        "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM (
+            SELECT sort_order FROM connections WHERE folder_id IS NULL AND group_id = ?1
+            UNION ALL
+            SELECT sort_order FROM folders WHERE parent_id IS NULL AND group_id = ?1
+        )",
+        params![target_group_id],
+        |row| row.get(0),
+    ).unwrap_or(-1);
+
+    // Move the root folder to target group at root level
+    db.execute(
+        "UPDATE folders SET group_id=?1, parent_id=NULL, sort_order=?2 WHERE id=?3",
+        params![target_group_id, sort_order, folder_id],
+    ).map_err(|e| e.to_string())?;
+
+    // Update group_id for all subfolders (keep their relative parent_id)
+    for sid in &subfolder_ids {
+        db.execute(
+            "UPDATE folders SET group_id=?1 WHERE id=?2",
+            params![target_group_id, sid],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    // Update group_id for all connections inside the moved folder tree
+    let mut all_folder_ids = vec![folder_id];
+    all_folder_ids.extend(subfolder_ids);
+    for fid in &all_folder_ids {
+        db.execute(
+            "UPDATE connections SET group_id=?1 WHERE folder_id=?2",
+            params![target_group_id, fid],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_folders() -> Result<Vec<Folder>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;

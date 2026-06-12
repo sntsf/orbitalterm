@@ -10,7 +10,7 @@ import { useNotifStore } from "../../store/useNotifStore";
 import {
   getConnections, getFolders, deleteConnection, saveConnection,
   saveFolder, deleteFolder, getFolders as refetchFolders, reorderConnections, reorderFolders,
-  getGroups, saveGroup, renameGroup, deleteGroup, copyPassword,
+  moveFolderToGroup, getGroups, saveGroup, renameGroup, deleteGroup, copyPassword,
 } from "../../lib/commands";
 import { ContextMenu, useContextMenu } from "../ContextMenu";
 import { PropertiesPanel } from "../PropertiesPanel";
@@ -396,6 +396,18 @@ export function Sidebar() {
       if (d.kind === "folder") {
         const draggedFolder = folderList.find((f) => f.id === d.connId);
         if (!draggedFolder) { finish(); return; }
+
+        // Cross-BD or "move to group root": drop on a group header
+        if (dt.startsWith("group:")) {
+          const targetGroupId = dt.slice(6);
+          // moveFolderToGroup works for both cross-BD and same-BD (moves to root of that group)
+          if (targetGroupId !== draggedFolder.group_id || draggedFolder.parent_id !== null) {
+            await moveFolderToGroup(d.connId, targetGroupId).catch(console.error);
+            setConns(await getConnections());
+            setFols(await getFolders());
+          }
+          finish(); return;
+        }
 
         const parentId = draggedFolder.parent_id;
         const groupId  = draggedFolder.group_id;
