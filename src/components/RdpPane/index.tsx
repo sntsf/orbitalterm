@@ -14,7 +14,7 @@ import {
   rdpWindowsReparent,
 } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
-import { useNotifStore, NOTIF_H_COLLAPSED, NOTIF_H_EXPANDED } from "../../store/useNotifStore";
+import { useNotifStore, NOTIF_H_EXPANDED } from "../../store/useNotifStore";
 import { useT, useI18nStore } from "../../store/useI18nStore";
 import { friendlyConnError } from "../../lib/connErrors";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
@@ -53,9 +53,9 @@ function WindowsEmbeddedViewer({ sessionId, tabId, transferred }: WindowsViewerP
   const reparentedRef = useRef(false);
   const { activeTabId } = useAppStore();
   const { notifs, expanded } = useNotifStore();
-  // Reserve space at the bottom so the native Win32 window doesn't cover the
-  // notification bar, which lives in the HTML layer underneath.
-  const notifReserve = notifs.length === 0 ? 0 : expanded ? NOTIF_H_EXPANDED : NOTIF_H_COLLAPSED;
+  // Only reserve space when the bar is expanded. When minimized the badge lives
+  // in the TabBar (always in the HTML zone, never covered by the native window).
+  const notifReserve = expanded && notifs.length > 0 ? NOTIF_H_EXPANDED : 0;
 
   // Show/hide by watching the active tab only. Menus no longer hide the WS_POPUP —
   // instead they carve a SetWindowRgn hole so the HTML menu renders through.
