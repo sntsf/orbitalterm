@@ -74,18 +74,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       const created = await dbSaveConnection({
         name,
-        type: "ssh",
+        type: "rdp",
         host: "",
-        port: 22,
+        port: 3389,
         username: "",
-        auth_type: "agent",
+        auth_type: "password",
         key_path: "",
         folder_id: folderId,
         notes: "",
         description: "",
         domain: "",
         group_id: resolvedGroupId,
-        icon: DEFAULT_CONN_ICON["ssh"],
+        icon: DEFAULT_CONN_ICON["rdp"],
         url: "",
         custom_hosts: "",
       });

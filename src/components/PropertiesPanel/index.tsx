@@ -206,10 +206,6 @@ export function PropertiesPanel() {
 
   const handleConnect = () => {
     if (!existing) return;
-    if (existing.type !== "browser" && (!existing.host.trim() || !existing.username.trim())) {
-      setConnectError(t("propRequired"));
-      return;
-    }
     setConnectError("");
     openTab(existing);
   };
