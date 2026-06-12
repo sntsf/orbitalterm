@@ -11,7 +11,7 @@ import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
 import { usePrefsStore, THEMES, FONT_SIZES } from "../../store/usePrefsStore";
 import {
-  importFromFile, getConnections, getFolders, getGroups, saveGroup,
+  importFromFile, importFromMremoteng, getConnections, getFolders, getGroups, saveGroup,
   rdpWindowsSetMenuRegion,
 } from "../../lib/commands";
 import { ExportDialog } from "../ExportDialog";
@@ -115,21 +115,40 @@ export function MenuBar() {
     setOpenMenuId(null);
   };
 
+  const refreshAfterImport = async () => {
+    setConnections(await getConnections());
+    setFolders(await getFolders());
+    setGroups(await getGroups());
+  };
+
+  // OrbitalTerm-native import (.json)
   const handleImport = async () => {
     setOpenMenuId(null);
     try {
       const path = await dialogOpen({
         multiple: false,
-        filters: [
-          { name: "OrbitalTerm / mRemoteNG", extensions: ["json", "xml"] },
-        ],
+        filters: [{ name: "OrbitalTerm", extensions: ["json"] }],
       });
       if (!path || typeof path !== "string") return;
-      // importFromFile detects .xml vs .json on the Rust side
       const count = await importFromFile(path);
-      setConnections(await getConnections());
-      setFolders(await getFolders());
-      setGroups(await getGroups());
+      await refreshAfterImport();
+      showToast(`${count} ${t("importedOk")}`);
+    } catch (err) {
+      showToast(String(err), false);
+    }
+  };
+
+  // mRemoteNG migration import (.xml)
+  const handleImportMremoteng = async () => {
+    setOpenMenuId(null);
+    try {
+      const path = await dialogOpen({
+        multiple: false,
+        filters: [{ name: "mRemoteNG", extensions: ["xml"] }],
+      });
+      if (!path || typeof path !== "string") return;
+      const count = await importFromMremoteng(path);
+      await refreshAfterImport();
       showToast(`${count} ${t("importedOk")}`);
     } catch (err) {
       showToast(String(err), false);
@@ -203,6 +222,7 @@ export function MenuBar() {
         },
         { separator: true },
         { label: t("importConnections"), icon: <Upload size={12} />, action: handleImport },
+        { label: t("importMremoteng"), icon: <Upload size={12} />, action: handleImportMremoteng },
         { label: t("exportConnections"), icon: <Download size={12} />, action: handleExport },
         { separator: true },
         { label: t("exit"), icon: <LogOut size={12} />, shortcut: "Alt+F4", action: handleExit },
