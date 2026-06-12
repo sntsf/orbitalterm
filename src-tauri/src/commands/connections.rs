@@ -764,17 +764,30 @@ pub fn import_from_mremoteng(path: String, password: Option<String>) -> Result<u
         .unwrap_or(1000);
     let pw = password.unwrap_or_else(|| MRNG_DEFAULT_PASSWORD.to_string());
 
+    // The migration lands in its own fresh connections DB (group), named after
+    // the imported file, instead of polluting the user's existing DB.
+    let group_name = std::path::Path::new(&path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("mRemoteNG")
+        .to_string();
+
     let mut db = db::open().map_err(|e| e.to_string())?;
-    let default_group_id: String = db.query_row(
-        "SELECT id FROM groups LIMIT 1", [], |r| r.get(0)
-    ).unwrap_or_default();
 
     // One transaction for the whole tree — large files (thousands of nodes)
     // import in a fraction of the time vs. per-row autocommit.
     let tx = db.transaction().map_err(|e| e.to_string())?;
+    let group_id = Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO groups (id, name) VALUES (?1, ?2)",
+        params![group_id, group_name],
+    ).map_err(|e| e.to_string())?;
+
     let mut ctx = MrngCtx {
         db: &tx,
-        group_id: &default_group_id,
+        group_id: &group_id,
         password: &pw,
         iterations,
         count: 0,
