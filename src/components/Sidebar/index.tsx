@@ -797,11 +797,11 @@ export function Sidebar() {
 
                   {(() => {
                     const groupChildren: Array<
-                      { kind: "folder"; item: FolderType } | { kind: "conn"; item: Connection }
+                      { kind: "folder"; item: FolderType; sortKey: number } | { kind: "conn"; item: Connection; sortKey: number }
                     > = [
-                      ...groupRootConns.map((c) => ({ kind: "conn" as const, item: c })),
-                      ...groupFolders.map((f) => ({ kind: "folder" as const, item: f })),
-                    ];
+                      ...groupRootConns.map((c) => ({ kind: "conn" as const, item: c, sortKey: c.sort_order })),
+                      ...groupFolders.map((f) => ({ kind: "folder" as const, item: f, sortKey: f.sort_order })),
+                    ].sort((a, b) => (a.sortKey - b.sortKey) || (a.item.name.localeCompare(b.item.name)));
                     return groupChildren.map((child, idx) => {
                       const childIsLast = idx === groupChildren.length - 1;
                       if (child.kind === "folder") {
@@ -971,13 +971,8 @@ function FolderItem({
     searchMatchIds, searchFocusId,
   } = shared;
 
-  const subfolders = allFolders
-    .filter((f) => f.parent_id === folder.id)
-    .sort((a, b) => a.name.localeCompare(b.name));
-
-  const myConns = allConnections
-    .filter((c) => c.folder_id === folder.id)
-    .sort((a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name));
+  const subfolders = allFolders.filter((f) => f.parent_id === folder.id);
+  const myConns = allConnections.filter((c) => c.folder_id === folder.id);
 
   const isFolderDropTarget = dropTarget === `folder:${folder.id}`;
   const Icon = folder.expanded ? FolderOpen : Folder;
@@ -985,10 +980,10 @@ function FolderItem({
   const creatingSubfolder = creatingFolder && newFolderParentId === folder.id;
   const childContinuations = [...continuations, !isLast];
 
-  const childItems: Array<{ kind: "folder"; item: FolderType } | { kind: "conn"; item: Connection }> = [
-    ...myConns.map((c) => ({ kind: "conn" as const, item: c })),
-    ...subfolders.map((f) => ({ kind: "folder" as const, item: f })),
-  ];
+  const childItems: Array<{ kind: "folder"; item: FolderType; sortKey: number } | { kind: "conn"; item: Connection; sortKey: number }> = [
+    ...myConns.map((c) => ({ kind: "conn" as const, item: c, sortKey: c.sort_order })),
+    ...subfolders.map((f) => ({ kind: "folder" as const, item: f, sortKey: f.sort_order })),
+  ].sort((a, b) => (a.sortKey - b.sortKey) || a.item.name.localeCompare(b.item.name));
 
   return (
     <div>

@@ -194,5 +194,27 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE schema_version SET version=5", [])?;
     }
 
+    // Idempotent: add sort_order to folders (error = column already exists, safe to ignore)
+    conn.execute(
+        "ALTER TABLE folders ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+        [],
+    ).ok();
+
+    if ver < 6 {
+        // Seed sort_order for existing folders. Each folder gets a negative value based
+        // on its alphabetical rank within its parent scope, so existing folders stay before
+        // existing connections (sort_order 0+) and new items (MIN-1) land above all.
+        conn.execute_batch("
+            UPDATE folders SET sort_order = (
+                SELECT -COUNT(*) * 10 FROM folders f2
+                WHERE f2.group_id = folders.group_id
+                  AND (f2.parent_id = folders.parent_id OR (f2.parent_id IS NULL AND folders.parent_id IS NULL))
+                  AND f2.name COLLATE NOCASE <= folders.name COLLATE NOCASE
+            )
+            WHERE sort_order = 0;
+        ")?;
+        conn.execute("UPDATE schema_version SET version=6", [])?;
+    }
+
     Ok(())
 }

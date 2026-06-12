@@ -89,6 +89,7 @@ pub struct Folder {
     pub parent_id: Option<String>,
     pub expanded: bool,
     pub group_id: String,
+    pub sort_order: i64,
 }
 
 fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
@@ -154,16 +155,24 @@ pub fn save_connection(conn: NewConnection) -> Result<Connection, String> {
         conn.group_id.clone()
     };
 
-    // New items go to the top of their folder/group context (sort_order = MIN - 1).
+    // New connection goes to the top of its context, above connections AND folders.
     let sort_order: i64 = if let Some(ref fid) = conn.folder_id {
         db.query_row(
-            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM connections WHERE folder_id = ?1",
+            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM (
+                SELECT sort_order FROM connections WHERE folder_id = ?1
+                UNION ALL
+                SELECT sort_order FROM folders WHERE parent_id = ?1
+            )",
             params![fid],
             |row| row.get(0),
         ).unwrap_or(0)
     } else {
         db.query_row(
-            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM connections WHERE folder_id IS NULL AND group_id = ?1",
+            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM (
+                SELECT sort_order FROM connections WHERE folder_id IS NULL AND group_id = ?1
+                UNION ALL
+                SELECT sort_order FROM folders WHERE parent_id IS NULL AND group_id = ?1
+            )",
             params![group_id],
             |row| row.get(0),
         ).unwrap_or(0)
@@ -227,7 +236,7 @@ pub fn reorder_connections(updates: Vec<ReorderItem>) -> Result<(), String> {
 pub fn get_folders() -> Result<Vec<Folder>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, name, parent_id, group_id FROM folders ORDER BY rowid DESC")
+        .prepare("SELECT id, name, parent_id, group_id, sort_order FROM folders ORDER BY sort_order ASC, name COLLATE NOCASE")
         .map_err(|e| e.to_string())?;
 
     let rows = stmt.query_map([], |row| {
@@ -237,6 +246,7 @@ pub fn get_folders() -> Result<Vec<Folder>, String> {
             parent_id: row.get(2)?,
             expanded: true,
             group_id: row.get::<_, String>(3).unwrap_or_default(),
+            sort_order: row.get(4).unwrap_or(0),
         })
     })
     .map_err(|e| e.to_string())?
@@ -261,12 +271,35 @@ pub fn save_folder(name: String, parent_id: Option<String>, group_id: Option<Str
         group_id.ok_or_else(|| "group_id is required for root folders".to_string())?
     };
 
+    // New folder appears at the top of its context (unified sort with connections).
+    let sort_order: i64 = if let Some(ref pid) = parent_id {
+        db.query_row(
+            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM (
+                SELECT sort_order FROM connections WHERE folder_id = ?1
+                UNION ALL
+                SELECT sort_order FROM folders WHERE parent_id = ?1
+            )",
+            params![pid],
+            |row| row.get(0),
+        ).unwrap_or(-1)
+    } else {
+        db.query_row(
+            "SELECT COALESCE(MIN(sort_order), 1) - 1 FROM (
+                SELECT sort_order FROM connections WHERE folder_id IS NULL AND group_id = ?1
+                UNION ALL
+                SELECT sort_order FROM folders WHERE parent_id IS NULL AND group_id = ?1
+            )",
+            params![resolved_group_id],
+            |row| row.get(0),
+        ).unwrap_or(-1)
+    };
+
     db.execute(
-        "INSERT INTO folders (id, name, parent_id, group_id) VALUES (?1,?2,?3,?4)",
-        params![id, name, parent_id, resolved_group_id],
+        "INSERT INTO folders (id, name, parent_id, group_id, sort_order) VALUES (?1,?2,?3,?4,?5)",
+        params![id, name, parent_id, resolved_group_id, sort_order],
     )
     .map_err(|e| e.to_string())?;
-    Ok(Folder { id, name, parent_id, expanded: true, group_id: resolved_group_id })
+    Ok(Folder { id, name, parent_id, expanded: true, group_id: resolved_group_id, sort_order })
 }
 
 #[tauri::command]
