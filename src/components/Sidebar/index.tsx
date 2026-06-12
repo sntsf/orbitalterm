@@ -237,6 +237,12 @@ export function Sidebar() {
     return build;
   }, [folders]);
 
+  // Fast folder lookup for walking ancestor chains.
+  const folderById = useMemo(
+    () => new Map(folders.map((f) => [f.id, f])),
+    [folders],
+  );
+
   // Search matches (empty when no query). Matches by connection name, host/IP,
   // OR the name of any ancestor folder. Memoized so we only recompute when the
   // query or data actually changes — not on every render.
@@ -250,6 +256,20 @@ export function Sidebar() {
     );
   }, [searchQuery, connections, folderPath]);
 
+  // While searching we only auto-expand the ancestor chain of the CURRENTLY
+  // focused match — not every match — so the tree stays light and jumps
+  // straight to the connection in its real position. ↑/↓ moves the focus.
+  const searchExpanded = useMemo(() => {
+    const ids = new Set<string>();
+    if (!searchQuery) return ids;
+    let fid = searchMatches[searchFocusIdx]?.folder_id ?? null;
+    while (fid) {
+      ids.add(fid);
+      fid = folderById.get(fid)?.parent_id ?? null;
+    }
+    return ids;
+  }, [searchQuery, searchMatches, searchFocusIdx, folderById]);
+
   // Reset focus to the first result whenever the query changes, and preview it.
   useEffect(() => {
     setSearchFocusIdx(0);
@@ -257,19 +277,25 @@ export function Sidebar() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery]);
 
-  // Keep the focused result visible — instant (no smooth-scroll jank) and only
-  // within the compact results list, so it jumps straight to the match.
+  // Jump straight to the focused match in the tree — instant scroll (no
+  // smooth-scroll jank). Runs after the ancestor chain above has expanded it.
   useEffect(() => {
     if (!searchQuery) return;
-    document.querySelector(`[data-search-row="${searchFocusIdx}"]`)
-      ?.scrollIntoView({ block: "nearest" });
-  }, [searchFocusIdx, searchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
+    const id = searchMatches[searchFocusIdx]?.id;
+    if (id) {
+      document.querySelector(`[data-conn-id="${id}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+    }
+  }, [searchFocusIdx, searchQuery, searchExpanded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleGroupExpanded = (groupId: string) => {
     setGroupExpanded((prev) => ({ ...prev, [groupId]: !(prev[groupId] ?? true) }));
   };
 
-  const isGroupExpanded = (groupId: string) => groupExpanded[groupId] ?? true;
+  // During a search every group is treated as open so matches in any database
+  // are reachable; otherwise honour the user's per-group toggle (default open).
+  const isGroupExpanded = (groupId: string) =>
+    searchQuery ? true : (groupExpanded[groupId] ?? true);
 
   const startCreateFolder = (parentId: string | null = null, groupId: string | null = null) => {
     setNewFolderName("");
@@ -671,12 +697,18 @@ export function Sidebar() {
     ? searchMatches[searchFocusIdx].id
     : null;
 
+  // Folders the tree should render as open: the ones the user opened, plus the
+  // ancestor chain of the focused search match (so it's revealed in place).
+  const effectiveExpanded = searchQuery
+    ? new Set<string>([...expandedFolders, ...searchExpanded])
+    : expandedFolders;
+
   // Shared props passed down to every FolderItem / ConnItem
   const sharedProps = {
     allFolders: folders,
     allConnections: connections,
     openTab,
-    expandedFolders,
+    expandedFolders: effectiveExpanded,
     onToggleFolder: toggleFolderExpand,
     onConnContextMenu: connMenu,
     onFolderContextMenu: folderMenu,
@@ -796,19 +828,8 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Connection list — tree when browsing, flat result list when searching */}
+      {/* Connection list — tree view; search reveals & jumps to the focused match */}
       <div className="flex-1 overflow-y-auto min-h-0 py-0.5">
-        {searchQuery ? (
-          <SearchResults
-            matches={searchMatches}
-            focusIdx={searchFocusIdx}
-            selectedId={selectedConnectionId}
-            folderPath={folderPath}
-            onFocus={(idx, conn) => { setSearchFocusIdx(idx); selectConnection(conn.id); }}
-            onOpen={openTab}
-            onContextMenu={connMenu}
-          />
-        ) : (<>
         {/* New group input */}
         {creatingGroup && (
           <div className="flex items-center gap-1 px-2 py-1">
@@ -970,7 +991,6 @@ export function Sidebar() {
             </button>
           </div>
         )}
-        </>)}
       </div>
 
       {/* Search — sits between connection list and properties panel */}
@@ -1296,77 +1316,6 @@ function ConnItem({
       <span className={`text-[10px] uppercase font-semibold px-1 rounded shrink-0 ml-1 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
         {conn.type}
       </span>
-    </div>
-  );
-}
-
-// ── SearchResults (flat, fast) ────────────────────────────────────────────────
-// Rendered instead of the tree while searching. A flat list jumps straight to a
-// result with no tree-expansion or smooth-scroll churn, even with thousands of
-// connections. Capped so a near-empty query can't try to paint everything.
-const SEARCH_RESULT_CAP = 300;
-
-function SearchResults({
-  matches, focusIdx, selectedId, folderPath, onFocus, onOpen, onContextMenu,
-}: {
-  matches: Connection[];
-  focusIdx: number;
-  selectedId: string | null;
-  folderPath: (id: string | null) => string;
-  onFocus: (idx: number, conn: Connection) => void;
-  onOpen: (conn: Connection) => void;
-  onContextMenu: (e: React.MouseEvent, conn: Connection) => void;
-}) {
-  const t = useT();
-  if (matches.length === 0) {
-    return (
-      <div className="px-4 py-6 text-center text-[var(--color-text-muted)] text-xs">
-        <Search size={18} className="mx-auto mb-2 opacity-30" />
-        <p>{t("noResults")}</p>
-      </div>
-    );
-  }
-  const shown = matches.slice(0, SEARCH_RESULT_CAP);
-  return (
-    <div>
-      {shown.map((conn, idx) => {
-        const iconKey = conn.icon || DEFAULT_CONN_ICON[conn.type as keyof typeof DEFAULT_CONN_ICON] || "server";
-        const path = folderPath(conn.folder_id ?? null);
-        const active = idx === focusIdx || conn.id === selectedId;
-        return (
-          <div
-            key={conn.id}
-            role="button"
-            tabIndex={0}
-            data-search-row={idx}
-            onClick={() => onFocus(idx, conn)}
-            onDoubleClick={() => onOpen(conn)}
-            onContextMenu={(e) => onContextMenu(e, conn)}
-            className={[
-              "flex items-center gap-1.5 w-full px-2 py-1 transition-colors text-left cursor-pointer select-none",
-              active
-                ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
-                : "hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]",
-            ].join(" ")}
-          >
-            <ConnIconDisplay iconKey={iconKey} size={16} />
-            <div className="min-w-0 flex-1">
-              <div className="text-[13px] truncate text-[var(--color-text-primary)] leading-tight">{conn.name}</div>
-              <div className="text-[10px] truncate text-[var(--color-text-muted)] leading-tight">
-                {path ? `${path} · ` : ""}{conn.host || "—"}
-              </div>
-            </div>
-            <span className={`text-[10px] uppercase font-semibold px-1 rounded shrink-0 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
-              {conn.type}
-            </span>
-          </div>
-        );
-      })}
-      {matches.length > SEARCH_RESULT_CAP && (
-        <div className="px-3 py-2 text-center text-[10px] text-[var(--color-text-muted)] italic">
-          +{matches.length - SEARCH_RESULT_CAP} · {t("refineSearch")}
-        </div>
-      )}
     </div>
   );
 }
