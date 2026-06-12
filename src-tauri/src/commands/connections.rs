@@ -528,12 +528,13 @@ pub fn import_connections(json: String) -> Result<usize, String> {
                 group_id_map.get(&old_group_id).cloned().unwrap_or_else(|| default_group_id.clone())
             };
             let _ = db.execute(
-                "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     f["id"].as_str().unwrap_or(""),
                     f["name"].as_str().unwrap_or("Imported Folder"),
                     f["parent_id"].as_str(),
                     resolved_group_id,
+                    f["sort_order"].as_i64().unwrap_or(0),
                 ],
             );
         }
@@ -550,8 +551,8 @@ pub fn import_connections(json: String) -> Result<usize, String> {
         };
         let ok = db.execute(
             "INSERT OR IGNORE INTO connections
-             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id,sort_order,icon,url,custom_hosts)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![
                 id,
                 item["name"].as_str().unwrap_or("Imported"),
@@ -566,6 +567,10 @@ pub fn import_connections(json: String) -> Result<usize, String> {
                 item["description"].as_str().unwrap_or(""),
                 item["domain"].as_str().unwrap_or(""),
                 resolved_group_id,
+                item["sort_order"].as_i64().unwrap_or(0),
+                item["icon"].as_str().unwrap_or(""),
+                item["url"].as_str().unwrap_or(""),
+                item["custom_hosts"].as_str().unwrap_or(""),
             ],
         ).is_ok();
 
