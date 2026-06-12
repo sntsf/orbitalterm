@@ -82,6 +82,14 @@ pub struct ReorderItem {
     pub group_id: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FolderReorderItem {
+    pub id: String,
+    pub sort_order: i64,
+    pub parent_id: Option<String>,
+    pub group_id: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Folder {
     pub id: String,
@@ -227,6 +235,18 @@ pub fn reorder_connections(updates: Vec<ReorderItem>) -> Result<(), String> {
         db.execute(
             "UPDATE connections SET sort_order=?1, folder_id=?2, group_id=?3, updated_at=datetime('now') WHERE id=?4",
             params![item.sort_order, item.folder_id, item.group_id, item.id],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reorder_folders(updates: Vec<FolderReorderItem>) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    for item in updates {
+        db.execute(
+            "UPDATE folders SET sort_order=?1, parent_id=?2, group_id=?3 WHERE id=?4",
+            params![item.sort_order, item.parent_id, item.group_id, item.id],
         ).map_err(|e| e.to_string())?;
     }
     Ok(())

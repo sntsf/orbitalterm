@@ -9,7 +9,7 @@ import { useI18nStore, useT } from "../../store/useI18nStore";
 import { useNotifStore } from "../../store/useNotifStore";
 import {
   getConnections, getFolders, deleteConnection, saveConnection,
-  saveFolder, deleteFolder, getFolders as refetchFolders, reorderConnections,
+  saveFolder, deleteFolder, getFolders as refetchFolders, reorderConnections, reorderFolders,
   getGroups, saveGroup, renameGroup, deleteGroup, copyPassword,
 } from "../../lib/commands";
 import { ContextMenu, useContextMenu } from "../ContextMenu";
@@ -118,7 +118,7 @@ export function Sidebar() {
   const [dropTarget, setDropTarget] = useState<string | null>(null);
 
   // Pointer-based DnD refs (avoid stale closures in global listeners)
-  const pDragRef = useRef<{ connId: string; connName: string; startX: number; startY: number; active: boolean } | null>(null);
+  const pDragRef = useRef<{ kind: "conn" | "folder"; connId: string; connName: string; startX: number; startY: number; active: boolean } | null>(null);
   const pDropRef = useRef<string | null>(null);
   const [ghostPos, setGhostPos] = useState<{ x: number; y: number } | null>(null);
 
@@ -334,12 +334,18 @@ export function Sidebar() {
 
   // Always-current snapshot of state needed inside the global pointer listeners.
   // useEffect with [] captures stale closures; reading from this ref is safe.
-  const dndState = useRef({ connections, folders, setConnections });
-  dndState.current = { connections, folders, setConnections };
+  const dndState = useRef({ connections, folders, setConnections, setFolders });
+  dndState.current = { connections, folders, setConnections, setFolders };
 
-  // Called when a ConnItem receives pointerdown — arms the pointer-based drag.
+  // Arms a connection drag.
   const startPointerDrag = (conn: Connection, startX: number, startY: number) => {
-    pDragRef.current = { connId: conn.id, connName: conn.name, startX, startY, active: false };
+    pDragRef.current = { kind: "conn", connId: conn.id, connName: conn.name, startX, startY, active: false };
+    pDropRef.current = null;
+  };
+
+  // Arms a folder drag.
+  const startFolderDrag = (folder: FolderType, startX: number, startY: number) => {
+    pDragRef.current = { kind: "folder", connId: folder.id, connName: folder.name, startX, startY, active: false };
     pDropRef.current = null;
   };
 
@@ -361,6 +367,8 @@ export function Sidebar() {
       let target: string | null = null;
       for (const el of hits) {
         const h = el as HTMLElement;
+        // Skip the item being dragged as a drop target
+        if (d.kind === "folder" && h.dataset.folderId === d.connId) continue;
         if (h.dataset.folderId) { target = `folder:${h.dataset.folderId}`; break; }
         if (h.dataset.groupId)  { target = `group:${h.dataset.groupId}`;   break; }
         if (h.dataset.connId && h.dataset.connId !== d.connId) { target = h.dataset.connId; break; }
@@ -378,13 +386,61 @@ export function Sidebar() {
       if (!d?.active) return; // never moved past threshold — normal click, nothing to do
 
       // Read CURRENT state from ref (avoids stale-closure bugs with [] dependency).
-      const { connections: conns, folders: folderList, setConnections: setConns } = dndState.current;
-
-      const dragged = conns.find((c) => c.id === d.connId);
+      const { connections: conns, folders: folderList, setConnections: setConns, setFolders: setFols } = dndState.current;
 
       const finish = () => { setDragId(null); setDropTarget(null); setGhostPos(null); };
 
-      if (!dragged || !dt) { finish(); return; }
+      if (!dt) { finish(); return; }
+
+      // ── Folder drag ───────────────────────────────────────────────────────────
+      if (d.kind === "folder") {
+        const draggedFolder = folderList.find((f) => f.id === d.connId);
+        if (!draggedFolder) { finish(); return; }
+
+        const parentId = draggedFolder.parent_id;
+        const groupId  = draggedFolder.group_id;
+
+        // Build the unified sorted list of all sibling items (same parent scope)
+        type ScopeItem = { kind: "conn" | "folder"; id: string; sort_order: number; name: string };
+        const siblings: ScopeItem[] = [
+          ...conns.filter((c) => c.folder_id === parentId && c.group_id === groupId)
+            .map((c) => ({ kind: "conn" as const, id: c.id, sort_order: c.sort_order, name: c.name })),
+          ...folderList.filter((f) => f.parent_id === parentId && f.group_id === groupId)
+            .map((f) => ({ kind: "folder" as const, id: f.id, sort_order: f.sort_order, name: f.name })),
+        ].sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
+
+        const withoutDragged = siblings.filter((i) => i.id !== d.connId);
+
+        // Find insertion index based on the drop target
+        let insertIdx = withoutDragged.length; // default: end
+        if (dt.startsWith("folder:")) {
+          const targetId = dt.slice(7);
+          const idx = withoutDragged.findIndex((i) => i.id === targetId);
+          if (idx >= 0) insertIdx = idx;
+        } else if (!dt.startsWith("group:")) {
+          const idx = withoutDragged.findIndex((i) => i.id === dt);
+          if (idx >= 0) insertIdx = idx;
+        }
+
+        withoutDragged.splice(insertIdx, 0, { kind: "folder", id: d.connId, sort_order: 0, name: d.connName });
+
+        const connUpdates = withoutDragged
+          .filter((i) => i.kind === "conn")
+          .map((i) => ({ id: i.id, sort_order: withoutDragged.indexOf(i) * 10, folder_id: parentId, group_id: groupId }));
+        const folderUpdates = withoutDragged
+          .filter((i) => i.kind === "folder")
+          .map((i) => ({ id: i.id, sort_order: withoutDragged.indexOf(i) * 10, parent_id: parentId, group_id: groupId }));
+
+        if (connUpdates.length > 0) await reorderConnections(connUpdates).catch(console.error);
+        if (folderUpdates.length > 0) await reorderFolders(folderUpdates).catch(console.error);
+        setConns(await getConnections());
+        setFols(await getFolders());
+        finish(); return;
+      }
+
+      // ── Connection drag ───────────────────────────────────────────────────────
+      const dragged = conns.find((c) => c.id === d.connId);
+      if (!dragged) { finish(); return; }
 
       if (dt.startsWith("folder:") || dt.startsWith("group:")) {
         const folderId = dt.startsWith("folder:") ? dt.slice(7) : null;
@@ -409,7 +465,7 @@ export function Sidebar() {
         await reorderConnections([{ id: d.connId, sort_order: maxSort, folder_id: folderId, group_id: targetGroupId }]).catch(console.error);
         setConns(await getConnections());
       } else {
-        // Drop onto another connection — reorder within the same folder
+        // Drop onto another connection — reorder within the same unified scope
         const target = conns.find((c) => c.id === dt);
         if (!target) { finish(); return; }
 
@@ -579,6 +635,7 @@ export function Sidebar() {
     dragId,
     dropTarget,
     onConnPointerDown: (conn: Connection, x: number, y: number) => startPointerDrag(conn, x, y),
+    onFolderPointerDown: (folder: FolderType, x: number, y: number) => startFolderDrag(folder, x, y),
     searchMatchIds,
     searchFocusId,
   };
@@ -823,7 +880,7 @@ export function Sidebar() {
                             continuations={[]}
                             isLast={childIsLast}
                             selected={selectedConnectionId === conn.id}
-                            onSelect={() => selectConnection(conn.id)}
+                            onSelect={() => sharedProps.onSelect(conn.id)}
                             onOpen={() => openTab(conn)}
                             onContextMenu={(e) => connMenu(e, conn)}
                             onHint={() => setSidebarHint(buildConnHint(conn, lang))}
@@ -950,6 +1007,7 @@ interface SharedProps {
   dragId: string | null;
   dropTarget: string | null;
   onConnPointerDown: (conn: Connection, x: number, y: number) => void;
+  onFolderPointerDown: (folder: FolderType, x: number, y: number) => void;
   searchMatchIds: Set<string>;
   searchFocusId: string | null;
 }
@@ -967,7 +1025,7 @@ function FolderItem({
     renamingFolderId, renameFolderName, onRenameChange, onRenameConfirm, onRenameCancel, renameInputRef,
     creatingFolder, newFolderParentId, newFolderName,
     onSubfolderNameChange, onSubfolderConfirm, onSubfolderCancel, folderInputRef,
-    dragId, dropTarget, onConnPointerDown,
+    dragId, dropTarget, onConnPointerDown, onFolderPointerDown,
     searchMatchIds, searchFocusId,
   } = shared;
 
@@ -1008,6 +1066,7 @@ function FolderItem({
         <button
           data-folder-id={folder.id}
           onClick={() => { toggleFolder(folder.id); onFolderHint(folder); onFolderClick(folder); }}
+          onPointerDown={(e) => onFolderPointerDown(folder, e.clientX, e.clientY)}
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
           className={[
             "flex items-center w-full py-0.5 pr-2 transition-colors text-left",

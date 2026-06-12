@@ -67,6 +67,12 @@ export async function reorderConnections(
   return invoke("reorder_connections", { updates });
 }
 
+export async function reorderFolders(
+  updates: { id: string; sort_order: number; parent_id: string | null; group_id: string }[],
+): Promise<void> {
+  return invoke("reorder_folders", { updates });
+}
+
 // ── Groups ────────────────────────────────────────────────────────────────────
 
 export async function getGroups(): Promise<Group[]> {
