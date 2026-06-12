@@ -146,6 +146,7 @@ const T = {
     // Quick-create toolbar
     quickFolder: "Carpeta",
     quickDb: "BD",
+    quickBrowser: "Navegador",
   },
   en: {
     menuFile: "File",
@@ -272,6 +273,7 @@ const T = {
     // Quick-create toolbar
     quickFolder: "Folder",
     quickDb: "DB",
+    quickBrowser: "Browser",
   },
   fr: {
     menuFile: "Fichier",
@@ -390,6 +392,7 @@ const T = {
     // Quick-create toolbar
     quickFolder: "Dossier",
     quickDb: "BD",
+    quickBrowser: "Navigateur",
   },
   ru: {
     menuFile: "Файл",
@@ -508,6 +511,7 @@ const T = {
     // Quick-create toolbar
     quickFolder: "Папка",
     quickDb: "БД",
+    quickBrowser: "Браузер",
   },
   ja: {
     menuFile: "ファイル",
@@ -626,6 +630,7 @@ const T = {
     // Quick-create toolbar
     quickFolder: "フォルダ",
     quickDb: "DB",
+    quickBrowser: "ブラウザ",
   },
 } as const;
 

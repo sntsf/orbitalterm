@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   Plus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
-  ChevronRight, ChevronDown, Database, X, Bell,
+  ChevronRight, ChevronDown, Database, X, Bell, Globe,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useI18nStore, useT } from "../../store/useI18nStore";
@@ -15,7 +15,7 @@ import {
 import { ContextMenu, useContextMenu } from "../ContextMenu";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
-import { TuxIcon, WindowsIcon } from "../ConnectionIcons";
+import { TuxIcon, WindowsIcon, VncIcon, SftpIcon } from "../ConnectionIcons";
 import type { Connection, Folder as FolderType, Group } from "../../types";
 
 // ── Sidebar hint builders ──────────────────────────────────────────────────────
@@ -601,57 +601,28 @@ export function Sidebar() {
         </div>
         {/* Quick-create toolbar */}
         <div className="flex divide-x divide-[var(--color-border)] border-t border-[var(--color-border)]">
-          {/* Nuevo RDP */}
-          <button
-            onClick={() => startNewConnection(null, null, t("welcomeNewRdp"), "rdp")}
-            className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
-            title={t("welcomeNewRdp")}
-          >
-            <span className="relative inline-flex items-center justify-center">
-              <WindowsIcon size={13} />
-              <span className="absolute -bottom-1 -right-1 w-[9px] h-[9px] rounded-full bg-[var(--color-accent)] text-white text-[6px] font-bold flex items-center justify-center leading-none">+</span>
-            </span>
-            <span className="text-[7.5px] leading-tight text-center font-medium">{t("welcomeNewRdp")}</span>
-          </button>
-          {/* Nuevo SSH */}
-          <button
-            onClick={() => startNewConnection(null, null, t("welcomeNewSsh"), "ssh")}
-            className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
-            title={t("welcomeNewSsh")}
-          >
-            <span className="relative inline-flex items-center justify-center">
-              <TuxIcon size={13} />
-              <span className="absolute -bottom-1 -right-1 w-[9px] h-[9px] rounded-full bg-[var(--color-accent)] text-white text-[6px] font-bold flex items-center justify-center leading-none">+</span>
-            </span>
-            <span className="text-[7.5px] leading-tight text-center font-medium">{t("welcomeNewSsh")}</span>
-          </button>
-          {/* Nueva Conexión genérica */}
-          <button
-            onClick={() => startNewConnection(null, null, t("newConnectionMenu"))}
-            className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
-            title={t("newConnection")}
-          >
-            <Plus size={13} />
-            <span className="text-[7.5px] leading-tight text-center font-medium">{t("newConnection")}</span>
-          </button>
-          {/* Nueva Carpeta */}
-          <button
-            onClick={() => startCreateFolder(null, groups[0]?.id ?? null)}
-            className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
-            title={t("newFolder")}
-          >
-            <FolderPlus size={13} />
-            <span className="text-[7.5px] leading-tight text-center font-medium">{t("quickFolder")}</span>
-          </button>
-          {/* Nueva BD */}
-          <button
-            onClick={() => setCreatingGroup(true)}
-            className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
-            title={t("newGroup")}
-          >
-            <Database size={13} />
-            <span className="text-[7.5px] leading-tight text-center font-medium">{t("quickDb")}</span>
-          </button>
+          {(
+            [
+              { type: "rdp",     Icon: WindowsIcon, label: t("welcomeNewRdp"),    name: t("welcomeNewRdp") },
+              { type: "ssh",     Icon: TuxIcon,     label: t("welcomeNewSsh"),    name: t("welcomeNewSsh") },
+              { type: "vnc",     Icon: VncIcon,     label: "VNC",                 name: "VNC" },
+              { type: "sftp",    Icon: SftpIcon,    label: "SFTP",                name: "SFTP" },
+              { type: "browser", Icon: Globe,        label: t("quickBrowser"),     name: t("quickBrowser") },
+            ] as const
+          ).map(({ type, Icon, label, name }) => (
+            <button
+              key={type}
+              onClick={() => startNewConnection(null, null, name, type)}
+              className="flex-1 flex flex-col items-center justify-center py-1.5 gap-[3px] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+              title={label}
+            >
+              <span className="relative inline-flex items-center justify-center">
+                <Icon size={13} />
+                <span className="absolute -bottom-1 -right-1 w-[9px] h-[9px] rounded-full bg-[var(--color-accent)] text-white text-[6px] font-bold flex items-center justify-center leading-none">+</span>
+              </span>
+              <span className="text-[7.5px] leading-tight text-center font-medium">{label}</span>
+            </button>
+          ))}
         </div>
       </div>
 
