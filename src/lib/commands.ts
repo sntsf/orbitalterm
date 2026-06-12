@@ -57,8 +57,8 @@ export async function exportSelectedToFile(
   return invoke("export_selected_to_file", { groupIds, includePasswords, path });
 }
 
-export async function importFromMremoteng(path: string): Promise<number> {
-  return invoke("import_from_mremoteng", { path });
+export async function importFromMremoteng(path: string, password?: string): Promise<number> {
+  return invoke("import_from_mremoteng", { path, password: password ?? null });
 }
 
 export async function reorderConnections(
