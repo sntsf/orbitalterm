@@ -9,7 +9,42 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  # Create (or reuse) a SINGLE draft release first, so the parallel build jobs
+  # below upload their assets to the same release instead of racing to each
+  # create their own draft (drafts are NOT deduplicated by tag on GitHub, which
+  # is what produced two "v0.1.0" drafts before).
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create-release.outputs.result }}
+    steps:
+      - name: Create or reuse the draft release
+        uses: actions/github-script@v7
+        id: create-release
+        with:
+          result-encoding: string
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const { owner, repo } = context.repo;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner, repo, per_page: 100,
+            });
+            let release = releases.find((r) => r.tag_name === tag);
+            if (!release) {
+              const res = await github.rest.repos.createRelease({
+                owner, repo,
+                tag_name: tag,
+                name: `OrbitalTerm ${tag}`,
+                body: 'See the assets below to download for your platform.',
+                draft: true,
+                prerelease: false,
+              });
+              release = res.data;
+            }
+            return release.id.toString();
+
+  build-tauri:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +63,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      # The git tag (e.g. v0.2.0) is the single source of truth for the app
+      # version: stamp it into tauri.conf.json + package.json so installers and
+      # the in-app version follow the tag automatically on every release.
+      - name: Sync version with the tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Building OrbitalTerm $VERSION (tag $GITHUB_REF_NAME)"
+          node -e "for (const f of ['src-tauri/tauri.conf.json','package.json']) { const j=require('./'+f); j.version=process.argv[1]; require('fs').writeFileSync(f, JSON.stringify(j, null, 2) + '\n'); }" "$VERSION"
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -105,10 +150,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: OrbitalTerm ${{ github.ref_name }}
-          releaseBody: |
-            See the assets below to download for your platform.
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
