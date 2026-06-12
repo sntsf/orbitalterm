@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, forwardRef } from "react";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import {
   Plus, FolderPlus, Upload, Download, LogOut,
   Globe, Info, Bug, Check, X, Maximize2, PanelLeftClose,
@@ -10,8 +11,9 @@ import {
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
 import { usePrefsStore, THEMES, FONT_SIZES } from "../../store/usePrefsStore";
+import { useImportStore, type ImportProgress } from "../../store/useImportStore";
 import {
-  importFromFile, getConnections, getFolders, getGroups, saveGroup,
+  importFromFile, importFromMremoteng, getConnections, getFolders, getGroups, saveGroup,
   rdpWindowsSetMenuRegion,
 } from "../../lib/commands";
 import { ExportDialog } from "../ExportDialog";
@@ -115,25 +117,89 @@ export function MenuBar() {
     setOpenMenuId(null);
   };
 
+  const refreshAfterImport = async () => {
+    setConnections(await getConnections());
+    setFolders(await getFolders());
+    setGroups(await getGroups());
+  };
+
+  // OrbitalTerm-native import (.json)
   const handleImport = async () => {
     setOpenMenuId(null);
     try {
       const path = await dialogOpen({
         multiple: false,
-        filters: [
-          { name: "OrbitalTerm / mRemoteNG", extensions: ["json", "xml"] },
-        ],
+        filters: [{ name: "OrbitalTerm", extensions: ["json"] }],
       });
       if (!path || typeof path !== "string") return;
-      // importFromFile detects .xml vs .json on the Rust side
       const count = await importFromFile(path);
-      setConnections(await getConnections());
-      setFolders(await getFolders());
+      await refreshAfterImport();
       showToast(`${count} ${t("importedOk")}`);
     } catch (err) {
       showToast(String(err), false);
     }
   };
+
+  // mRemoteNG migration import (.xml). Runs on a background thread in Rust and
+  // reports progress via events, so the app (and any live RDP session) stays
+  // responsive even for files with thousands of connections.
+  const handleImportMremoteng = async () => {
+    setOpenMenuId(null);
+    if (useImportStore.getState().progress) {
+      showToast(t("importInProgress"), false);
+      return;
+    }
+    try {
+      const path = await dialogOpen({
+        multiple: false,
+        filters: [{ name: "mRemoteNG", extensions: ["xml"] }],
+      });
+      if (!path || typeof path !== "string") return;
+
+      const setProgress = useImportStore.getState().setProgress;
+      const fileName = path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "mRemoteNG";
+      setProgress({ name: fileName, done: 0, total: 0 });
+
+      const unlisten: Array<() => void> = [];
+      const cleanup = () => unlisten.forEach((u) => u());
+
+      unlisten.push(await listen<ImportProgress>("mrng-import-progress", (e) => {
+        setProgress(e.payload);
+      }));
+      unlisten.push(await listen<number>("mrng-import-done", async (e) => {
+        cleanup();
+        await refreshAfterImport();
+        setProgress(null);
+        showToast(`${e.payload} ${t("importedOk")}`);
+      }));
+      unlisten.push(await listen<string>("mrng-import-error", (e) => {
+        cleanup();
+        setProgress(null);
+        showToast(String(e.payload), false);
+      }));
+
+      await importFromMremoteng(path);
+    } catch (err) {
+      useImportStore.getState().setProgress(null);
+      showToast(String(err), false);
+    }
+  };
+
+  // Let other screens (e.g. the Welcome panel) trigger the same import flows
+  // without duplicating the dialog + progress-event wiring. A ref keeps the
+  // listeners pointed at the latest handlers without re-registering each render.
+  const importHandlers = useRef({ handleImport, handleImportMremoteng });
+  importHandlers.current = { handleImport, handleImportMremoteng };
+  useEffect(() => {
+    const onJson = () => importHandlers.current.handleImport();
+    const onMrng = () => importHandlers.current.handleImportMremoteng();
+    window.addEventListener("orbitalterm:importJson", onJson);
+    window.addEventListener("orbitalterm:importMremoteng", onMrng);
+    return () => {
+      window.removeEventListener("orbitalterm:importJson", onJson);
+      window.removeEventListener("orbitalterm:importMremoteng", onMrng);
+    };
+  }, []);
 
   const handleExport = () => {
     setOpenMenuId(null);
@@ -202,6 +268,7 @@ export function MenuBar() {
         },
         { separator: true },
         { label: t("importConnections"), icon: <Upload size={12} />, action: handleImport },
+        { label: t("importMremoteng"), icon: <Upload size={12} />, action: handleImportMremoteng },
         { label: t("exportConnections"), icon: <Download size={12} />, action: handleExport },
         { separator: true },
         { label: t("exit"), icon: <LogOut size={12} />, shortcut: "Alt+F4", action: handleExit },

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Plug, Eye, EyeOff, Info } from "lucide-react";
+import { Plug, Eye, EyeOff, Info, Database } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore } from "../../store/useI18nStore";
+import { useImportStore } from "../../store/useImportStore";
 import {
   updateConnection,
   getConnections,
@@ -403,6 +404,31 @@ export function PropertiesPanel() {
 
 function HintBox({ hint, hintLang: _hintLang }: { hint: { title: string; body: string } | null; hintLang: "es" | "en" }) {
   const t = useT();
+  const importProgress = useImportStore((s) => s.progress);
+
+  // While a (potentially large) mRemoteNG import runs in the background, the
+  // info box doubles as a live progress indicator.
+  if (importProgress) {
+    const { name, done, total } = importProgress;
+    const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    return (
+      <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 min-h-[64px]">
+        <div className="flex gap-2.5 items-center">
+          <ProgressRing pct={pct} indeterminate={total === 0} />
+          <div className="min-w-0">
+            <p className="text-[12px] font-semibold text-[var(--color-text-primary)] leading-tight mb-0.5 flex items-center gap-1">
+              <Database size={12} className="text-[var(--color-accent)] shrink-0" />
+              <span className="truncate">{t("importingDb")}</span>
+            </p>
+            <p className="text-[11px] text-[var(--color-text-muted)] leading-snug truncate">
+              {name} · {done}{total > 0 ? `/${total}` : ""} {t("importConnsCount")}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 min-h-[64px]">
       {hint ? (
@@ -422,6 +448,30 @@ function HintBox({ hint, hintLang: _hintLang }: { hint: { title: string; body: s
             {t("hintClickField")}
           </p>
         </div>
+      )}
+    </div>
+  );
+}
+
+function ProgressRing({ pct, indeterminate }: { pct: number; indeterminate?: boolean }) {
+  const size = 36, stroke = 4, r = (size - stroke) / 2, circ = 2 * Math.PI * r;
+  const offset = circ * (1 - pct / 100);
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <svg width={size} height={size} className={indeterminate ? "animate-spin" : ""} style={{ transform: "rotate(-90deg)" }}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--color-border)" strokeWidth={stroke} />
+        <circle
+          cx={size / 2} cy={size / 2} r={r} fill="none"
+          stroke="var(--color-accent)" strokeWidth={stroke} strokeLinecap="round"
+          strokeDasharray={circ}
+          strokeDashoffset={indeterminate ? circ * 0.75 : offset}
+          style={{ transition: indeterminate ? "none" : "stroke-dashoffset 0.2s ease" }}
+        />
+      </svg>
+      {!indeterminate && (
+        <span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold text-[var(--color-text-primary)]">
+          {pct}%
+        </span>
       )}
     </div>
   );

@@ -528,12 +528,13 @@ pub fn import_connections(json: String) -> Result<usize, String> {
                 group_id_map.get(&old_group_id).cloned().unwrap_or_else(|| default_group_id.clone())
             };
             let _ = db.execute(
-                "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     f["id"].as_str().unwrap_or(""),
                     f["name"].as_str().unwrap_or("Imported Folder"),
                     f["parent_id"].as_str(),
                     resolved_group_id,
+                    f["sort_order"].as_i64().unwrap_or(0),
                 ],
             );
         }
@@ -550,8 +551,8 @@ pub fn import_connections(json: String) -> Result<usize, String> {
         };
         let ok = db.execute(
             "INSERT OR IGNORE INTO connections
-             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id,sort_order,icon,url,custom_hosts)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![
                 id,
                 item["name"].as_str().unwrap_or("Imported"),
@@ -566,6 +567,10 @@ pub fn import_connections(json: String) -> Result<usize, String> {
                 item["description"].as_str().unwrap_or(""),
                 item["domain"].as_str().unwrap_or(""),
                 resolved_group_id,
+                item["sort_order"].as_i64().unwrap_or(0),
+                item["icon"].as_str().unwrap_or(""),
+                item["url"].as_str().unwrap_or(""),
+                item["custom_hosts"].as_str().unwrap_or(""),
             ],
         ).is_ok();
 
@@ -587,94 +592,300 @@ pub fn import_connections(json: String) -> Result<usize, String> {
 
 // ── Import mRemoteNG XML ──────────────────────────────────────────────────────
 
-fn mrng_protocol_to_type(proto: &str) -> &'static str {
+/// mRemoteNG's default password used to encrypt the per-connection password
+/// fields when the user doesn't set a custom one.
+const MRNG_DEFAULT_PASSWORD: &str = "mR3m";
+
+/// Decrypt a single mRemoteNG password field.
+///
+/// Layout of the Base64-decoded blob (AES-GCM / "Confidential" engine):
+///   [ salt: 16 ][ nonce: 16 ][ ciphertext + tag ]
+/// The key is PBKDF2-HMAC-SHA1(password, salt, iterations) → 32 bytes, and the
+/// salt is also fed in as the GCM associated data. Returns `None` on any
+/// failure (wrong password, corrupt data) so the import can continue without
+/// that password rather than aborting the whole migration.
+fn mrng_decrypt_password(b64: &str, password: &str, iterations: u32) -> Option<String> {
+    use aes_gcm::aead::{consts::U16, generic_array::GenericArray, Aead, KeyInit, Payload};
+    use aes_gcm::{aes::Aes256, AesGcm};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let data = STANDARD.decode(b64.trim()).ok()?;
+    if data.len() < 16 + 16 + 16 {
+        return None; // need at least salt + nonce + tag
+    }
+    let (salt, rest) = data.split_at(16);
+    let (nonce, ciphertext) = rest.split_at(16);
+
+    let mut key = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password.as_bytes(), salt, iterations, &mut key);
+
+    type Aes256Gcm16 = AesGcm<Aes256, U16>;
+    let cipher = Aes256Gcm16::new(GenericArray::from_slice(&key));
+    let plaintext = cipher
+        .decrypt(GenericArray::from_slice(nonce), Payload { msg: ciphertext, aad: salt })
+        .ok()?;
+    String::from_utf8(plaintext).ok()
+}
+
+/// Map an mRemoteNG protocol to an OrbitalTerm connection type. Returns `None`
+/// for protocols OrbitalTerm can't represent (Telnet, RAW, ICA, …) so we don't
+/// create useless connections.
+fn mrng_protocol_to_type(proto: &str) -> Option<&'static str> {
     match proto.to_uppercase().as_str() {
-        "SSH2" | "SSH1"              => "ssh",
-        "RDP"                        => "rdp",
-        "VNC"                        => "vnc",
-        "FTP"                        => "ftp",
-        "SFTP"                       => "sftp",
-        _                            => "ssh",
+        "SSH2" | "SSH1" => Some("ssh"),
+        "RDP"           => Some("rdp"),
+        "VNC"           => Some("vnc"),
+        "HTTP" | "HTTPS" => Some("browser"),
+        _               => None,
     }
 }
 
 fn mrng_default_port(conn_type: &str) -> i64 {
     match conn_type {
-        "ssh"  => 22,
-        "rdp"  => 3389,
-        "vnc"  => 5900,
-        "ftp"  => 21,
-        "sftp" => 22,
-        _      => 22,
+        "ssh"     => 22,
+        "rdp"     => 3389,
+        "vnc"     => 5900,
+        "browser" => 443,
+        _         => 22,
     }
 }
 
-/// Recurse into mRemoteNG XML tree.
+/// Pick an OrbitalTerm icon key, preferring mRemoteNG's icon name when it maps
+/// to one of ours, otherwise falling back to a sensible default per type.
+fn mrng_icon(icon: &str, conn_type: &str) -> &'static str {
+    match icon.to_lowercase().as_str() {
+        "linux" | "putty"                 => "linux",
+        "remote desktop" | "windows" | "workstation" => "windows",
+        "domain controller"              => "activedir",
+        "file server" | "backup"          => "fileserver",
+        "mail server" | "web server"      => "webserver",
+        "database"                        => "database",
+        _ => match conn_type {
+            "ssh"     => "linux",
+            "rdp"     => "windows",
+            "vnc"     => "vnc",
+            "browser" => "browser",
+            _         => "windows",
+        },
+    }
+}
+
+/// Progress payload emitted to the frontend during a (potentially large) import
+/// so it can render a non-blocking progress indicator.
+#[derive(Serialize, Clone)]
+struct ImportProgress {
+    name: String,
+    done: usize,
+    total: usize,
+}
+
+/// Count how many `Connection` nodes the tree holds, for progress totals.
+fn mrng_count_connections(node: roxmltree::Node) -> usize {
+    node.children()
+        .filter(|n| n.is_element() && n.has_tag_name("Node"))
+        .map(|child| match child.attribute("Type").unwrap_or("") {
+            "Connection" => 1,
+            "Container" => mrng_count_connections(child),
+            _ => 0,
+        })
+        .sum()
+}
+
+struct MrngCtx<'a> {
+    db: &'a rusqlite::Connection,
+    group_id: &'a str,
+    password: &'a str,
+    iterations: u32,
+    count: usize,             // connections actually inserted
+    processed: usize,         // connection nodes seen (incl. skipped) — drives %
+    total: usize,
+    last_emit: usize,
+    app: Option<&'a tauri::AppHandle>,
+    name: &'a str,
+}
+
+impl MrngCtx<'_> {
+    /// Emit a throttled progress event (every ~20 nodes, plus the final one).
+    fn maybe_emit(&mut self) {
+        let Some(app) = self.app else { return };
+        if self.processed - self.last_emit >= 20 || self.processed >= self.total {
+            use tauri::Emitter;
+            self.last_emit = self.processed;
+            let _ = app.emit("mrng-import-progress", ImportProgress {
+                name: self.name.to_string(),
+                done: self.processed,
+                total: self.total,
+            });
+        }
+    }
+}
+
+/// Recurse into the mRemoteNG XML tree, translating only the fields OrbitalTerm
+/// actually uses and dropping the rest of mRemoteNG's extensive per-node config.
 /// `parent_folder_id` = the OrbitalTerm folder ID to put children into (None = root).
-fn mrng_process_node(
-    node: roxmltree::Node,
-    parent_folder_id: Option<&str>,
-    group_id: &str,
-    db: &rusqlite::Connection,
-    count: &mut usize,
-) {
+fn mrng_process_node(node: roxmltree::Node, parent_folder_id: Option<&str>, ctx: &mut MrngCtx) {
+    // Position among siblings, shared between folders and connections, so the
+    // original XML ordering (and its folder/connection interleaving) is kept
+    // instead of being re-sorted alphabetically on first import.
+    let mut sort_order: i64 = 0;
     for child in node.children().filter(|n| n.is_element() && n.has_tag_name("Node")) {
         let node_type = child.attribute("Type").unwrap_or("");
         let name = child.attribute("Name").unwrap_or("Imported");
+        let sort_order = { let s = sort_order; sort_order += 1; s };
 
         match node_type {
             "Container" => {
                 let folder_id = Uuid::new_v4().to_string();
-                let _ = db.execute(
-                    "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id) VALUES (?1, ?2, ?3, ?4)",
-                    params![folder_id, name, parent_folder_id, group_id],
+                let _ = ctx.db.execute(
+                    "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![folder_id, name, parent_folder_id, ctx.group_id, sort_order],
                 );
-                mrng_process_node(child, Some(&folder_id), group_id, db, count);
+                mrng_process_node(child, Some(&folder_id), ctx);
             }
             "Connection" => {
+                ctx.processed += 1;
+                ctx.maybe_emit();
                 let proto = child.attribute("Protocol").unwrap_or("SSH2");
-                let conn_type = mrng_protocol_to_type(proto);
+                let conn_type = match mrng_protocol_to_type(proto) {
+                    Some(t) => t,
+                    None => continue, // unsupported protocol — skip, don't create junk
+                };
                 let host = child.attribute("Hostname").unwrap_or("");
                 let port: i64 = child.attribute("Port")
                     .and_then(|p| p.parse().ok())
                     .unwrap_or_else(|| mrng_default_port(conn_type));
                 let username = child.attribute("Username").unwrap_or("");
-                let description = child.attribute("Description").unwrap_or("");
+                // mRemoteNG stores the note in `Descr`, not `Description`.
+                let description = child.attribute("Descr").unwrap_or("");
                 let domain = child.attribute("Domain").unwrap_or("");
-                let rdp_admin = child.attribute("RDPAuthenticationLevel")
-                    .map(|v| v == "2")
-                    .unwrap_or(false);
+                let icon = mrng_icon(child.attribute("Icon").unwrap_or(""), conn_type);
+                // For HTTP/HTTPS turn the host into a browser URL.
+                let url = match conn_type {
+                    "browser" if !host.is_empty() => {
+                        let scheme = if proto.eq_ignore_ascii_case("https") { "https" } else { "http" };
+                        format!("{scheme}://{host}")
+                    }
+                    _ => String::new(),
+                };
+
+                // Decrypt the password if present; on failure import without it.
+                let password = child.attribute("Password")
+                    .filter(|p| !p.is_empty())
+                    .and_then(|p| mrng_decrypt_password(p, ctx.password, ctx.iterations));
 
                 let id = Uuid::new_v4().to_string();
-                let ok = db.execute(
+                let ok = ctx.db.execute(
                     "INSERT OR IGNORE INTO connections
-                     (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,rdp_admin,group_id)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                     (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id,icon,url,sort_order)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                     params![
                         id, name, conn_type, host, port, username,
                         "password", "", parent_folder_id,
-                        "", description, domain,
-                        rdp_admin as i64, group_id,
+                        "", description, domain, ctx.group_id, icon, url, sort_order,
                     ],
                 ).is_ok();
-                if ok { *count += 1; }
+
+                if ok {
+                    if let Some(pw) = password {
+                        if !pw.is_empty() {
+                            let _ = ctx.db.execute(
+                                "INSERT OR REPLACE INTO passwords (connection_id, password) VALUES (?1, ?2)",
+                                params![id, pw],
+                            );
+                        }
+                    }
+                    ctx.count += 1;
+                }
             }
             _ => {}
         }
     }
 }
 
-#[tauri::command]
-pub fn import_from_mremoteng(path: String) -> Result<usize, String> {
-    let xml = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+/// Core mRemoteNG import. When `app` is provided, throttled progress events are
+/// emitted as `mrng-import-progress`. Runs synchronously; callers that need it
+/// off the UI thread spawn it on a background thread (see the command below).
+fn run_mrng_import(
+    app: Option<&tauri::AppHandle>,
+    path: &str,
+    password: Option<String>,
+) -> Result<usize, String> {
+    let xml = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
-    let db = db::open().map_err(|e| e.to_string())?;
-    let default_group_id: String = db.query_row(
-        "SELECT id FROM groups LIMIT 1", [], |r| r.get(0)
-    ).unwrap_or_default();
-    let mut count = 0usize;
-    mrng_process_node(doc.root_element(), None, &default_group_id, &db, &mut count);
+    let root = doc.root_element();
+
+    // Whole-file encryption is a different format we don't support yet.
+    if root.attribute("FullFileEncryption").map(|v| v == "true").unwrap_or(false) {
+        return Err("This mRemoteNG file uses full-file encryption, which isn't supported. Re-export with 'Encrypt complete connection file' disabled.".into());
+    }
+
+    let iterations: u32 = root.attribute("KdfIterations")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    let pw = password.unwrap_or_else(|| MRNG_DEFAULT_PASSWORD.to_string());
+
+    // The migration lands in its own fresh connections DB (group), named after
+    // the imported file, instead of polluting the user's existing DB.
+    let group_name = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("mRemoteNG")
+        .to_string();
+
+    let total = mrng_count_connections(root);
+    if let Some(app) = app {
+        use tauri::Emitter;
+        let _ = app.emit("mrng-import-progress", ImportProgress { name: group_name.clone(), done: 0, total });
+    }
+
+    let mut db = db::open().map_err(|e| e.to_string())?;
+
+    // One transaction for the whole tree — large files (thousands of nodes)
+    // import in a fraction of the time vs. per-row autocommit.
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    let group_id = Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO groups (id, name) VALUES (?1, ?2)",
+        params![group_id, group_name],
+    ).map_err(|e| e.to_string())?;
+
+    let mut ctx = MrngCtx {
+        db: &tx,
+        group_id: &group_id,
+        password: &pw,
+        iterations,
+        count: 0,
+        processed: 0,
+        total,
+        last_emit: 0,
+        app,
+        name: &group_name,
+    };
+    mrng_process_node(root, None, &mut ctx);
+    let count = ctx.count;
+    tx.commit().map_err(|e| e.to_string())?;
+
+    if let Some(app) = app {
+        use tauri::Emitter;
+        let _ = app.emit("mrng-import-progress", ImportProgress { name: group_name, done: total, total });
+    }
     Ok(count)
+}
+
+/// Imports an mRemoteNG file on a background thread so the UI (and any live RDP
+/// session) stays responsive. Progress, completion and errors are delivered via
+/// the `mrng-import-progress` / `mrng-import-done` / `mrng-import-error` events.
+#[tauri::command]
+pub fn import_from_mremoteng(app: tauri::AppHandle, path: String, password: Option<String>) {
+    std::thread::spawn(move || {
+        use tauri::Emitter;
+        match run_mrng_import(Some(&app), &path, password) {
+            Ok(count) => { let _ = app.emit("mrng-import-done", count); }
+            Err(e)    => { let _ = app.emit("mrng-import-error", e); }
+        }
+    });
 }
 
 // ── File helpers ──────────────────────────────────────────────────────────────
@@ -759,7 +970,7 @@ pub fn import_from_file(path: String) -> Result<usize, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     // Detect format by file extension
     if path.to_lowercase().ends_with(".xml") {
-        import_from_mremoteng(path)
+        run_mrng_import(None, &path, None)
     } else {
         import_connections(content)
     }

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import {
-  Plus, Search, FolderOpen, Folder, Terminal,
+  Plus, Minus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
   ChevronRight, ChevronDown, Database, X, Bell, Globe,
 } from "lucide-react";
@@ -74,13 +75,21 @@ function buildSearchHint(lang: string) {
 // ── Sidebar ────────────────────────────────────────────────────────────────────
 
 export function Sidebar() {
-  const {
-    connections, folders, groups,
-    setConnections, setFolders, setGroups, setSearchQuery, searchQuery,
-    selectConnection, selectedConnectionId,
-    openTab, toggleFolder, expandFolder, startNewConnection,
-    setSidebarHint,
-  } = useAppStore();
+  // Individual selectors — the sidebar tree is large, so we must NOT re-render
+  // it on unrelated store changes (hover hints, tab status, notifications…).
+  const connections = useAppStore((s) => s.connections);
+  const folders = useAppStore((s) => s.folders);
+  const groups = useAppStore((s) => s.groups);
+  const searchQuery = useAppStore((s) => s.searchQuery);
+  const selectedConnectionId = useAppStore((s) => s.selectedConnectionId);
+  const setConnections = useAppStore((s) => s.setConnections);
+  const setFolders = useAppStore((s) => s.setFolders);
+  const setGroups = useAppStore((s) => s.setGroups);
+  const setSearchQuery = useAppStore((s) => s.setSearchQuery);
+  const selectConnection = useAppStore((s) => s.selectConnection);
+  const openTab = useAppStore((s) => s.openTab);
+  const startNewConnection = useAppStore((s) => s.startNewConnection);
+  const setSidebarHint = useAppStore((s) => s.setSidebarHint);
   const { lang } = useI18nStore();
   const t = useT();
   const { notifs, expanded, show, clearAll: clearAllNotifs } = useNotifStore();
@@ -129,6 +138,27 @@ export function Sidebar() {
   // Group expand state: default all expanded
   const [groupExpanded, setGroupExpanded] = useState<Record<string, boolean>>({});
 
+  // Folder expand state — default COLLAPSED and persisted. This is what keeps
+  // huge imported trees fluid: only the folders the user opens are mounted,
+  // instead of rendering thousands of connections at once.
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("orbitalterm:expandedFolders");
+      return new Set<string>(raw ? JSON.parse(raw) : []);
+    } catch { return new Set<string>(); }
+  });
+  useEffect(() => {
+    localStorage.setItem("orbitalterm:expandedFolders", JSON.stringify([...expandedFolders]));
+  }, [expandedFolders]);
+  const toggleFolderExpand = (id: string) =>
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  const expandAllFolders = () => setExpandedFolders(new Set(folders.map((f) => f.id)));
+  const collapseAllFolders = () => setExpandedFolders(new Set());
+
   // Group renaming
   const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
   const [renameGroupName, setRenameGroupName] = useState("");
@@ -143,9 +173,11 @@ export function Sidebar() {
   // so the toolbar buttons create inside the right place.
   const [quickCtxFolderId, setQuickCtxFolderId] = useState<string | null>(null);
   const [quickCtxGroupId, setQuickCtxGroupId] = useState<string>("");
-  // Initialise groupId from the first group once groups load
+  // Initialise groupId from the first group once groups load, and clear any
+  // stale reference if the tracked group was deleted (e.g. last DB removed).
   useEffect(() => {
-    if (quickCtxGroupId === "" && groups.length > 0) setQuickCtxGroupId(groups[0].id);
+    const exists = groups.some((g) => g.id === quickCtxGroupId);
+    if (!exists) setQuickCtxGroupId(groups[0]?.id ?? "");
   }, [groups, quickCtxGroupId]);
 
   // Search keyboard navigation
@@ -191,46 +223,81 @@ export function Sidebar() {
     }
   }, [creatingGroup]);
 
-  // Search matches (empty when no query)
-  const searchMatches = searchQuery
-    ? connections.filter(
-        (c) =>
-          c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          c.host.toLowerCase().includes(searchQuery.toLowerCase()),
-      )
-    : [];
+  // Folder full-path resolver (ancestor names), memoized — used both for
+  // matching ("search by folder name") and for showing each result's location.
+  const folderPath = useMemo(() => {
+    const byId = new Map(folders.map((f) => [f.id, f]));
+    const cache = new Map<string | null, string>();
+    const build = (id: string | null): string => {
+      if (!id) return "";
+      if (cache.has(id)) return cache.get(id)!;
+      const f = byId.get(id);
+      const p = f ? (f.parent_id ? `${build(f.parent_id)} / ${f.name}` : f.name) : "";
+      cache.set(id, p);
+      return p;
+    };
+    return build;
+  }, [folders]);
 
-  // When query changes: expand ancestor folders of all matches + jump to first
-  useEffect(() => {
-    if (!searchQuery) return;
-    setSearchFocusIdx(0);
-    const toExpand = new Set<string>();
-    for (const conn of searchMatches) {
-      let fid = conn.folder_id;
-      while (fid) {
-        toExpand.add(fid);
-        const f = folders.find((fo) => fo.id === fid);
-        fid = f?.parent_id ?? null;
-      }
+  // Fast folder lookup for walking ancestor chains.
+  const folderById = useMemo(
+    () => new Map(folders.map((f) => [f.id, f])),
+    [folders],
+  );
+
+  // Search matches (empty when no query). Matches by connection name, host/IP,
+  // OR the name of any ancestor folder. Memoized so we only recompute when the
+  // query or data actually changes — not on every render.
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [];
+    return connections.filter((c) =>
+      c.name.toLowerCase().includes(q) ||
+      c.host.toLowerCase().includes(q) ||
+      folderPath(c.folder_id ?? null).toLowerCase().includes(q),
+    );
+  }, [searchQuery, connections, folderPath]);
+
+  // While searching we only auto-expand the ancestor chain of the CURRENTLY
+  // focused match — not every match — so the tree stays light and jumps
+  // straight to the connection in its real position. ↑/↓ moves the focus.
+  const searchExpanded = useMemo(() => {
+    const ids = new Set<string>();
+    if (!searchQuery) return ids;
+    let fid = searchMatches[searchFocusIdx]?.folder_id ?? null;
+    while (fid) {
+      ids.add(fid);
+      fid = folderById.get(fid)?.parent_id ?? null;
     }
-    toExpand.forEach((id) => expandFolder(id));
-    if (searchMatches[0]) selectConnection(searchMatches[0].id);
+    return ids;
+  }, [searchQuery, searchMatches, searchFocusIdx, folderById]);
+
+  // Reset focus to the first result whenever the query changes, and preview it.
+  useEffect(() => {
+    setSearchFocusIdx(0);
+    if (searchQuery && searchMatches[0]) selectConnection(searchMatches[0].id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery]);
 
-  // Scroll focused match into view whenever focus index changes
+  // Jump straight to the focused match in the tree — instant scroll (no
+  // smooth-scroll jank). Runs after the ancestor chain above has expanded it.
   useEffect(() => {
-    if (!searchQuery || !searchMatches[searchFocusIdx]) return;
-    const id = searchMatches[searchFocusIdx].id;
-    document.querySelector(`[data-conn-id="${id}"]`)
-      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }, [searchFocusIdx, searchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!searchQuery) return;
+    const id = searchMatches[searchFocusIdx]?.id;
+    if (id) {
+      document.querySelector(`[data-conn-id="${id}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+    }
+  }, [searchFocusIdx, searchQuery, searchExpanded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleGroupExpanded = (groupId: string) => {
     setGroupExpanded((prev) => ({ ...prev, [groupId]: !(prev[groupId] ?? true) }));
   };
 
-  const isGroupExpanded = (groupId: string) => groupExpanded[groupId] ?? true;
+  // During a search every group is treated as open so matches in any database
+  // are reachable; otherwise honour the user's per-group toggle (default open).
+  const isGroupExpanded = (groupId: string) =>
+    searchQuery ? true : (groupExpanded[groupId] ?? true);
 
   const startCreateFolder = (parentId: string | null = null, groupId: string | null = null) => {
     setNewFolderName("");
@@ -269,6 +336,11 @@ export function Sidebar() {
   const cancelRenameFolder = () => { setRenamingFolderId(null); setRenameFolderName(""); };
 
   const removeFolder = async (folder: FolderType) => {
+    const ok = await ask(t("deleteFolderConfirm").replace("{name}", folder.name), {
+      title: t("delete"),
+      kind: "warning",
+    });
+    if (!ok) return;
     try {
       await deleteFolder(folder.id);
       setFolders(await refetchFolders());
@@ -300,8 +372,11 @@ export function Sidebar() {
   };
 
   const removeGroup = async (group: Group) => {
-    if (groups.length <= 1) return; // cannot delete last group
-    if (!confirm(t("deleteGroupConfirm"))) return;
+    const ok = await ask(t("deleteGroupConfirm").replace("{name}", group.name), {
+      title: t("delete"),
+      kind: "warning",
+    });
+    if (!ok) return;
     try {
       await deleteGroup(group.id);
       setGroups(await getGroups());
@@ -519,7 +594,7 @@ export function Sidebar() {
       { label: t("newFolder"), icon: <FolderPlus size={12} />, action: () => startCreateFolder(null, group.id) },
       { label: t("rename"), icon: <Edit2 size={12} />, action: () => startRenameGroup(group) },
       { separator: true },
-      { label: t("delete"), icon: <Trash2 size={12} />, action: () => removeGroup(group), danger: true, disabled: groups.length <= 1 },
+      { label: t("delete"), icon: <Trash2 size={12} />, action: () => removeGroup(group), danger: true },
     ]);
 
   const duplicate = async (conn: Connection) => {
@@ -624,12 +699,19 @@ export function Sidebar() {
     ? searchMatches[searchFocusIdx].id
     : null;
 
+  // Folders the tree should render as open: the ones the user opened, plus the
+  // ancestor chain of the focused search match (so it's revealed in place).
+  const effectiveExpanded = searchQuery
+    ? new Set<string>([...expandedFolders, ...searchExpanded])
+    : expandedFolders;
+
   // Shared props passed down to every FolderItem / ConnItem
   const sharedProps = {
     allFolders: folders,
     allConnections: connections,
     openTab,
-    toggleFolder,
+    expandedFolders: effectiveExpanded,
+    onToggleFolder: toggleFolderExpand,
     onConnContextMenu: connMenu,
     onFolderContextMenu: folderMenu,
     selectedId: selectedConnectionId,
@@ -699,11 +781,26 @@ export function Sidebar() {
           />
           <div className="ml-auto flex items-center gap-0.5">
             <button
+              onClick={expandAllFolders}
+              className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+              title={t("expandAll")}
+            >
+              <Plus size={14} />
+            </button>
+            <button
+              onClick={collapseAllFolders}
+              className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+              title={t("collapseAll")}
+            >
+              <Minus size={14} />
+            </button>
+            <span className="w-px h-4 bg-[var(--color-border)] mx-0.5" />
+            <button
               onClick={() => startNewConnection(quickCtxFolderId, quickCtxGroupId || groups[0]?.id, t("newConnectionMenu"))}
               className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
               title={t("newConnection")}
             >
-              <Plus size={14} />
+              <Plug size={14} />
             </button>
             <button
               onClick={() => startCreateFolder(quickCtxFolderId, quickCtxGroupId || groups[0]?.id)}
@@ -748,7 +845,7 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Connection list — always tree view; search highlights matches in-place */}
+      {/* Connection list — tree view; search reveals & jumps to the focused match */}
       <div className="flex-1 overflow-y-auto min-h-0 py-0.5">
         {/* New group input */}
         {creatingGroup && (
@@ -903,11 +1000,11 @@ export function Sidebar() {
 
         {groups.length === 0 && (
           <div className="px-4 py-6 text-center text-[var(--color-text-muted)] text-xs">
-            <Terminal size={20} className="mx-auto mb-2 opacity-30" />
-            <p>{t("noConnectionsYet")}</p>
+            <Database size={20} className="mx-auto mb-2 opacity-30" />
+            <p>{t("noDatabasesYet")}</p>
             <button onClick={() => setCreatingGroup(true)}
               className="mt-1 text-[var(--color-accent)] hover:text-[var(--color-accent-hover)]">
-              {t("addFirst")}
+              {t("createFirstDatabase")}
             </button>
           </div>
         )}
@@ -1008,7 +1105,8 @@ interface SharedProps {
   allFolders: FolderType[];
   allConnections: Connection[];
   openTab: (c: Connection) => void;
-  toggleFolder: (id: string) => void;
+  expandedFolders: Set<string>;
+  onToggleFolder: (id: string) => void;
   onConnContextMenu: (e: React.MouseEvent, c: Connection) => void;
   onFolderContextMenu: (e: React.MouseEvent, f: FolderType) => void;
   selectedId: string | null;
@@ -1044,7 +1142,7 @@ function FolderItem({
 }: { folder: FolderType; continuations: boolean[]; isLast: boolean } & SharedProps) {
   const t = useT();
   const {
-    allFolders, allConnections, openTab, toggleFolder,
+    allFolders, allConnections, openTab, expandedFolders, onToggleFolder,
     onConnContextMenu, onFolderContextMenu, selectedId, onSelect, onFolderClick,
     onConnHint, onFolderHint,
     renamingFolderId, renameFolderName, onRenameChange, onRenameConfirm, onRenameCancel, renameInputRef,
@@ -1054,11 +1152,12 @@ function FolderItem({
     searchMatchIds, searchFocusId,
   } = shared;
 
+  const expanded = expandedFolders.has(folder.id);
   const subfolders = allFolders.filter((f) => f.parent_id === folder.id);
   const myConns = allConnections.filter((c) => c.folder_id === folder.id);
 
   const isFolderDropTarget = dropTarget === `folder:${folder.id}`;
-  const Icon = folder.expanded ? FolderOpen : Folder;
+  const Icon = expanded ? FolderOpen : Folder;
   const isRenaming = renamingFolderId === folder.id;
   const creatingSubfolder = creatingFolder && newFolderParentId === folder.id;
   const childContinuations = [...continuations, !isLast];
@@ -1090,7 +1189,7 @@ function FolderItem({
       ) : (
         <button
           data-folder-id={folder.id}
-          onClick={() => { toggleFolder(folder.id); onFolderHint(folder); onFolderClick(folder); }}
+          onClick={() => { onToggleFolder(folder.id); onFolderHint(folder); onFolderClick(folder); }}
           onPointerDown={(e) => onFolderPointerDown(folder, e.clientX, e.clientY)}
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
           className={[
@@ -1103,13 +1202,13 @@ function FolderItem({
           <TreePrefix continuations={continuations} isLast={isLast} />
           <Icon size={12} className="text-amber-400 shrink-0" />
           <span className="text-[13px] truncate flex-1 ml-1 text-left font-medium">{folder.name}</span>
-          {folder.expanded
+          {expanded
             ? <ChevronDown size={9} className="shrink-0 opacity-40 mr-0.5" />
             : <ChevronRight size={9} className="shrink-0 opacity-30 mr-0.5" />}
         </button>
       )}
 
-      {folder.expanded && (
+      {expanded && (
         <div>
           {creatingSubfolder && (
             <div className="flex items-center gap-1 py-0.5 pr-2">
