@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
-  Plus, Search, FolderOpen, Folder, Terminal,
+  Plus, Minus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
   ChevronRight, ChevronDown, Database, X, Bell, Globe,
 } from "lucide-react";
@@ -156,6 +156,8 @@ export function Sidebar() {
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  const expandAllFolders = () => setExpandedFolders(new Set(folders.map((f) => f.id)));
+  const collapseAllFolders = () => setExpandedFolders(new Set());
 
   // Group renaming
   const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
@@ -779,11 +781,26 @@ export function Sidebar() {
           />
           <div className="ml-auto flex items-center gap-0.5">
             <button
+              onClick={expandAllFolders}
+              className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+              title={t("expandAll")}
+            >
+              <Plus size={14} />
+            </button>
+            <button
+              onClick={collapseAllFolders}
+              className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
+              title={t("collapseAll")}
+            >
+              <Minus size={14} />
+            </button>
+            <span className="w-px h-4 bg-[var(--color-border)] mx-0.5" />
+            <button
               onClick={() => startNewConnection(quickCtxFolderId, quickCtxGroupId || groups[0]?.id, t("newConnectionMenu"))}
               className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
               title={t("newConnection")}
             >
-              <Plus size={14} />
+              <Plug size={14} />
             </button>
             <button
               onClick={() => startCreateFolder(quickCtxFolderId, quickCtxGroupId || groups[0]?.id)}

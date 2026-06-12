@@ -1,10 +1,15 @@
-import { Terminal, Monitor, Download } from "lucide-react";
+import { Terminal, Monitor, Download, FileInput } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT } from "../../store/useI18nStore";
 
 export function Welcome() {
   const { startNewConnection } = useAppStore();
   const t = useT();
+
+  // Import flows live in the MenuBar (dialog + progress wiring); fire the same
+  // events it listens for instead of duplicating that logic here.
+  const importJson = () => window.dispatchEvent(new Event("orbitalterm:importJson"));
+  const importMremoteng = () => window.dispatchEvent(new Event("orbitalterm:importMremoteng"));
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8 bg-[var(--color-bg-base)] h-full">
@@ -20,25 +25,31 @@ export function Welcome() {
         </p>
       </div>
 
-      <div className="grid grid-cols-3 gap-3 max-w-lg">
+      <div className="grid grid-cols-2 gap-3 max-w-md">
         <ActionCard
           icon={<Terminal size={18} />}
           title={t("welcomeNewSsh")}
           desc={t("welcomeNewSshDesc")}
-          onClick={startNewConnection}
+          onClick={() => startNewConnection(null, null, t("welcomeNewSsh"), "ssh")}
           accent
         />
         <ActionCard
           icon={<Monitor size={18} />}
           title={t("welcomeNewRdp")}
           desc={t("welcomeNewRdpDesc")}
-          onClick={startNewConnection}
+          onClick={() => startNewConnection(null, null, t("welcomeNewRdp"), "rdp")}
         />
         <ActionCard
           icon={<Download size={18} />}
-          title={t("welcomeImport")}
-          desc={t("welcomeImportDesc")}
-          onClick={() => {}}
+          title={t("welcomeImportOrbital")}
+          desc={t("welcomeImportOrbitalDesc")}
+          onClick={importJson}
+        />
+        <ActionCard
+          icon={<FileInput size={18} />}
+          title={t("welcomeImportMrng")}
+          desc={t("welcomeImportMrngDesc")}
+          onClick={importMremoteng}
         />
       </div>
 

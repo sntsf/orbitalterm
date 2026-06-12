@@ -185,6 +185,22 @@ export function MenuBar() {
     }
   };
 
+  // Let other screens (e.g. the Welcome panel) trigger the same import flows
+  // without duplicating the dialog + progress-event wiring. A ref keeps the
+  // listeners pointed at the latest handlers without re-registering each render.
+  const importHandlers = useRef({ handleImport, handleImportMremoteng });
+  importHandlers.current = { handleImport, handleImportMremoteng };
+  useEffect(() => {
+    const onJson = () => importHandlers.current.handleImport();
+    const onMrng = () => importHandlers.current.handleImportMremoteng();
+    window.addEventListener("orbitalterm:importJson", onJson);
+    window.addEventListener("orbitalterm:importMremoteng", onMrng);
+    return () => {
+      window.removeEventListener("orbitalterm:importJson", onJson);
+      window.removeEventListener("orbitalterm:importMremoteng", onMrng);
+    };
+  }, []);
+
   const handleExport = () => {
     setOpenMenuId(null);
     setShowExport(true);
