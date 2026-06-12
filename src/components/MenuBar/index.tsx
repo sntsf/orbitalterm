@@ -129,6 +129,7 @@ export function MenuBar() {
       const count = await importFromFile(path);
       setConnections(await getConnections());
       setFolders(await getFolders());
+      setGroups(await getGroups());
       showToast(`${count} ${t("importedOk")}`);
     } catch (err) {
       showToast(String(err), false);

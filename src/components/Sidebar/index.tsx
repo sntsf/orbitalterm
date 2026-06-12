@@ -143,9 +143,11 @@ export function Sidebar() {
   // so the toolbar buttons create inside the right place.
   const [quickCtxFolderId, setQuickCtxFolderId] = useState<string | null>(null);
   const [quickCtxGroupId, setQuickCtxGroupId] = useState<string>("");
-  // Initialise groupId from the first group once groups load
+  // Initialise groupId from the first group once groups load, and clear any
+  // stale reference if the tracked group was deleted (e.g. last DB removed).
   useEffect(() => {
-    if (quickCtxGroupId === "" && groups.length > 0) setQuickCtxGroupId(groups[0].id);
+    const exists = groups.some((g) => g.id === quickCtxGroupId);
+    if (!exists) setQuickCtxGroupId(groups[0]?.id ?? "");
   }, [groups, quickCtxGroupId]);
 
   // Search keyboard navigation
@@ -300,7 +302,6 @@ export function Sidebar() {
   };
 
   const removeGroup = async (group: Group) => {
-    if (groups.length <= 1) return; // cannot delete last group
     if (!confirm(t("deleteGroupConfirm"))) return;
     try {
       await deleteGroup(group.id);
@@ -519,7 +520,7 @@ export function Sidebar() {
       { label: t("newFolder"), icon: <FolderPlus size={12} />, action: () => startCreateFolder(null, group.id) },
       { label: t("rename"), icon: <Edit2 size={12} />, action: () => startRenameGroup(group) },
       { separator: true },
-      { label: t("delete"), icon: <Trash2 size={12} />, action: () => removeGroup(group), danger: true, disabled: groups.length <= 1 },
+      { label: t("delete"), icon: <Trash2 size={12} />, action: () => removeGroup(group), danger: true },
     ]);
 
   const duplicate = async (conn: Connection) => {
@@ -903,11 +904,11 @@ export function Sidebar() {
 
         {groups.length === 0 && (
           <div className="px-4 py-6 text-center text-[var(--color-text-muted)] text-xs">
-            <Terminal size={20} className="mx-auto mb-2 opacity-30" />
-            <p>{t("noConnectionsYet")}</p>
+            <Database size={20} className="mx-auto mb-2 opacity-30" />
+            <p>{t("noDatabasesYet")}</p>
             <button onClick={() => setCreatingGroup(true)}
               className="mt-1 text-[var(--color-accent)] hover:text-[var(--color-accent-hover)]">
-              {t("addFirst")}
+              {t("createFirstDatabase")}
             </button>
           </div>
         )}
