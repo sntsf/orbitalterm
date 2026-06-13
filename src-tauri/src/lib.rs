@@ -12,7 +12,7 @@ use commands::connections::{
     delete_connection, delete_folder, delete_group, export_connections, export_selected_to_file,
     export_to_file, get_connections, get_folders, get_groups, import_connections, import_from_file,
     import_from_mremoteng, move_folder_to_group, reorder_connections, reorder_folders, rename_group,
-    save_connection, save_folder, save_group, update_connection,
+    save_connection, save_folder, save_group, update_connection, update_folder, update_group,
 };
 use commands::local_fs::{local_delete, local_get_home, local_get_parent, local_list_dir, local_mkdir};
 use commands::ftp::{
@@ -170,6 +170,7 @@ pub fn run() {
             move_folder_to_group,
             get_folders,
             save_folder,
+            update_folder,
             delete_folder,
             export_connections,
             export_to_file,
@@ -181,6 +182,7 @@ pub fn run() {
             get_groups,
             save_group,
             rename_group,
+            update_group,
             delete_group,
             // Local filesystem
             local_list_dir,

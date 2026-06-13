@@ -5,6 +5,8 @@ export type ConnectionStatus = "idle" | "connecting" | "connected" | "error";
 export interface Group {
   id: string;
   name: string;
+  description: string;
+  color: string;
 }
 
 export interface Connection {
@@ -36,6 +38,8 @@ export interface Folder {
   expanded: boolean;
   group_id: string;
   sort_order: number;
+  description: string;
+  color: string;
 }
 
 export interface Tab {

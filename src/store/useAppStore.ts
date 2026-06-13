@@ -9,6 +9,8 @@ interface AppStore {
   groups: Group[];
   searchQuery: string;
   selectedConnectionId: string | null;
+  selectedFolderId: string | null;
+  selectedGroupId: string | null;
   isCreatingNew: boolean;
   newConnectionFolderId: string | null;
   newConnectionGroupId: string | null;
@@ -22,6 +24,8 @@ interface AppStore {
   setGroups: (groups: Group[]) => void;
   setSearchQuery: (q: string) => void;
   selectConnection: (id: string | null) => void;
+  selectFolder: (id: string | null) => void;
+  selectGroup: (id: string | null) => void;
   setIsCreatingNew: (v: boolean) => void;
   startNewConnection: (folderId?: string | null, groupId?: string | null, name?: string, type?: ConnectionType) => Promise<void>;
   toggleSidebar: () => void;
@@ -49,6 +53,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   groups: [],
   searchQuery: "",
   selectedConnectionId: null,
+  selectedFolderId: null,
+  selectedGroupId: null,
   isCreatingNew: false,
   newConnectionFolderId: null,
   newConnectionGroupId: null,
@@ -63,8 +69,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setGroups: (groups) => set({ groups }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
 
+  // Selecting any one item clears the others — the properties panel shows
+  // whichever of connection / folder / group is currently selected.
   selectConnection: (selectedConnectionId) =>
-    set({ selectedConnectionId, isCreatingNew: false }),
+    set({ selectedConnectionId, selectedFolderId: null, selectedGroupId: null, isCreatingNew: false }),
+  selectFolder: (selectedFolderId) =>
+    set({ selectedFolderId, selectedConnectionId: null, selectedGroupId: null, isCreatingNew: false }),
+  selectGroup: (selectedGroupId) =>
+    set({ selectedGroupId, selectedConnectionId: null, selectedFolderId: null, isCreatingNew: false }),
 
   setIsCreatingNew: (isCreatingNew) => set({ isCreatingNew }),
 
@@ -91,7 +103,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         custom_hosts: "",
       });
       const connections = await dbGetConnections();
-      set({ connections, selectedConnectionId: created.id, isCreatingNew: false });
+      set({ connections, selectedConnectionId: created.id, selectedFolderId: null, selectedGroupId: null, isCreatingNew: false });
     } catch (err) {
       console.error("[startNewConnection]", err);
     }

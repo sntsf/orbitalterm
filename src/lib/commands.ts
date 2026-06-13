@@ -29,6 +29,10 @@ export async function saveFolder(name: string, parentId: string | null, groupId?
   return invoke("save_folder", { name, parentId, groupId: groupId ?? null });
 }
 
+export async function updateFolder(id: string, name: string, description: string, color: string): Promise<void> {
+  return invoke("update_folder", { id, name, description, color });
+}
+
 export async function deleteFolder(id: string): Promise<void> {
   return invoke("delete_folder", { id });
 }
@@ -91,6 +95,10 @@ export async function saveGroup(name: string): Promise<Group> {
 
 export async function renameGroup(id: string, name: string): Promise<void> {
   return invoke("rename_group", { id, name });
+}
+
+export async function updateGroup(id: string, name: string, description: string, color: string): Promise<void> {
+  return invoke("update_group", { id, name, description, color });
 }
 
 export async function deleteGroup(id: string): Promise<void> {

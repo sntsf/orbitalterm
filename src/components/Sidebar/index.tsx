@@ -16,6 +16,7 @@ import {
 import { ContextMenu, useContextMenu } from "../ContextMenu";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
+import { iconColorClass } from "../../lib/folderColors";
 import { TuxIcon, WindowsIcon, VncIcon, SftpIcon } from "../ConnectionIcons";
 import type { Connection, Folder as FolderType, Group } from "../../types";
 
@@ -87,6 +88,8 @@ export function Sidebar() {
   const setGroups = useAppStore((s) => s.setGroups);
   const setSearchQuery = useAppStore((s) => s.setSearchQuery);
   const selectConnection = useAppStore((s) => s.selectConnection);
+  const selectFolder = useAppStore((s) => s.selectFolder);
+  const selectGroup = useAppStore((s) => s.selectGroup);
   const openTab = useAppStore((s) => s.openTab);
   const startNewConnection = useAppStore((s) => s.startNewConnection);
   const setSidebarHint = useAppStore((s) => s.setSidebarHint);
@@ -272,23 +275,27 @@ export function Sidebar() {
     return ids;
   }, [searchQuery, searchMatches, searchFocusIdx, folderById]);
 
-  // Reset focus to the first result whenever the query changes, and preview it.
+  // Move the search focus to a match: select it and scroll it into view
+  // (instant). Called ONLY when the query changes and on ↑/↓ — never on
+  // unrelated re-renders — so a manual click in the tree is never yanked back
+  // to the search match (this is the mRemoteNG behaviour the user expects).
+  const focusMatch = (idx: number) => {
+    setSearchFocusIdx(idx);
+    const m = searchMatches[idx];
+    if (!m) return;
+    selectConnection(m.id);
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-conn-id="${m.id}"]`)?.scrollIntoView({ block: "nearest" });
+    });
+  };
+
+  // On a new query, jump once to the first match. Afterwards the user is free
+  // to click around; only ↑/↓ in the search box moves the focus again.
   useEffect(() => {
-    setSearchFocusIdx(0);
-    if (searchQuery && searchMatches[0]) selectConnection(searchMatches[0].id);
+    if (searchQuery && searchMatches.length) focusMatch(0);
+    else setSearchFocusIdx(0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery]);
-
-  // Jump straight to the focused match in the tree — instant scroll (no
-  // smooth-scroll jank). Runs after the ancestor chain above has expanded it.
-  useEffect(() => {
-    if (!searchQuery) return;
-    const id = searchMatches[searchFocusIdx]?.id;
-    if (id) {
-      document.querySelector(`[data-conn-id="${id}"]`)
-        ?.scrollIntoView({ block: "nearest" });
-    }
-  }, [searchFocusIdx, searchQuery, searchExpanded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleGroupExpanded = (groupId: string) => {
     setGroupExpanded((prev) => ({ ...prev, [groupId]: !(prev[groupId] ?? true) }));
@@ -680,14 +687,10 @@ export function Sidebar() {
     if (!searchQuery || searchMatches.length === 0) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      const next = (searchFocusIdx + 1) % searchMatches.length;
-      setSearchFocusIdx(next);
-      selectConnection(searchMatches[next].id);
+      focusMatch((searchFocusIdx + 1) % searchMatches.length);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      const prev = (searchFocusIdx - 1 + searchMatches.length) % searchMatches.length;
-      setSearchFocusIdx(prev);
-      selectConnection(searchMatches[prev].id);
+      focusMatch((searchFocusIdx - 1 + searchMatches.length) % searchMatches.length);
     } else if (e.key === "Enter") {
       const conn = searchMatches[searchFocusIdx];
       if (conn) openTab(conn);
@@ -723,6 +726,7 @@ export function Sidebar() {
     onFolderClick: (folder: FolderType) => {
       setQuickCtxFolderId(folder.id);
       setQuickCtxGroupId(folder.group_id);
+      selectFolder(folder.id);
     },
     onConnHint: (conn: Connection) => setSidebarHint(buildConnHint(conn, lang)),
     onFolderHint: (folder: FolderType) => setSidebarHint(buildFolderHint(folder, lang, connections)),
@@ -898,7 +902,7 @@ export function Sidebar() {
               ) : (
                 <button
                   data-group-id={group.id}
-                  onClick={() => { toggleGroupExpanded(group.id); setSidebarHint(buildGroupHint(group, lang, connections)); setQuickCtxFolderId(null); setQuickCtxGroupId(group.id); }}
+                  onClick={() => { toggleGroupExpanded(group.id); selectGroup(group.id); setSidebarHint(buildGroupHint(group, lang, connections)); setQuickCtxFolderId(null); setQuickCtxGroupId(group.id); }}
                   onContextMenu={(e) => groupMenu(e, group)}
                   className={[
                     "flex items-center gap-1.5 w-full px-2 py-1 transition-colors",
@@ -910,7 +914,7 @@ export function Sidebar() {
                   {expanded
                     ? <ChevronDown size={11} className="shrink-0" />
                     : <ChevronRight size={11} className="shrink-0" />}
-                  <Database size={13} className="shrink-0 text-[var(--color-accent)]" />
+                  <Database size={13} className={`shrink-0 ${iconColorClass(group.color, "text-[var(--color-accent)]")}`} />
                   <span className="text-[13px] font-medium flex-1 text-left text-[var(--color-text-primary)]">{group.name}</span>
                   <span className="text-[11px] text-[var(--color-text-muted)] opacity-60">{groupConnCount}</span>
                 </button>
@@ -1158,6 +1162,7 @@ function FolderItem({
 
   const isFolderDropTarget = dropTarget === `folder:${folder.id}`;
   const Icon = expanded ? FolderOpen : Folder;
+  const folderColor = iconColorClass(folder.color);
   const isRenaming = renamingFolderId === folder.id;
   const creatingSubfolder = creatingFolder && newFolderParentId === folder.id;
   const childContinuations = [...continuations, !isLast];
@@ -1172,7 +1177,7 @@ function FolderItem({
       {isRenaming ? (
         <div className="flex items-center gap-1 py-0.5 pr-3">
           <TreePrefix continuations={continuations} isLast={isLast} />
-          <Icon size={12} className="text-amber-400 shrink-0" />
+          <Icon size={12} className={`${folderColor} shrink-0`} />
           <input
             ref={renameInputRef}
             type="text"
@@ -1200,7 +1205,7 @@ function FolderItem({
           ].join(" ")}
         >
           <TreePrefix continuations={continuations} isLast={isLast} />
-          <Icon size={12} className="text-amber-400 shrink-0" />
+          <Icon size={12} className={`${folderColor} shrink-0`} />
           <span className="text-[13px] truncate flex-1 ml-1 text-left font-medium">{folder.name}</span>
           {expanded
             ? <ChevronDown size={9} className="shrink-0 opacity-40 mr-0.5" />

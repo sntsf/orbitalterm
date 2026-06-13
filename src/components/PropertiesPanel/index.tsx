@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Plug, Eye, EyeOff, Info, Database } from "lucide-react";
+import { Plug, Eye, EyeOff, Info, Database, Folder as FolderIcon, type LucideIcon } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore } from "../../store/useI18nStore";
 import { useImportStore } from "../../store/useImportStore";
@@ -9,9 +9,14 @@ import {
   savePassword,
   deletePassword,
   hasPassword,
+  updateFolder,
+  getFolders,
+  updateGroup,
+  getGroups,
 } from "../../lib/commands";
 import type { AuthType, ConnectionType } from "../../types";
 import { CONN_ICONS, DEFAULT_CONN_ICON, ConnIconDisplay, type ConnIconKey } from "../../lib/connIcons";
+import { ICON_COLORS } from "../../lib/folderColors";
 
 const DEFAULT_PORTS: Record<ConnectionType, number> = {
   ssh: 22,
@@ -68,7 +73,16 @@ const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string 
   },
 };
 
+// Router: the panel shows whichever of connection / folder / group is selected.
 export function PropertiesPanel() {
+  const selectedFolderId = useAppStore((s) => s.selectedFolderId);
+  const selectedGroupId = useAppStore((s) => s.selectedGroupId);
+  if (selectedFolderId) return <FolderProperties folderId={selectedFolderId} />;
+  if (selectedGroupId) return <GroupProperties groupId={selectedGroupId} />;
+  return <ConnectionProperties />;
+}
+
+function ConnectionProperties() {
   const t = useT();
   const { lang } = useI18nStore();
   const {
@@ -488,3 +502,152 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 const inp =
   "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-px text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";
+
+// ── Folder / Group properties ──────────────────────────────────────────────────
+
+function FolderProperties({ folderId }: { folderId: string }) {
+  const folders = useAppStore((s) => s.folders);
+  const setFolders = useAppStore((s) => s.setFolders);
+  const folder = folders.find((f) => f.id === folderId);
+  return (
+    <ItemEditor
+      key={folderId}
+      missing={!folder}
+      Icon={FolderIcon}
+      defaultColorCls="text-amber-400"
+      initial={{ name: folder?.name ?? "", description: folder?.description ?? "", color: folder?.color ?? "" }}
+      onSave={async (n, d, c) => {
+        if (!folder) return;
+        await updateFolder(folder.id, n, d, c);
+        setFolders(await getFolders());
+      }}
+    />
+  );
+}
+
+function GroupProperties({ groupId }: { groupId: string }) {
+  const groups = useAppStore((s) => s.groups);
+  const setGroups = useAppStore((s) => s.setGroups);
+  const group = groups.find((g) => g.id === groupId);
+  return (
+    <ItemEditor
+      key={groupId}
+      missing={!group}
+      Icon={Database}
+      defaultColorCls=""
+      initial={{ name: group?.name ?? "", description: group?.description ?? "", color: group?.color ?? "" }}
+      onSave={async (n, d, c) => {
+        if (!group) return;
+        await updateGroup(group.id, n, d, c);
+        setGroups(await getGroups());
+      }}
+    />
+  );
+}
+
+// Shared editor for folders and connection databases. Remounted per item (via
+// `key`), so it initialises from `initial` once and never clobbers in-progress
+// edits when the list refetches after a save.
+function ItemEditor({
+  missing, Icon, defaultColorCls, initial, onSave,
+}: {
+  missing: boolean;
+  Icon: LucideIcon;
+  defaultColorCls: string;
+  initial: { name: string; description: string; color: string };
+  onSave: (name: string, description: string, color: string) => Promise<void>;
+}) {
+  const t = useT();
+  const { lang } = useI18nStore();
+  const sidebarHint = useAppStore((s) => s.sidebarHint);
+
+  const [name, setName] = useState(initial.name);
+  const [description, setDescription] = useState(initial.description);
+  const [color, setColor] = useState(initial.color);
+  const firstRun = useRef(true);
+  const saveRef = useRef(onSave);
+  saveRef.current = onSave;
+
+  // Debounced auto-save, skipping the initial mount.
+  useEffect(() => {
+    if (firstRun.current) { firstRun.current = false; return; }
+    const timer = setTimeout(() => {
+      saveRef.current(name.trim() || initial.name, description.trim(), color).catch(console.error);
+    }, 600);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, description, color]);
+
+  const hintLang = lang === "es" ? "es" : "en";
+
+  if (missing) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex-1 flex items-center justify-center text-[var(--color-text-muted)] text-xs px-4 text-center">
+          {t("propSelectOrCreate")}
+        </div>
+        <HintBox hint={sidebarHint} hintLang={hintLang} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-full overflow-hidden">
+      <div className="flex items-center gap-1.5 px-3 py-0.5 border-b border-[var(--color-border)] shrink-0">
+        <Icon size={13} className="text-[var(--color-text-muted)] shrink-0" />
+        <span className="text-[11px] uppercase tracking-wider text-[var(--color-text-muted)] font-medium">
+          {t("propProperties")}
+        </span>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-3 py-1.5 space-y-1.5 min-h-0">
+        <Row label={t("propName")}>
+          <input value={name} onChange={(e) => setName(e.target.value)} className={inp} />
+        </Row>
+        <Row label={t("propColor")}>
+          <IconColorPicker Icon={Icon} value={color} defaultColorCls={defaultColorCls} onChange={setColor} />
+        </Row>
+        <Row label={t("propDesc")}>
+          <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3}
+            placeholder="…" className={inp + " resize-none"} />
+        </Row>
+      </div>
+
+      <HintBox hint={sidebarHint} hintLang={hintLang} />
+    </div>
+  );
+}
+
+function IconColorPicker({
+  Icon, value, defaultColorCls, onChange,
+}: {
+  Icon: LucideIcon;
+  value: string;
+  defaultColorCls: string;
+  onChange: (color: string) => void;
+}) {
+  const { lang } = useI18nStore();
+  return (
+    <div className="flex flex-wrap gap-1">
+      {ICON_COLORS.map((c) => {
+        const selected = value === c.key || (!value && c.cls === defaultColorCls);
+        return (
+          <button
+            key={c.key}
+            type="button"
+            title={lang === "es" ? c.label_es : c.label_en}
+            onClick={() => onChange(c.key)}
+            className={[
+              "p-1 rounded border transition-colors",
+              selected
+                ? "border-[var(--color-accent)] bg-[var(--color-bg-elevated)]"
+                : "border-transparent hover:bg-[var(--color-bg-hover)]",
+            ].join(" ")}
+          >
+            <Icon size={16} className={c.cls} />
+          </button>
+        );
+      })}
+    </div>
+  );
+}

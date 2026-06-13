@@ -8,6 +8,10 @@ use crate::db;
 pub struct Group {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub color: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -98,6 +102,10 @@ pub struct Folder {
     pub expanded: bool,
     pub group_id: String,
     pub sort_order: i64,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub color: String,
 }
 
 fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
@@ -317,7 +325,7 @@ pub fn move_folder_to_group(folder_id: String, target_group_id: String) -> Resul
 pub fn get_folders() -> Result<Vec<Folder>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, name, parent_id, group_id, sort_order FROM folders ORDER BY sort_order ASC, name COLLATE NOCASE")
+        .prepare("SELECT id, name, parent_id, group_id, sort_order, description, color FROM folders ORDER BY sort_order ASC, name COLLATE NOCASE")
         .map_err(|e| e.to_string())?;
 
     let rows = stmt.query_map([], |row| {
@@ -328,6 +336,8 @@ pub fn get_folders() -> Result<Vec<Folder>, String> {
             expanded: true,
             group_id: row.get::<_, String>(3).unwrap_or_default(),
             sort_order: row.get(4).unwrap_or(0),
+            description: row.get::<_, String>(5).unwrap_or_default(),
+            color: row.get::<_, String>(6).unwrap_or_default(),
         })
     })
     .map_err(|e| e.to_string())?
@@ -380,7 +390,21 @@ pub fn save_folder(name: String, parent_id: Option<String>, group_id: Option<Str
         params![id, name, parent_id, resolved_group_id, sort_order],
     )
     .map_err(|e| e.to_string())?;
-    Ok(Folder { id, name, parent_id, expanded: true, group_id: resolved_group_id, sort_order })
+    Ok(Folder {
+        id, name, parent_id, expanded: true, group_id: resolved_group_id, sort_order,
+        description: String::new(), color: String::new(),
+    })
+}
+
+#[tauri::command]
+pub fn update_folder(id: String, name: String, description: String, color: String) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    db.execute(
+        "UPDATE folders SET name = ?1, description = ?2, color = ?3 WHERE id = ?4",
+        params![name, description, color, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -397,10 +421,15 @@ pub fn delete_folder(id: String) -> Result<(), String> {
 pub fn get_groups() -> Result<Vec<Group>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, name FROM groups ORDER BY rowid DESC")
+        .prepare("SELECT id, name, description, color FROM groups ORDER BY rowid DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| {
-        Ok(Group { id: row.get(0)?, name: row.get(1)? })
+        Ok(Group {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get::<_, String>(2).unwrap_or_default(),
+            color: row.get::<_, String>(3).unwrap_or_default(),
+        })
     })
     .map_err(|e| e.to_string())?
     .collect::<Result<Vec<_>, _>>()
@@ -417,7 +446,7 @@ pub fn save_group(name: String) -> Result<Group, String> {
         params![id, name],
     )
     .map_err(|e| e.to_string())?;
-    Ok(Group { id, name })
+    Ok(Group { id, name, description: String::new(), color: String::new() })
 }
 
 #[tauri::command]
@@ -426,6 +455,17 @@ pub fn rename_group(id: String, name: String) -> Result<(), String> {
     db.execute(
         "UPDATE groups SET name = ?1 WHERE id = ?2",
         params![name, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_group(id: String, name: String, description: String, color: String) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    db.execute(
+        "UPDATE groups SET name = ?1, description = ?2, color = ?3 WHERE id = ?4",
+        params![name, description, color, id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -511,8 +551,12 @@ pub fn import_connections(json: String) -> Result<usize, String> {
             let new_id = Uuid::new_v4().to_string();
             let name = g["name"].as_str().unwrap_or("Imported Group");
             let _ = db.execute(
-                "INSERT OR IGNORE INTO groups (id, name) VALUES (?1, ?2)",
-                params![new_id, name],
+                "INSERT OR IGNORE INTO groups (id, name, description, color) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    new_id, name,
+                    g["description"].as_str().unwrap_or(""),
+                    g["color"].as_str().unwrap_or(""),
+                ],
             );
             group_id_map.insert(old_id, new_id);
         }
@@ -528,13 +572,15 @@ pub fn import_connections(json: String) -> Result<usize, String> {
                 group_id_map.get(&old_group_id).cloned().unwrap_or_else(|| default_group_id.clone())
             };
             let _ = db.execute(
-                "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id, sort_order, description, color) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     f["id"].as_str().unwrap_or(""),
                     f["name"].as_str().unwrap_or("Imported Folder"),
                     f["parent_id"].as_str(),
                     resolved_group_id,
                     f["sort_order"].as_i64().unwrap_or(0),
+                    f["description"].as_str().unwrap_or(""),
+                    f["color"].as_str().unwrap_or(""),
                 ],
             );
         }
