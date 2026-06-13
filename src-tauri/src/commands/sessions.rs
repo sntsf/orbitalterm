@@ -1,7 +1,7 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use russh::ChannelMsg;
+use tokio::sync::mpsc;
 use rusqlite::params;
-use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -11,7 +11,8 @@ use crate::{
     commands::connections::Connection,
     db,
     rdp::{EmbeddedRdpSessionMap, RdpSessionMap},
-    ssh::{SshSession, SshSessionMap},
+    ssh::{SshCmd, SshSession, SshSessionMap},
+    sftp::SshHandler,
 };
 
 // ── DB helper ────────────────────────────────────────────────────────────────
@@ -119,105 +120,138 @@ pub async fn has_password(connection_id: String) -> Result<bool, String> {
 
 // ── SSH ──────────────────────────────────────────────────────────────────────
 
+/// Sentinel error: the frontend should prompt for the missing username/password
+/// and call `connect_ssh` again with them. Returned when a username is missing
+/// or password auth has no password available.
+pub const NEED_CREDENTIALS: &str = "NEED_CREDENTIALS";
+
 #[tauri::command]
 pub async fn connect_ssh(
     app: AppHandle,
     sessions: State<'_, SshSessionMap>,
     connection_id: String,
+    username: Option<String>,
+    password: Option<String>,
 ) -> Result<String, String> {
     let connection = load_connection(&connection_id)?;
-    let saved_password = get_saved_password(&connection_id);
 
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| e.to_string())?;
+    // Effective username: explicit (prompt) → saved → none (ask the frontend).
+    let username = username
+        .filter(|u| !u.is_empty())
+        .or_else(|| if connection.username.is_empty() { None } else { Some(connection.username.clone()) });
+    let Some(username) = username else { return Err(NEED_CREDENTIALS.to_string()); };
 
-    // Build ssh command — CommandBuilder::arg returns () so no chaining
-    let mut cmd = CommandBuilder::new("ssh");
-    cmd.arg("-o");
-    cmd.arg("StrictHostKeyChecking=accept-new");
-    cmd.arg("-o");
-    cmd.arg("ServerAliveInterval=30");
-    cmd.arg("-o");
-    cmd.arg("ConnectTimeout=10");
-    cmd.arg("-p");
-    cmd.arg(connection.port.to_string());
+    let config = Arc::new(russh::client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        ..Default::default()
+    });
+    let addr = (connection.host.as_str(), connection.port as u16);
+    let mut sh = russh::client::connect(config, addr, SshHandler)
+        .await
+        .map_err(|e| format!("SSH connect failed: {e}"))?;
 
-    if connection.auth_type == "key" && !connection.key_path.is_empty() {
-        cmd.arg("-i");
-        cmd.arg(&connection.key_path);
-        cmd.arg("-o");
-        cmd.arg("IdentitiesOnly=yes");
-    }
-
-    cmd.arg(format!("{}@{}", connection.username, connection.host));
-
-    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
-
-    let raw_writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-    let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(raw_writer));
-    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-
-    let session_id = Uuid::new_v4().to_string();
-    let sid = session_id.clone();
-    let app_handle = app.clone();
-    let writer_ref = Arc::clone(&writer);
-
-    // Thread 1: stream PTY output to the frontend as ssh-data events.
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        let mut password_injected = false;
-
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
-
-                    if !password_injected {
-                        if let Some(ref pass) = saved_password {
-                            let lower = data.to_lowercase();
-                            if lower.contains("password:") || lower.contains("password for")
-                                || lower.contains("passphrase for")
-                            {
-                                if let Ok(mut w) = writer_ref.lock() {
-                                    let _ = write!(w, "{}\r", pass);
-                                    let _ = w.flush();
-                                    password_injected = true;
-                                }
-                            }
-                        }
-                    }
-
-                    app_handle.emit(&format!("ssh-data-{sid}"), &data).ok();
+    // One russh session authenticates ONCE; the terminal shell and any SFTP
+    // browser then share it (MobaXterm-style single session).
+    match connection.auth_type.as_str() {
+        "key" => {
+            if connection.key_path.is_empty() {
+                return Err("Key path is empty".to_string());
+            }
+            let key = russh_keys::load_secret_key(std::path::Path::new(&connection.key_path), None)
+                .map_err(|e| format!("Failed to load private key: {e}"))?;
+            let ok = sh
+                .authenticate_publickey(&username, Arc::new(key))
+                .await
+                .map_err(|e| format!("Key auth failed: {e}"))?;
+            if !ok { return Err("Key authentication rejected by server".to_string()); }
+        }
+        "agent" => {
+            let mut agent = russh_keys::agent::client::AgentClient::connect_env()
+                .await
+                .map_err(|e| format!("SSH agent not available (SSH_AUTH_SOCK): {e}"))?;
+            let identities = agent
+                .request_identities()
+                .await
+                .map_err(|e| format!("Agent identities request failed: {e}"))?;
+            if identities.is_empty() {
+                return Err("SSH agent has no loaded identities".to_string());
+            }
+            let mut authenticated = false;
+            for key in identities {
+                let (returned_agent, result) = sh.authenticate_future(&username, key, agent).await;
+                agent = returned_agent;
+                match result {
+                    Ok(true) => { authenticated = true; break; }
+                    Ok(false) => {}
+                    Err(e) => return Err(format!("Agent auth attempt failed: {e}")),
                 }
             }
+            if !authenticated { return Err("SSH agent authentication rejected by server".to_string()); }
         }
-        // On Linux the PTY reader reaches EOF when the process exits, which
-        // is sufficient. On Windows the ConPTY may not signal EOF reliably,
-        // so this path is a fallback — Thread 2 is the primary mechanism.
-        app_handle.emit(&format!("ssh-closed-{sid}"), ()).ok();
-    });
-
-    // Thread 2: wait for the child process to exit, then emit ssh-closed.
-    // This is the primary exit detection on Windows, where ConPTY does not
-    // reliably deliver EOF to the PTY reader when the ssh process exits.
-    {
-        let app2 = app.clone();
-        let sid2 = session_id.clone();
-        std::thread::spawn(move || {
-            let mut c = child;
-            let _ = c.wait(); // blocks until ssh process exits
-            app2.emit(&format!("ssh-closed-{sid2}"), ()).ok();
-        });
+        // default: password
+        _ => {
+            let Some(pw) = password.or_else(|| get_saved_password(&connection_id)) else {
+                return Err(NEED_CREDENTIALS.to_string());
+            };
+            let ok = sh
+                .authenticate_password(&username, pw)
+                .await
+                .map_err(|e| format!("Password auth failed: {e}"))?;
+            if !ok { return Err("Password authentication rejected by server".to_string()); }
+        }
     }
 
-    sessions.lock().unwrap().insert(
-        session_id.clone(),
-        SshSession { writer, master: pair.master },
-    );
+    // Open the interactive shell channel (PTY + shell).
+    let mut channel = sh
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("Channel open failed: {e}"))?;
+    channel
+        .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
+        .await
+        .map_err(|e| format!("PTY request failed: {e}"))?;
+    channel
+        .request_shell(false)
+        .await
+        .map_err(|e| format!("Shell request failed: {e}"))?;
 
+    let session_id = Uuid::new_v4().to_string();
+    let (tx, mut rx) = mpsc::unbounded_channel::<SshCmd>();
+    let handle = Arc::new(sh);
+
+    // Pump task: owns the shell channel. Streams remote output to the frontend
+    // and applies input/resize commands. Ends when the channel closes or the
+    // session is dropped (sender closed on disconnect).
+    let app2 = app.clone();
+    let sid2 = session_id.clone();
+    tokio::spawn(async move {
+        let mut channel = channel;
+        loop {
+            tokio::select! {
+                msg = channel.wait() => match msg {
+                    Some(ChannelMsg::Data { data }) => {
+                        let s = String::from_utf8_lossy(&data).to_string();
+                        let _ = app2.emit(&format!("ssh-data-{sid2}"), &s);
+                    }
+                    Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        let s = String::from_utf8_lossy(&data).to_string();
+                        let _ = app2.emit(&format!("ssh-data-{sid2}"), &s);
+                    }
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                    _ => {}
+                },
+                cmd = rx.recv() => match cmd {
+                    Some(SshCmd::Data(d)) => { let _ = channel.data(&d[..]).await; }
+                    Some(SshCmd::Resize(c, r)) => { let _ = channel.window_change(c, r, 0, 0).await; }
+                    None => break,
+                },
+            }
+        }
+        let _ = app2.emit(&format!("ssh-closed-{sid2}"), ());
+    });
+
+    sessions.lock().unwrap().insert(session_id.clone(), SshSession { tx, handle });
     Ok(session_id)
 }
 
@@ -227,15 +261,11 @@ pub async fn send_input(
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    let map = sessions.lock().unwrap();
-    let session = map.get(&session_id).ok_or("Session not found")?;
-    let result = session
-        .writer
-        .lock()
-        .unwrap()
-        .write_all(data.as_bytes())
-        .map_err(|e| e.to_string());
-    result
+    let tx = {
+        let map = sessions.lock().unwrap();
+        map.get(&session_id).ok_or("Session not found")?.tx.clone()
+    };
+    tx.send(SshCmd::Data(data.into_bytes())).map_err(|_| "SSH session closed".to_string())
 }
 
 #[tauri::command]
@@ -245,12 +275,11 @@ pub async fn resize_pty(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let map = sessions.lock().unwrap();
-    let session = map.get(&session_id).ok_or("Session not found")?;
-    session
-        .master
-        .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| e.to_string())
+    let tx = {
+        let map = sessions.lock().unwrap();
+        map.get(&session_id).ok_or("Session not found")?.tx.clone()
+    };
+    tx.send(SshCmd::Resize(cols as u32, rows as u32)).map_err(|_| "SSH session closed".to_string())
 }
 
 #[tauri::command]

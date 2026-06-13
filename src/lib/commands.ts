@@ -125,8 +125,19 @@ export async function copyPassword(fromId: string, toId: string): Promise<void> 
 
 // ── SSH sessions ─────────────────────────────────────────────────────────────
 
-export async function connectSsh(connectionId: string): Promise<string> {
-  return invoke("connect_ssh", { connectionId });
+// Returns the session id. Rejects with "NEED_CREDENTIALS" when a username or
+// password is required (no saved credentials) — the caller should prompt and
+// retry with `username` / `password` filled in.
+export async function connectSsh(
+  connectionId: string,
+  username?: string,
+  password?: string,
+): Promise<string> {
+  return invoke("connect_ssh", {
+    connectionId,
+    username: username ?? null,
+    password: password ?? null,
+  });
 }
 
 export async function sendInput(sessionId: string, data: string): Promise<void> {
@@ -247,6 +258,12 @@ export async function rdpSetClipboard(sessionId: string, text: string): Promise<
 
 export async function sftpConnect(connectionId: string): Promise<string> {
   return invoke("sftp_connect", { connectionId });
+}
+
+// Reuse an existing interactive SSH session's connection for SFTP (shared
+// auth — no separate login).
+export async function sftpConnectFromSsh(sshSessionId: string): Promise<string> {
+  return invoke("sftp_connect_from_ssh", { sshSessionId });
 }
 
 export async function sftpListDir(sessionId: string, path: string): Promise<SftpEntry[]> {

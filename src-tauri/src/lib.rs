@@ -27,8 +27,8 @@ use commands::sessions::{
     save_password, send_input, show_rdp_tab_menu,
 };
 use commands::sftp::{
-    sftp_connect, sftp_create_file, sftp_delete, sftp_disconnect, sftp_download, sftp_list_dir,
-    sftp_mkdir, sftp_rename, sftp_upload,
+    sftp_connect, sftp_connect_from_ssh, sftp_create_file, sftp_delete, sftp_disconnect,
+    sftp_download, sftp_list_dir, sftp_mkdir, sftp_rename, sftp_upload,
 };
 use commands::vnc::{vnc_connect, vnc_disconnect, vnc_key_event, vnc_pointer_event};
 use std::collections::HashMap;
@@ -217,6 +217,7 @@ pub fn run() {
             has_password,
             // SFTP
             sftp_connect,
+            sftp_connect_from_ssh,
             sftp_list_dir,
             sftp_upload,
             sftp_download,

@@ -126,7 +126,44 @@ pub async fn sftp_connect(
     sftp_sessions
         .lock()
         .unwrap()
-        .insert(session_id.clone(), Arc::new(SftpConn { sftp, _session: sh }));
+        .insert(session_id.clone(), Arc::new(SftpConn { sftp, _session: Arc::new(sh) }));
+
+    Ok(session_id)
+}
+
+/// Open an SFTP session that REUSES an existing interactive SSH session's
+/// connection — so the file browser and terminal share one authenticated
+/// session (MobaXterm-style). No separate connect/auth, and it works even when
+/// the password was only entered at connect time and never saved.
+#[tauri::command]
+pub async fn sftp_connect_from_ssh(
+    ssh_sessions: State<'_, crate::ssh::SshSessionMap>,
+    sftp_sessions: State<'_, SftpSessionMap>,
+    ssh_session_id: String,
+) -> Result<String, String> {
+    let handle = {
+        let map = ssh_sessions.lock().unwrap();
+        let s = map.get(&ssh_session_id).ok_or("SSH session not found")?;
+        Arc::clone(&s.handle)
+    };
+
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("Channel open failed: {e}"))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| format!("SFTP subsystem request failed: {e}"))?;
+    let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| format!("SFTP session init failed: {e}"))?;
+
+    let session_id = Uuid::new_v4().to_string();
+    sftp_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), Arc::new(SftpConn { sftp, _session: handle }));
 
     Ok(session_id)
 }

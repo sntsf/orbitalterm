@@ -1,17 +1,29 @@
-use portable_pty::MasterPty;
-use std::{
-    collections::HashMap,
-    io::Write,
-    sync::{Arc, Mutex},
-};
+use crate::sftp::SshHandler;
+use russh::client::Handle;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc::UnboundedSender;
 
-pub struct SshSession {
-    pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    pub master: Box<dyn MasterPty + Send>,
+/// Commands sent from the Tauri command thread to the per-session pump task
+/// that owns the russh shell channel.
+pub enum SshCmd {
+    Data(Vec<u8>),
+    Resize(u32, u32),
 }
 
-// SAFETY: MasterPty + Send and Write + Send are both Send
+/// One interactive SSH session, backed by a single russh connection. The shell
+/// runs on one channel (driven by the pump task via `tx`); the SAME `handle`
+/// is reused to open SFTP channels, so terminal + file browser share one
+/// authenticated session (MobaXterm-style).
+pub struct SshSession {
+    pub tx: UnboundedSender<SshCmd>,
+    pub handle: Arc<Handle<SshHandler>>,
+}
+
+// SAFETY: russh's Handle and the mpsc sender are async/tokio types; access is
+// serialised through the session map's Mutex and per-command clones.
 unsafe impl Send for SshSession {}
+unsafe impl Sync for SshSession {}
 
 pub type SshSessionMap = Arc<Mutex<HashMap<String, SshSession>>>;
 

@@ -8,13 +8,16 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
-  sftpConnect, sftpListDir, sftpUpload, sftpDownload, sftpMkdir,
+  sftpConnect, sftpConnectFromSsh, sftpListDir, sftpUpload, sftpDownload, sftpMkdir,
   sftpCreateFile, sftpRename, sftpDelete,
 } from "../../lib/commands";
 import type { SftpEntry } from "../../types";
 
 interface SftpBrowserProps {
   sessionId: string | null;
+  // When set, SFTP reuses this interactive SSH session (shared connection)
+  // instead of opening its own. Null for standalone SFTP connections.
+  sshSessionId?: string | null;
   connectionId: string;
   username?: string;
   onConnect: (sessionId: string) => void;
@@ -43,7 +46,7 @@ function TreePrefix({ continuations, isLast }: { continuations: boolean[]; isLas
   );
 }
 
-export function SftpBrowser({ sessionId, connectionId, username, onConnect }: SftpBrowserProps) {
+export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, onConnect }: SftpBrowserProps) {
   const [currentPath, setCurrentPath] = useState("/");
   const [pathInput, setPathInput] = useState("/");
   const [editingPath, setEditingPath] = useState(false);
@@ -313,7 +316,14 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     setConnecting(true);
     setError(null);
     setDisconnected(false);
-    try { onConnect(await sftpConnect(connectionId)); }
+    try {
+      // Reuse the interactive SSH session when available (shared connection);
+      // otherwise open a standalone SFTP connection.
+      const sid = sshSessionId
+        ? await sftpConnectFromSsh(sshSessionId)
+        : await sftpConnect(connectionId);
+      onConnect(sid);
+    }
     catch (err) { setError(String(err)); }
     finally { setConnecting(false); }
   };

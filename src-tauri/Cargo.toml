@@ -36,7 +36,7 @@ russh = "0.44"
 russh-sftp = "2"
 russh-keys = "0.44"
 async-trait = "0.1"
-tokio = { version = "1", features = ["io-util"] }
+tokio = { version = "1", features = ["io-util", "rt", "macros", "sync", "time"] }
 suppaftp = "6"
 des = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

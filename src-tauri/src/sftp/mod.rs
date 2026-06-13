@@ -18,7 +18,10 @@ impl russh::client::Handler for SshHandler {
 
 pub struct SftpConn {
     pub sftp: russh_sftp::client::SftpSession,
-    pub _session: Handle<SshHandler>, // keep session alive for the lifetime of sftp
+    // Keep the underlying SSH session alive for the lifetime of the SFTP
+    // session. Arc so it can be SHARED with an interactive SSH terminal session
+    // (reused connection) or owned outright (standalone SFTP connection).
+    pub _session: Arc<Handle<SshHandler>>,
 }
 
 // SAFETY: SftpSession and Handle are async/tokio types — guarded per-command via Arc
