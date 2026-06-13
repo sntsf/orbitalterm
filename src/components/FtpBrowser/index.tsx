@@ -5,6 +5,7 @@ import {
   ChevronLeft, Pencil, Trash2, WifiOff, Loader,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   ftpConnect, ftpListDir, ftpUpload, ftpDownload, ftpMkdir,
@@ -35,6 +36,8 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
 
   const [transferFile, setTransferFile] = useState<string | null>(null);
   const [progress, setProgress] = useState<FtpProgress>({ transferred: 0, total: 0 });
+  const [dragging, setDragging] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastClickedRef = useRef<string | null>(null);
@@ -108,6 +111,29 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
     setTransferFile(null);
     loadDir(sessionId, currentPath);
   }, [sessionId, currentPath, loadDir]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Drag files from the OS onto the panel to upload them to the current folder.
+  useEffect(() => {
+    if (!sessionId) return;
+    let unlisten: (() => void) | null = null;
+    getCurrentWebviewWindow().onDragDropEvent((event) => {
+      const p = event.payload;
+      if (p.type === "leave") { setDragging(false); return; }
+      const rect = containerRef.current?.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const inside = rect
+        ? p.position.x / dpr >= rect.left && p.position.x / dpr <= rect.right
+          && p.position.y / dpr >= rect.top && p.position.y / dpr <= rect.bottom
+        : false;
+      if (p.type === "enter" || p.type === "over") {
+        setDragging(inside);
+      } else if (p.type === "drop") {
+        setDragging(false);
+        if (inside && p.paths?.length) doUpload(p.paths);
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [sessionId, doUpload]);
 
   const doDownload = useCallback(async (remoteEntries: FtpEntry[], localPath: string) => {
     if (!sessionId) return;
@@ -299,7 +325,8 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
 
   return (
     <div
-      className="flex flex-col h-full bg-[var(--color-bg-surface)] select-none"
+      ref={containerRef}
+      className={`flex flex-col h-full bg-[var(--color-bg-surface)] select-none ${dragging ? "ring-2 ring-inset ring-[var(--color-accent)]" : ""}`}
       onClick={() => setCtxMenu(null)}
       onContextMenu={(e) => { e.preventDefault(); openCtxMenu(e); }}
     >

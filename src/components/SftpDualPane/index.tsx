@@ -6,6 +6,7 @@ import {
   File, Folder, Scissors, ClipboardPaste,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useAppStore } from "../../store/useAppStore";
 import { useNotifStore } from "../../store/useNotifStore";
 import {
@@ -575,6 +576,9 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   const [remoteSelected, setRemoteSelected] = useState<Set<string>>(new Set());
   const remoteLastClick = useRef<string | null>(null);
   const remoteFlatRowsRef = useRef<AnyEntry[]>([]);
+  // OS file drag-drop onto the remote panel (upload from the local PC).
+  const remotePanelRef = useRef<HTMLDivElement>(null);
+  const [osDragOverRemote, setOsDragOverRemote] = useState(false);
   const [remoteLoading, setRemoteLoading] = useState(false);
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [showRemoteHidden, setShowRemoteHidden] = useState(false);
@@ -665,6 +669,46 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
       setRemoteLoading(false);
     }
   }, []);
+
+  // Upload OS-dropped file paths to the current remote folder (files only,
+  // matching the mini-SFTP behaviour).
+  const doUploadLocalPaths = useCallback(async (paths: string[]) => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    setTransferring(true);
+    for (const localPath of paths) {
+      const fileName = localPath.split(/[\\/]/).pop() ?? "file";
+      flushSync(() => { setTransferLabel(`↑ ${fileName}`); setProgress({ transferred: 0, total: 0 }); });
+      const dest = remotePath === "/" ? `/${fileName}` : `${remotePath}/${fileName}`;
+      try { await sftpUpload(sid, localPath, dest); }
+      catch (err) { setRemoteError(friendlyFsError(err)); break; }
+    }
+    setTransferLabel(null);
+    setTransferring(false);
+    loadRemote(sid, remotePath);
+  }, [remotePath, loadRemote]);
+
+  // Drag files from the OS onto the REMOTE panel to upload them there.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    getCurrentWebviewWindow().onDragDropEvent((event) => {
+      const p = event.payload;
+      if (p.type === "leave") { setOsDragOverRemote(false); return; }
+      const rect = remotePanelRef.current?.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const inside = rect
+        ? p.position.x / dpr >= rect.left && p.position.x / dpr <= rect.right
+          && p.position.y / dpr >= rect.top && p.position.y / dpr <= rect.bottom
+        : false;
+      if (p.type === "enter" || p.type === "over") {
+        setOsDragOverRemote(inside);
+      } else if (p.type === "drop") {
+        setOsDragOverRemote(false);
+        if (inside && p.paths?.length) doUploadLocalPaths(p.paths);
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [doUploadLocalPaths]);
 
   const remoteUp = () => {
     if (remotePath === "/" || !sessionIdRef.current) return;
@@ -1177,7 +1221,10 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
         </div>
 
         {/* Remote panel */}
-        <div className="flex-1 min-w-0 flex flex-col">
+        <div
+          ref={remotePanelRef}
+          className={`flex-1 min-w-0 flex flex-col ${osDragOverRemote ? "ring-2 ring-inset ring-[var(--color-accent)]" : ""}`}
+        >
           {newFolderMode === "remote" && (
             <div className="px-3 pt-2 pb-1 border-b border-[var(--color-border)] flex items-center gap-2 shrink-0">
               <Folder size={12} className="text-[var(--color-accent)] shrink-0" />
