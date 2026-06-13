@@ -11,6 +11,7 @@ import {
   sftpConnect, sftpConnectFromSsh, sftpListDir, sftpUpload, sftpDownload, sftpMkdir,
   sftpCreateFile, sftpRename, sftpDelete,
 } from "../../lib/commands";
+import { friendlyFsError } from "../../lib/transferErrors";
 import type { SftpEntry } from "../../types";
 
 interface SftpBrowserProps {
@@ -108,13 +109,9 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
   // Turn raw russh/SFTP errors into a short, friendly message.
   const friendlySftp = (err: unknown): string => {
     const s = String(err).toLowerCase();
-    if (s.includes("permission denied") || s.includes("permission") || s.includes("eacces"))
-      return "Sin permiso para acceder a esta carpeta.";
-    if (s.includes("no such file") || s.includes("does not exist"))
-      return "La carpeta no existe o no es accesible.";
     if (s.includes("subsystem") || s.includes("channel open") || s.includes("sftp session init") || s.includes("init failed"))
       return "SFTP no disponible en este servidor (el subsistema SFTP podría estar deshabilitado). El SSH sigue funcionando.";
-    return String(err);
+    return friendlyFsError(err);
   };
 
   const handleError = (err: unknown) => {

@@ -11,6 +11,7 @@ import {
   ftpRename, ftpDelete,
 } from "../../lib/commands";
 import type { FtpEntry } from "../../lib/commands";
+import { friendlyFsError } from "../../lib/transferErrors";
 
 interface FtpBrowserProps {
   sessionId: string | null;
@@ -67,7 +68,7 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
       setDisconnected(true);
       setTimeout(() => onDisconnect?.(), 1500);
     } else {
-      setError(String(err));
+      setError(friendlyFsError(err));
     }
   };
 
@@ -168,7 +169,7 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
     setError(null);
     setDisconnected(false);
     try { onConnect(await ftpConnect(connectionId)); }
-    catch (err) { setError(String(err)); }
+    catch (err) { setError(friendlyFsError(err)); }
     finally { setConnecting(false); }
   };
 

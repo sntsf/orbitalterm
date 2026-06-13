@@ -15,6 +15,7 @@ import {
 } from "../../lib/commands";
 import type { LocalEntry } from "../../lib/commands";
 import type { SftpEntry } from "../../types";
+import { friendlyFsError } from "../../lib/transferErrors";
 import type { Tab } from "../../types";
 
 type AnyEntry = (SftpEntry | LocalEntry) & { is_dir: boolean; name: string; path: string; size: number };
@@ -659,7 +660,7 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
     } catch (err) {
       const s = String(err);
       if (s.includes("session not found") || s.includes("closed")) setDisconnected(true);
-      else setRemoteError(s);
+      else setRemoteError(friendlyFsError(err));
     } finally {
       setRemoteLoading(false);
     }
