@@ -17,6 +17,7 @@ import {
 import type { LocalEntry } from "../../lib/commands";
 import type { SftpEntry } from "../../types";
 import { friendlyFsError } from "../../lib/transferErrors";
+import { resolveUploadOverwrites } from "../../lib/overwrite";
 import type { Tab } from "../../types";
 
 type AnyEntry = (SftpEntry | LocalEntry) & { is_dir: boolean; name: string; path: string; size: number };
@@ -675,8 +676,10 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   const doUploadLocalPaths = useCallback(async (paths: string[]) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
+    const toUpload = resolveUploadOverwrites(paths, new Set(remoteEntries.map((e) => e.name)));
+    if (toUpload.length === 0) return;
     setTransferring(true);
-    for (const localPath of paths) {
+    for (const localPath of toUpload) {
       const fileName = localPath.split(/[\\/]/).pop() ?? "file";
       flushSync(() => { setTransferLabel(`↑ ${fileName}`); setProgress({ transferred: 0, total: 0 }); });
       const dest = remotePath === "/" ? `/${fileName}` : `${remotePath}/${fileName}`;
@@ -686,7 +689,7 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
     setTransferLabel(null);
     setTransferring(false);
     loadRemote(sid, remotePath);
-  }, [remotePath, loadRemote]);
+  }, [remotePath, loadRemote, remoteEntries]);
 
   // Drag files from the OS onto the REMOTE panel to upload them there.
   useEffect(() => {

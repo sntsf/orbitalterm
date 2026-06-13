@@ -13,6 +13,7 @@ import {
 } from "../../lib/commands";
 import type { FtpEntry } from "../../lib/commands";
 import { friendlyFsError } from "../../lib/transferErrors";
+import { resolveUploadOverwrites } from "../../lib/overwrite";
 
 interface FtpBrowserProps {
   sessionId: string | null;
@@ -97,7 +98,9 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
 
   const doUpload = useCallback(async (localPaths: string[]) => {
     if (!sessionId) return;
-    for (const localPath of localPaths) {
+    const toUpload = resolveUploadOverwrites(localPaths, new Set(entries.map((e) => e.name)));
+    if (toUpload.length === 0) return;
+    for (const localPath of toUpload) {
       const fileName = localPath.split(/[\\/]/).pop() ?? "file";
       flushSync(() => { setTransferFile(`↑ ${fileName}`); setProgress({ transferred: 0, total: 0 }); });
       const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
@@ -110,7 +113,7 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
     }
     setTransferFile(null);
     loadDir(sessionId, currentPath);
-  }, [sessionId, currentPath, loadDir]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionId, currentPath, loadDir, entries]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Drag files from the OS onto the panel to upload them to the current folder.
   useEffect(() => {

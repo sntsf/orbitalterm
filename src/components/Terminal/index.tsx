@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { SearchAddon } from "@xterm/addon-search";
 import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
 import { HardDrive } from "lucide-react";
@@ -23,6 +24,12 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const searchAddonRef = useRef<SearchAddon | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // In-terminal search (Ctrl+F)
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
   const { setTabStatus, setTabSessionId, getConnectionById, closeTab } = useAppStore();
   const { fontSize, theme } = usePrefsStore();
 
@@ -100,8 +107,21 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
     fitAddonRef.current = fitAddon;
     term.loadAddon(fitAddon);
     term.loadAddon(new WebLinksAddon());
+    const searchAddon = new SearchAddon();
+    searchAddonRef.current = searchAddon;
+    term.loadAddon(searchAddon);
     term.open(containerRef.current);
     fitAddon.fit();
+
+    // Ctrl+F opens the in-terminal search bar (don't forward it to the shell).
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type === "keydown" && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        setShowSearch(true);
+        setTimeout(() => searchInputRef.current?.focus(), 0);
+        return false;
+      }
+      return true;
+    });
 
     const cleanups: Array<() => void> = [];
 
@@ -305,6 +325,27 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
             <HardDrive size={13} />
           </button>
         </div>
+        {showSearch && (
+          <div className="absolute top-1 left-1 z-10 flex items-center gap-1 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-1.5 py-1 shadow-lg">
+            <input
+              ref={searchInputRef}
+              value={searchTerm}
+              onChange={(e) => { setSearchTerm(e.target.value); searchAddonRef.current?.findNext(e.target.value); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); (e.shiftKey ? searchAddonRef.current?.findPrevious(searchTerm) : searchAddonRef.current?.findNext(searchTerm)); }
+                if (e.key === "Escape") { setShowSearch(false); }
+              }}
+              placeholder="Buscar…"
+              className="bg-transparent outline-none text-[11px] text-[var(--color-text-primary)] w-32"
+            />
+            <button onClick={() => searchAddonRef.current?.findPrevious(searchTerm)} title="Anterior (Shift+Enter)"
+              className="px-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">↑</button>
+            <button onClick={() => searchAddonRef.current?.findNext(searchTerm)} title="Siguiente (Enter)"
+              className="px-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">↓</button>
+            <button onClick={() => setShowSearch(false)} title="Cerrar (Esc)"
+              className="px-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">✕</button>
+          </div>
+        )}
         <div ref={containerRef} className="w-full h-full" style={{ padding: "4px" }} />
         {credPrompt && (
           <CredentialPrompt

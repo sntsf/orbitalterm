@@ -12,6 +12,7 @@ import {
   sftpCreateFile, sftpRename, sftpDelete,
 } from "../../lib/commands";
 import { friendlyFsError } from "../../lib/transferErrors";
+import { resolveUploadOverwrites } from "../../lib/overwrite";
 import type { SftpEntry } from "../../types";
 
 interface SftpBrowserProps {
@@ -197,7 +198,9 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
 
   const doUpload = useCallback(async (localPaths: string[]) => {
     if (!sessionId) return;
-    for (const localPath of localPaths) {
+    const toUpload = resolveUploadOverwrites(localPaths, new Set(entries.map((e) => e.name)));
+    if (toUpload.length === 0) return;
+    for (const localPath of toUpload) {
       const fileName = localPath.split(/[\\/]/).pop() ?? "file";
       flushSync(() => { setTransferFile(`↑ ${fileName}`); setProgress({ transferred: 0, total: 0 }); });
       const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
@@ -210,7 +213,7 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
     }
     setTransferFile(null);
     loadDir(sessionId, currentPath);
-  }, [sessionId, currentPath, loadDir]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionId, currentPath, loadDir, entries]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const doDownload = useCallback(async (remoteEntries: SftpEntry[], destDir: string) => {
     if (!sessionId) return;
