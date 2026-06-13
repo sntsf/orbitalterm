@@ -128,6 +128,23 @@ static class Native
     [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
     public const uint GW_CHILD = 5;
+
+    // DPI awareness — must match OrbitalTerm (per-monitor v2) so the reparented
+    // RDP window shares the same coordinate space. Without this, Windows
+    // virtualizes/scales this child window on non-100% displays, which made the
+    // embedded session float detached on scaled monitors.
+    [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    public static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new IntPtr(-4);
+
+    public static void EnableDpiAwareness()
+    {
+        // PerMonitorV2 needs Windows 10 1703+; fall back to system-DPI-aware on
+        // older builds. Either way this MUST run before any window is created.
+        try { if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) return; }
+        catch { }
+        try { SetProcessDPIAware(); } catch { }
+    }
 }
 
 // ── Main program ──────────────────────────────────────────────────────────────
@@ -136,6 +153,9 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        // Match OrbitalTerm's DPI awareness BEFORE creating any window or control.
+        Native.EnableDpiAwareness();
+
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
@@ -322,6 +342,9 @@ public sealed class RdpHostForm : Form
 
         Text            = "OrbitalRdpHost";
         FormBorderStyle = FormBorderStyle.None;
+        // We lay out in explicit physical pixels (sized by the DPI-aware Rust
+        // host); disable WinForms' own DPI auto-scaling so it doesn't fight us.
+        AutoScaleMode   = AutoScaleMode.None;
         ClientSize      = new Size(width, height);
         BackColor       = Color.Black;
         ShowInTaskbar   = (parentHwnd == IntPtr.Zero);
