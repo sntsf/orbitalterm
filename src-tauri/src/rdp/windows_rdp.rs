@@ -20,6 +20,7 @@ use tauri::Emitter;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF, SetWindowRgn};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -86,6 +87,22 @@ unsafe extern "system" fn host_wnd_proc(
 
 // ── Screen positioning ────────────────────────────────────────────────────────
 
+/// Logical→physical scale factor of the parent (Tauri) window.
+///
+/// The frontend reports element rects via `getBoundingClientRect()` in CSS
+/// (logical) pixels — at 100% display scaling that equals physical pixels, but
+/// at 125%/150%/… it does not. This process is per-monitor-DPI-aware, so it
+/// positions/sizes native windows in PHYSICAL pixels. Without converting, the
+/// embedded RDP window lands at the wrong spot and size on scaled monitors and
+/// shows up as a detached floating window (fine at 100%, broken otherwise).
+unsafe fn dpi_scale(parent: HWND) -> f64 {
+    let dpi = GetDpiForWindow(parent);
+    if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
+}
+
+#[inline]
+fn scale_px(v: i32, s: f64) -> i32 { (v as f64 * s).round() as i32 }
+
 fn canvas_to_screen(parent: HWND, rel_x: i32, rel_y: i32) -> (i32, i32) {
     // getBoundingClientRect() returns coords relative to the WebView2 client area.
     // We must convert from client-area origin to screen by accounting for the
@@ -100,7 +117,10 @@ fn canvas_to_screen(parent: HWND, rel_x: i32, rel_y: i32) -> (i32, i32) {
         // Horizontal border is symmetric; vertical non-client area = title + top border.
         let nc_x = ((wr.right - wr.left) - cr.right) / 2;
         let nc_y = ((wr.bottom - wr.top) - cr.bottom - nc_x).max(0);
-        (wr.left + nc_x + rel_x, wr.top + nc_y + rel_y)
+        // rel_x/rel_y are logical (CSS) pixels — scale to physical to match the
+        // parent's physical-pixel screen origin.
+        let s = dpi_scale(parent);
+        (wr.left + nc_x + scale_px(rel_x, s), wr.top + nc_y + scale_px(rel_y, s))
     }
 }
 
@@ -193,17 +213,24 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
         let class_name: Vec<u16> = HOST_CLASS.encode_utf16().chain(std::iter::once(0)).collect();
         let parent = HWND(params.parent_hwnd as *mut _);
         let (sx, sy) = canvas_to_screen(parent, params.x, params.y);
+        let s = dpi_scale(parent);
 
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::PCWSTR(std::ptr::null()),
             WS_POPUP | WS_VISIBLE,
-            sx, sy, params.width, params.height,
+            sx, sy, scale_px(params.width, s), scale_px(params.height, s),
             Some(parent), // owner (not parent — keeps it above DComp)
             None, Some(HINSTANCE(hmod.0)), None,
         ).unwrap_or(HWND(std::ptr::null_mut()))
     };
+
+    // Physical pixel size for the embedded session (matches the WS_POPUP). The
+    // C# helper is DPI-aware too, so it interprets these 1:1 with no scaling.
+    let scale = unsafe { dpi_scale(HWND(params.parent_hwnd as *mut _)) };
+    let phys_width  = scale_px(params.width, scale);
+    let phys_height = scale_px(params.height, scale);
 
     if host_hwnd.0.is_null() {
         eprintln!("[rdp] CreateWindowExW failed");
@@ -219,8 +246,8 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
        .arg("--server").arg(&params.host)
        .arg("--port").arg(params.port.to_string())
        .arg("--user").arg(&user_arg)
-       .arg("--width").arg(params.width.to_string())
-       .arg("--height").arg(params.height.to_string())
+       .arg("--width").arg(phys_width.to_string())
+       .arg("--height").arg(phys_height.to_string())
        .arg("--security").arg(&params.rdp_security);
     if params.admin_mode { cmd.arg("--admin"); }
     cmd.stdin(Stdio::piped())
@@ -329,7 +356,8 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
                 let h  = session.height.load(Ordering::Relaxed) as i32;
                 let p  = HWND(session.parent_hwnd.load(Ordering::Relaxed) as *mut _);
                 let (sx, sy) = canvas_to_screen(p, x, y);
-                let _ = SetWindowPos(host_hwnd, None, sx, sy, w, h,
+                let s = dpi_scale(p);
+                let _ = SetWindowPos(host_hwnd, None, sx, sy, scale_px(w, s), scale_px(h, s),
                     SWP_NOZORDER | SWP_NOACTIVATE);
                 last_parent_rect = RECT::default(); // force re-check on next tick
             }
@@ -524,9 +552,14 @@ pub fn set_menu_region(session: &WindowsRdpSession, menu_rect: Option<[i32; 4]>)
                 let rx = inter_right  - popup_vp_x;
                 let by = inter_bottom - popup_vp_y;
 
+                // The WS_POPUP is sized in physical pixels, so scale these logical
+                // viewport coordinates up to match it before carving the hole.
+                let parent = HWND(session.parent_hwnd.load(Ordering::Relaxed) as *mut _);
+                let s = dpi_scale(parent);
+
                 // Build: full_region MINUS hole_region
-                let full = CreateRectRgn(0, 0, popup_w, popup_h);
-                let hole = CreateRectRgn(lx, ly, rx, by);
+                let full = CreateRectRgn(0, 0, scale_px(popup_w, s), scale_px(popup_h, s));
+                let hole = CreateRectRgn(scale_px(lx, s), scale_px(ly, s), scale_px(rx, s), scale_px(by, s));
                 CombineRgn(Some(full), Some(full), Some(hole), RGN_DIFF);
                 // After SetWindowRgn succeeds the OS owns full — do NOT delete it.
                 let _ = SetWindowRgn(host_hwnd, Some(full), true);
