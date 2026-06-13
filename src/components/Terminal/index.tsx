@@ -5,7 +5,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
 import { HardDrive } from "lucide-react";
-import { connectSsh, disconnectSsh, resizePty, sendInput, sftpConnectFromSsh, sftpDisconnect } from "../../lib/commands";
+import { connectSsh, disconnectSsh, resizePty, sendInput, sftpDisconnect } from "../../lib/commands";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import { useAppStore } from "../../store/useAppStore";
 import { usePrefsStore, resolvedTermTheme } from "../../store/usePrefsStore";
@@ -174,13 +174,11 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
       }
 
       // Reuse THIS SSH session for the SFTP browser (shared single connection).
+      // The SFTP panel auto-connects from sshSessionId and shows its own
+      // friendly message if SFTP isn't available — the terminal is unaffected.
       setSshSessionId(sessionId);
       setShowSftp(true);
       setTimeout(() => fitAddonRef.current?.fit(), 50);
-      sftpConnectFromSsh(sessionId).then((sid) => {
-        setSftpSessionId(sid);
-        sftpSessionIdRef.current = sid;
-      }).catch(console.error);
 
       // Buffer SSH output to detect connection errors emitted by the ssh process.
       // connectSsh() returns immediately after spawning; errors appear as PTY text.

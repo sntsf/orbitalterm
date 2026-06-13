@@ -102,14 +102,26 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
 
   const isSftpGone = (err: unknown) => {
     const s = String(err);
-    return s.includes("session not found") || s.includes("SFTP session") || s.includes("closed") || s.includes("EOF");
+    return s.includes("session not found") || s.includes("SFTP session not found") || s.includes("closed") || s.includes("EOF");
+  };
+
+  // Turn raw russh/SFTP errors into a short, friendly message.
+  const friendlySftp = (err: unknown): string => {
+    const s = String(err).toLowerCase();
+    if (s.includes("permission denied") || s.includes("permission") || s.includes("eacces"))
+      return "Sin permiso para acceder a esta carpeta.";
+    if (s.includes("no such file") || s.includes("does not exist"))
+      return "La carpeta no existe o no es accesible.";
+    if (s.includes("subsystem") || s.includes("channel open") || s.includes("sftp session init") || s.includes("init failed"))
+      return "SFTP no disponible en este servidor (el subsistema SFTP podría estar deshabilitado). El SSH sigue funcionando.";
+    return String(err);
   };
 
   const handleError = (err: unknown) => {
     if (isSftpGone(err)) {
       setDisconnected(true);
     } else {
-      setError(String(err));
+      setError(friendlySftp(err));
     }
   };
 
@@ -324,9 +336,20 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
         : await sftpConnect(connectionId);
       onConnect(sid);
     }
-    catch (err) { setError(String(err)); }
+    catch (err) { setError(friendlySftp(err)); }
     finally { setConnecting(false); }
   };
+
+  // Auto-connect once when reusing an interactive SSH session (the terminal
+  // sets sshSessionId after login). If SFTP isn't available the panel shows a
+  // friendly message and the SSH terminal keeps working — no retry loop.
+  const autoConnectedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (sshSessionId && !sessionId && !disconnected && autoConnectedRef.current !== sshSessionId) {
+      autoConnectedRef.current = sshSessionId;
+      handleConnect();
+    }
+  }, [sshSessionId, sessionId, disconnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── upload ─────────────────────────────────────────────────────────────────
 
