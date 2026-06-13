@@ -247,55 +247,69 @@ export function Sidebar() {
     () => new Map(folders.map((f) => [f.id, f])),
     [folders],
   );
+  const connById = useMemo(
+    () => new Map(connections.map((c) => [c.id, c])),
+    [connections],
+  );
 
-  // Search matches (empty when no query). Matches by connection name, host/IP,
-  // OR the name of any ancestor folder. Memoized so we only recompute when the
-  // query or data actually changes — not on every render.
-  const searchMatches = useMemo(() => {
+  // Search matches (empty when no query). Connections match by name, host/IP or
+  // the name of any ancestor folder; folders match by their own name — so the
+  // search considers folders too, and ↑/↓ can jump to a folder. Connections
+  // come first, then matching folders.
+  const searchMatches = useMemo<{ kind: "conn" | "folder"; id: string }[]>(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [];
-    return connections.filter((c) =>
-      c.name.toLowerCase().includes(q) ||
-      c.host.toLowerCase().includes(q) ||
-      folderPath(c.folder_id ?? null).toLowerCase().includes(q),
-    );
-  }, [searchQuery, connections, folderPath]);
+    const hits: { kind: "conn" | "folder"; id: string }[] = [];
+    for (const c of connections) {
+      if (
+        c.name.toLowerCase().includes(q) ||
+        c.host.toLowerCase().includes(q) ||
+        folderPath(c.folder_id ?? null).toLowerCase().includes(q)
+      ) hits.push({ kind: "conn", id: c.id });
+    }
+    for (const f of folders) {
+      if (f.name.toLowerCase().includes(q)) hits.push({ kind: "folder", id: f.id });
+    }
+    return hits;
+  }, [searchQuery, connections, folders, folderPath]);
 
-  // While searching we only auto-expand the ancestor chain of the CURRENTLY
-  // focused match — not every match — so the tree stays light and jumps
-  // straight to the connection in its real position. ↑/↓ moves the focus.
+  // Auto-expand only the ancestor chain of the CURRENTLY focused match so the
+  // tree stays light and reveals it in place. ↑/↓ moves the focus.
   const searchExpanded = useMemo(() => {
     const ids = new Set<string>();
     if (!searchQuery) return ids;
-    let fid = searchMatches[searchFocusIdx]?.folder_id ?? null;
+    const hit = searchMatches[searchFocusIdx];
+    if (!hit) return ids;
+    // Connections reveal via their folder; folders reveal via their parent.
+    let fid = hit.kind === "conn"
+      ? (connById.get(hit.id)?.folder_id ?? null)
+      : (folderById.get(hit.id)?.parent_id ?? null);
     while (fid) {
       ids.add(fid);
       fid = folderById.get(fid)?.parent_id ?? null;
     }
     return ids;
-  }, [searchQuery, searchMatches, searchFocusIdx, folderById]);
+  }, [searchQuery, searchMatches, searchFocusIdx, folderById, connById]);
 
-  // Move the search focus to a match: select it and scroll it into view
-  // (instant). Called ONLY when the query changes and on ↑/↓ — never on
-  // unrelated re-renders — so a manual click in the tree is never yanked back
-  // to the search match (this is the mRemoteNG behaviour the user expects).
-  const focusMatch = (idx: number) => {
-    setSearchFocusIdx(idx);
-    const m = searchMatches[idx];
-    if (!m) return;
-    selectConnection(m.id);
-    requestAnimationFrame(() => {
-      document.querySelector(`[data-conn-id="${m.id}"]`)?.scrollIntoView({ block: "nearest" });
-    });
-  };
-
-  // On a new query, jump once to the first match. Afterwards the user is free
-  // to click around; only ↑/↓ in the search box moves the focus again.
+  // Select + scroll to the focused match. This runs in an EFFECT (after the
+  // ancestor chain above has expanded and committed to the DOM), so ↑/↓ visibly
+  // jumps to each match. It fires only when the query changes or the focus
+  // moves — never on unrelated re-renders — so a manual click in the tree is
+  // never yanked back (mRemoteNG behaviour). The focus index is reset to 0 in
+  // the search box's onChange, so this sees a consistent (query, index) pair.
   useEffect(() => {
-    if (searchQuery && searchMatches.length) focusMatch(0);
-    else setSearchFocusIdx(0);
+    if (!searchQuery) return;
+    const hit = searchMatches[searchFocusIdx];
+    if (!hit) return;
+    if (hit.kind === "conn") {
+      selectConnection(hit.id);
+      document.querySelector(`[data-conn-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" });
+    } else {
+      selectFolder(hit.id);
+      document.querySelector(`[data-folder-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" });
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery]);
+  }, [searchFocusIdx, searchQuery]);
 
   const toggleGroupExpanded = (groupId: string) => {
     setGroupExpanded((prev) => ({ ...prev, [groupId]: !(prev[groupId] ?? true) }));
@@ -687,20 +701,26 @@ export function Sidebar() {
     if (!searchQuery || searchMatches.length === 0) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      focusMatch((searchFocusIdx + 1) % searchMatches.length);
+      setSearchFocusIdx((i) => (i + 1) % searchMatches.length);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      focusMatch((searchFocusIdx - 1 + searchMatches.length) % searchMatches.length);
+      setSearchFocusIdx((i) => (i - 1 + searchMatches.length) % searchMatches.length);
     } else if (e.key === "Enter") {
-      const conn = searchMatches[searchFocusIdx];
-      if (conn) openTab(conn);
+      const hit = searchMatches[searchFocusIdx];
+      if (hit?.kind === "conn") {
+        const conn = connById.get(hit.id);
+        if (conn) openTab(conn);
+      }
     }
   };
 
-  const searchMatchIds = new Set(searchMatches.map((c) => c.id));
-  const searchFocusId = searchQuery && searchMatches[searchFocusIdx]
-    ? searchMatches[searchFocusIdx].id
-    : null;
+  // Connection matches are highlighted in the tree; the focused connection gets
+  // the focus highlight (a focused folder is shown via the normal selection).
+  const searchMatchIds = new Set(
+    searchMatches.filter((h) => h.kind === "conn").map((h) => h.id),
+  );
+  const focusedHit = searchQuery ? searchMatches[searchFocusIdx] : undefined;
+  const searchFocusId = focusedHit?.kind === "conn" ? focusedHit.id : null;
 
   // Folders the tree should render as open: the ones the user opened, plus the
   // ancestor chain of the focused search match (so it's revealed in place).
@@ -1022,7 +1042,7 @@ export function Sidebar() {
             type="text"
             placeholder={t("searchPlaceholder")}
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => { setSearchQuery(e.target.value); setSearchFocusIdx(0); }}
             onKeyDown={handleSearchKeyDown}
             onFocus={() => setSidebarHint(buildSearchHint(lang))}
             onBlur={() => setSidebarHint(null)}

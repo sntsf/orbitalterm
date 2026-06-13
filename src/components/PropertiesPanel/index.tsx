@@ -16,7 +16,7 @@ import {
 } from "../../lib/commands";
 import type { AuthType, ConnectionType } from "../../types";
 import { CONN_ICONS, DEFAULT_CONN_ICON, ConnIconDisplay, type ConnIconKey } from "../../lib/connIcons";
-import { ICON_COLORS } from "../../lib/folderColors";
+import { ICON_COLORS, iconColorClass } from "../../lib/folderColors";
 
 const DEFAULT_PORTS: Record<ConnectionType, number> = {
   ssh: 22,
@@ -514,7 +514,7 @@ function FolderProperties({ folderId }: { folderId: string }) {
       key={folderId}
       missing={!folder}
       Icon={FolderIcon}
-      defaultColorCls="text-amber-400"
+      defaultColorKey="amber"
       initial={{ name: folder?.name ?? "", description: folder?.description ?? "", color: folder?.color ?? "" }}
       onSave={async (n, d, c) => {
         if (!folder) return;
@@ -534,7 +534,7 @@ function GroupProperties({ groupId }: { groupId: string }) {
       key={groupId}
       missing={!group}
       Icon={Database}
-      defaultColorCls=""
+      defaultColorKey="blue"
       initial={{ name: group?.name ?? "", description: group?.description ?? "", color: group?.color ?? "" }}
       onSave={async (n, d, c) => {
         if (!group) return;
@@ -549,11 +549,11 @@ function GroupProperties({ groupId }: { groupId: string }) {
 // `key`), so it initialises from `initial` once and never clobbers in-progress
 // edits when the list refetches after a save.
 function ItemEditor({
-  missing, Icon, defaultColorCls, initial, onSave,
+  missing, Icon, defaultColorKey, initial, onSave,
 }: {
   missing: boolean;
   Icon: LucideIcon;
-  defaultColorCls: string;
+  defaultColorKey: string;
   initial: { name: string; description: string; color: string };
   onSave: (name: string, description: string, color: string) => Promise<void>;
 }) {
@@ -563,7 +563,7 @@ function ItemEditor({
 
   const [name, setName] = useState(initial.name);
   const [description, setDescription] = useState(initial.description);
-  const [color, setColor] = useState(initial.color);
+  const [color, setColor] = useState(initial.color || defaultColorKey);
   const firstRun = useRef(true);
   const saveRef = useRef(onSave);
   saveRef.current = onSave;
@@ -605,7 +605,16 @@ function ItemEditor({
           <input value={name} onChange={(e) => setName(e.target.value)} className={inp} />
         </Row>
         <Row label={t("propColor")}>
-          <IconColorPicker Icon={Icon} value={color} defaultColorCls={defaultColorCls} onChange={setColor} />
+          <div className="flex items-center gap-2">
+            <Icon size={20} className={iconColorClass(color)} />
+            <select value={color} onChange={(e) => setColor(e.target.value)} className={inp}>
+              {ICON_COLORS.map((c) => (
+                <option key={c.key} value={c.key}>
+                  {lang === "es" ? c.label_es : c.label_en}
+                </option>
+              ))}
+            </select>
+          </div>
         </Row>
         <Row label={t("propDesc")}>
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3}
@@ -614,40 +623,6 @@ function ItemEditor({
       </div>
 
       <HintBox hint={sidebarHint} hintLang={hintLang} />
-    </div>
-  );
-}
-
-function IconColorPicker({
-  Icon, value, defaultColorCls, onChange,
-}: {
-  Icon: LucideIcon;
-  value: string;
-  defaultColorCls: string;
-  onChange: (color: string) => void;
-}) {
-  const { lang } = useI18nStore();
-  return (
-    <div className="flex flex-wrap gap-1">
-      {ICON_COLORS.map((c) => {
-        const selected = value === c.key || (!value && c.cls === defaultColorCls);
-        return (
-          <button
-            key={c.key}
-            type="button"
-            title={lang === "es" ? c.label_es : c.label_en}
-            onClick={() => onChange(c.key)}
-            className={[
-              "p-1 rounded border transition-colors",
-              selected
-                ? "border-[var(--color-accent)] bg-[var(--color-bg-elevated)]"
-                : "border-transparent hover:bg-[var(--color-bg-hover)]",
-            ].join(" ")}
-          >
-            <Icon size={16} className={c.cls} />
-          </button>
-        );
-      })}
     </div>
   );
 }
