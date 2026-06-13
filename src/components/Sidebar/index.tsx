@@ -20,6 +20,9 @@ import { iconColorClass } from "../../lib/folderColors";
 import { TuxIcon, WindowsIcon, VncIcon, SftpIcon } from "../ConnectionIcons";
 import type { Connection, Folder as FolderType, Group } from "../../types";
 
+// Shared empty set so we don't allocate a new one each render.
+const EMPTY_ID_SET = new Set<string>();
+
 // ── Sidebar hint builders ──────────────────────────────────────────────────────
 
 function buildConnHint(conn: Connection, lang: string) {
@@ -226,22 +229,6 @@ export function Sidebar() {
     }
   }, [creatingGroup]);
 
-  // Folder full-path resolver (ancestor names), memoized — used both for
-  // matching ("search by folder name") and for showing each result's location.
-  const folderPath = useMemo(() => {
-    const byId = new Map(folders.map((f) => [f.id, f]));
-    const cache = new Map<string | null, string>();
-    const build = (id: string | null): string => {
-      if (!id) return "";
-      if (cache.has(id)) return cache.get(id)!;
-      const f = byId.get(id);
-      const p = f ? (f.parent_id ? `${build(f.parent_id)} / ${f.name}` : f.name) : "";
-      cache.set(id, p);
-      return p;
-    };
-    return build;
-  }, [folders]);
-
   // Fast folder lookup for walking ancestor chains.
   const folderById = useMemo(
     () => new Map(folders.map((f) => [f.id, f])),
@@ -252,26 +239,54 @@ export function Sidebar() {
     [connections],
   );
 
-  // Search matches (empty when no query). Connections match by name, host/IP or
-  // the name of any ancestor folder; folders match by their own name — so the
-  // search considers folders too, and ↑/↓ can jump to a folder. Connections
-  // come first, then matching folders.
+  // Child indexes: folders-by-parent and connections-by-folder. Built ONCE per
+  // data change so each FolderItem does an O(1) Map lookup instead of an O(n)
+  // .filter() over every folder/connection. With a large imported tree (a
+  // folder can have hundreds of direct children) the old per-node filters were
+  // O(n²) on every render — the real cause of the laggy search box.
+  const foldersByParent = useMemo(() => {
+    const m = new Map<string | null, FolderType[]>();
+    for (const f of folders) {
+      const k = f.parent_id ?? null;
+      const arr = m.get(k); if (arr) arr.push(f); else m.set(k, [f]);
+    }
+    return m;
+  }, [folders]);
+  const connsByFolder = useMemo(() => {
+    const m = new Map<string | null, Connection[]>();
+    for (const c of connections) {
+      const k = c.folder_id ?? null;
+      const arr = m.get(k); if (arr) arr.push(c); else m.set(k, [c]);
+    }
+    return m;
+  }, [connections]);
+  // Per-group connection count for the header badge (avoids an O(n) filter per
+  // group on every render).
+  const connsByGroupCount = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of connections) m.set(c.group_id, (m.get(c.group_id) ?? 0) + 1);
+    return m;
+  }, [connections]);
+
+  // Search matches (empty when no query). Prefix match (starts-with), like
+  // mRemoteNG: typing "ser" finds names/IPs that BEGIN with "ser", not
+  // "pruebaser60". Connections match by name or host/IP; folders by name.
+  // Connections come first, then matching folders.
   const searchMatches = useMemo<{ kind: "conn" | "folder"; id: string }[]>(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [];
     const hits: { kind: "conn" | "folder"; id: string }[] = [];
     for (const c of connections) {
       if (
-        c.name.toLowerCase().includes(q) ||
-        c.host.toLowerCase().includes(q) ||
-        folderPath(c.folder_id ?? null).toLowerCase().includes(q)
+        c.name.toLowerCase().startsWith(q) ||
+        c.host.toLowerCase().startsWith(q)
       ) hits.push({ kind: "conn", id: c.id });
     }
     for (const f of folders) {
-      if (f.name.toLowerCase().includes(q)) hits.push({ kind: "folder", id: f.id });
+      if (f.name.toLowerCase().startsWith(q)) hits.push({ kind: "folder", id: f.id });
     }
     return hits;
-  }, [searchQuery, connections, folders, folderPath]);
+  }, [searchQuery, connections, folders]);
 
   // Auto-expand only the ancestor chain of the CURRENTLY focused match so the
   // tree stays light and reveals it in place. ↑/↓ moves the focus.
@@ -291,23 +306,22 @@ export function Sidebar() {
     return ids;
   }, [searchQuery, searchMatches, searchFocusIdx, folderById, connById]);
 
-  // Select + scroll to the focused match. This runs in an EFFECT (after the
-  // ancestor chain above has expanded and committed to the DOM), so ↑/↓ visibly
-  // jumps to each match. It fires only when the query changes or the focus
-  // moves — never on unrelated re-renders — so a manual click in the tree is
-  // never yanked back (mRemoteNG behaviour). The focus index is reset to 0 in
-  // the search box's onChange, so this sees a consistent (query, index) pair.
+  // Scroll the focused match into view. Runs in an EFFECT (after the ancestor
+  // chain has expanded and committed to the DOM), so ↑/↓ visibly jumps to each
+  // match. It deliberately does NOT change the global selection — that would
+  // reload the heavy properties panel (and a password IPC) on every keystroke,
+  // which is what made the box feel slow. Only the lightweight focus highlight
+  // moves; Enter opens the match, a click selects it. Fires only when the query
+  // or focus changes (the index is reset to 0 in the search box onChange), so a
+  // manual click in the tree is never yanked back (mRemoteNG behaviour).
   useEffect(() => {
     if (!searchQuery) return;
     const hit = searchMatches[searchFocusIdx];
     if (!hit) return;
-    if (hit.kind === "conn") {
-      selectConnection(hit.id);
-      document.querySelector(`[data-conn-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" });
-    } else {
-      selectFolder(hit.id);
-      document.querySelector(`[data-folder-id="${hit.id}"]`)?.scrollIntoView({ block: "nearest" });
-    }
+    const sel = hit.kind === "conn"
+      ? `[data-conn-id="${hit.id}"]`
+      : `[data-folder-id="${hit.id}"]`;
+    document.querySelector(sel)?.scrollIntoView({ block: "nearest" });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchFocusIdx, searchQuery]);
 
@@ -710,17 +724,20 @@ export function Sidebar() {
       if (hit?.kind === "conn") {
         const conn = connById.get(hit.id);
         if (conn) openTab(conn);
+      } else if (hit?.kind === "folder") {
+        selectFolder(hit.id);
       }
     }
   };
 
-  // Connection matches are highlighted in the tree; the focused connection gets
-  // the focus highlight (a focused folder is shown via the normal selection).
-  const searchMatchIds = new Set(
-    searchMatches.filter((h) => h.kind === "conn").map((h) => h.id),
-  );
+  // Only the FOCUSED match is highlighted — the user doesn't want every match
+  // shaded. searchMatchIds is therefore empty (no "all matches" highlight); the
+  // focused connection lights up via ConnItem and the focused folder via
+  // FolderItem.
+  const searchMatchIds = EMPTY_ID_SET;
   const focusedHit = searchQuery ? searchMatches[searchFocusIdx] : undefined;
   const searchFocusId = focusedHit?.kind === "conn" ? focusedHit.id : null;
+  const searchFocusFolderId = focusedHit?.kind === "folder" ? focusedHit.id : null;
 
   // Folders the tree should render as open: the ones the user opened, plus the
   // ancestor chain of the focused search match (so it's revealed in place).
@@ -730,8 +747,8 @@ export function Sidebar() {
 
   // Shared props passed down to every FolderItem / ConnItem
   const sharedProps = {
-    allFolders: folders,
-    allConnections: connections,
+    foldersByParent,
+    connsByFolder,
     openTab,
     expandedFolders: effectiveExpanded,
     onToggleFolder: toggleFolderExpand,
@@ -769,6 +786,7 @@ export function Sidebar() {
     onFolderPointerDown: (folder: FolderType, x: number, y: number) => startFolderDrag(folder, x, y),
     searchMatchIds,
     searchFocusId,
+    searchFocusFolderId,
   };
 
   return (
@@ -894,9 +912,9 @@ export function Sidebar() {
         {/* Render each group */}
         {groups.map((group) => {
           const expanded = isGroupExpanded(group.id);
-          const groupFolders = folders.filter((f) => f.parent_id === null && f.group_id === group.id);
-          const groupRootConns = connections.filter((c) => !c.folder_id && c.group_id === group.id);
-          const groupConnCount = connections.filter((c) => c.group_id === group.id).length;
+          const groupFolders = (foldersByParent.get(null) ?? []).filter((f) => f.group_id === group.id);
+          const groupRootConns = (connsByFolder.get(null) ?? []).filter((c) => c.group_id === group.id);
+          const groupConnCount = connsByGroupCount.get(group.id) ?? 0;
           const isGroupDropTarget = dropTarget === `group:${group.id}`;
           const isRenaming = renamingGroupId === group.id;
 
@@ -1126,8 +1144,8 @@ function TreePrefix({ continuations, isLast }: { continuations: boolean[]; isLas
 // ── Shared types ──────────────────────────────────────────────────────────────
 
 interface SharedProps {
-  allFolders: FolderType[];
-  allConnections: Connection[];
+  foldersByParent: Map<string | null, FolderType[]>;
+  connsByFolder: Map<string | null, Connection[]>;
   openTab: (c: Connection) => void;
   expandedFolders: Set<string>;
   onToggleFolder: (id: string) => void;
@@ -1157,6 +1175,7 @@ interface SharedProps {
   onFolderPointerDown: (folder: FolderType, x: number, y: number) => void;
   searchMatchIds: Set<string>;
   searchFocusId: string | null;
+  searchFocusFolderId: string | null;
 }
 
 // ── FolderItem (recursive) ────────────────────────────────────────────────────
@@ -1166,21 +1185,22 @@ function FolderItem({
 }: { folder: FolderType; continuations: boolean[]; isLast: boolean } & SharedProps) {
   const t = useT();
   const {
-    allFolders, allConnections, openTab, expandedFolders, onToggleFolder,
+    foldersByParent, connsByFolder, openTab, expandedFolders, onToggleFolder,
     onConnContextMenu, onFolderContextMenu, selectedId, onSelect, onFolderClick,
     onConnHint, onFolderHint,
     renamingFolderId, renameFolderName, onRenameChange, onRenameConfirm, onRenameCancel, renameInputRef,
     creatingFolder, newFolderParentId, newFolderName,
     onSubfolderNameChange, onSubfolderConfirm, onSubfolderCancel, folderInputRef,
     dragId, dropTarget, onConnPointerDown, onFolderPointerDown,
-    searchMatchIds, searchFocusId,
+    searchMatchIds, searchFocusId, searchFocusFolderId,
   } = shared;
 
   const expanded = expandedFolders.has(folder.id);
-  const subfolders = allFolders.filter((f) => f.parent_id === folder.id);
-  const myConns = allConnections.filter((c) => c.folder_id === folder.id);
+  const subfolders = foldersByParent.get(folder.id) ?? [];
+  const myConns = connsByFolder.get(folder.id) ?? [];
 
   const isFolderDropTarget = dropTarget === `folder:${folder.id}`;
+  const isSearchFocus = searchFocusFolderId === folder.id;
   const Icon = expanded ? FolderOpen : Folder;
   const folderColor = iconColorClass(folder.color);
   const isRenaming = renamingFolderId === folder.id;
@@ -1221,7 +1241,9 @@ function FolderItem({
             "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
             isFolderDropTarget
               ? "bg-[var(--color-accent)]/20 text-amber-400"
-              : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
+              : isSearchFocus
+                ? "bg-[var(--color-accent)]/25 text-[var(--color-text-primary)]"
+                : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
           ].join(" ")}
         >
           <TreePrefix continuations={continuations} isLast={isLast} />
