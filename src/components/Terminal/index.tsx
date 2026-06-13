@@ -38,7 +38,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
 
   // Credential prompt shown when the connection has no saved username/password
   // (russh authenticates up-front; the prompt's resolver feeds connect_ssh).
-  const [credPrompt, setCredPrompt] = useState<{ needUser: boolean } | null>(null);
+  const [credPrompt, setCredPrompt] = useState<{ needUser: boolean; authFailed?: boolean } | null>(null);
   const credResolveRef = useRef<((c: { username?: string; password?: string } | null) => void) | null>(null);
 
   // Drag handle state
@@ -137,10 +137,14 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
             connected = true;
           } catch (err) {
             const raw = String(err);
-            if (raw.includes("NEED_CREDENTIALS")) {
+            const needCreds = raw.includes("NEED_CREDENTIALS");
+            const authFailed = raw.includes("AUTH_FAILED");
+            // Missing OR rejected credentials → (re)prompt and retry instead of
+            // failing, so a typo doesn't kill the tab.
+            if (needCreds || authFailed) {
               const provided = await new Promise<{ username?: string; password?: string } | null>((resolve) => {
                 credResolveRef.current = resolve;
-                setCredPrompt({ needUser: !connection.username });
+                setCredPrompt({ needUser: !connection.username, authFailed });
               });
               setCredPrompt(null);
               credResolveRef.current = null;
@@ -307,6 +311,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         {credPrompt && (
           <CredentialPrompt
             needUser={credPrompt.needUser}
+            authFailed={credPrompt.authFailed}
             host={connection?.host ?? ""}
             onSubmit={(c) => credResolveRef.current?.(c)}
             onCancel={() => credResolveRef.current?.(null)}
@@ -340,9 +345,10 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
 
 // Inline credential prompt for SSH connections without saved username/password.
 function CredentialPrompt({
-  needUser, host, onSubmit, onCancel,
+  needUser, authFailed, host, onSubmit, onCancel,
 }: {
   needUser: boolean;
+  authFailed?: boolean;
   host: string;
   onSubmit: (c: { username?: string; password?: string }) => void;
   onCancel: () => void;
@@ -364,6 +370,11 @@ function CredentialPrompt({
           {es ? "Credenciales requeridas" : "Credentials required"}
         </p>
         <p className="text-[11px] text-[var(--color-text-muted)] mb-3 truncate">{host}</p>
+        {authFailed && (
+          <p className="text-[11px] text-[var(--color-danger)] mb-2 -mt-1">
+            {es ? "Credenciales incorrectas, intenta de nuevo." : "Invalid credentials, try again."}
+          </p>
+        )}
         {needUser && (
           <input
             ref={userRef}

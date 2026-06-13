@@ -198,7 +198,7 @@ pub async fn connect_ssh(
                 .authenticate_password(&username, pw)
                 .await
                 .map_err(|e| format!("Password auth failed: {e}"))?;
-            if !ok { return Err("Password authentication rejected by server".to_string()); }
+            if !ok { return Err("AUTH_FAILED".to_string()); }
         }
     }
 
