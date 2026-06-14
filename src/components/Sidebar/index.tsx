@@ -1107,7 +1107,7 @@ export function Sidebar() {
                   onClick={() => { toggleGroupExpanded(group.id); selectGroup(group.id); setSidebarHint(buildGroupHint(group, lang, connections)); setQuickCtxFolderId(null); setQuickCtxGroupId(group.id); }}
                   onContextMenu={(e) => groupMenu(e, group)}
                   className={[
-                    "flex items-center gap-1.5 w-full px-2 py-1 transition-colors",
+                    "flex items-center gap-1.5 w-full px-2 py-0.5 transition-colors",
                     isGroupDropTarget
                       ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
                       : selectedGroupId === group.id
@@ -1300,9 +1300,9 @@ function TreePrefix({ continuations, isLast }: { continuations: boolean[]; isLas
   return (
     <span
       className="font-mono shrink-0 select-none text-[var(--color-border)]"
-      style={{ fontSize: "12px", whiteSpace: "pre", lineHeight: 1 }}
+      style={{ fontSize: "11px", whiteSpace: "pre", lineHeight: 1 }}
     >
-      {continuations.map((c) => (c ? "│   " : "    ")).join("")}{isLast ? "└──" : "├──"}{" "}
+      {continuations.map((c) => (c ? "│ " : "  ")).join("")}{isLast ? "└─" : "├─"}{" "}
     </span>
   );
 }
@@ -1409,7 +1409,7 @@ function FolderItem({
           onPointerDown={(e) => onFolderPointerDown(folder, e.clientX, e.clientY)}
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
           className={[
-            "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
+            "flex items-center w-full py-px pr-2 transition-colors text-left",
             isDropBefore ? "shadow-[inset_0_2px_0_0_var(--color-accent)]" : "",
             isDropAfter ? "shadow-[inset_0_-2px_0_0_var(--color-accent)]" : "",
             isFolderDropTarget
@@ -1541,7 +1541,7 @@ function ConnItem({
         onPointerDragStart?.(e.clientX, e.clientY);
       }}
       className={[
-        "flex items-center w-full py-0.5 pr-2 transition-colors text-left cursor-pointer select-none",
+        "flex items-center w-full py-px pr-2 transition-colors text-left cursor-pointer select-none",
         dragging ? "opacity-40" : "",
         isDropTarget ? "border-t-2 border-[var(--color-accent)]" : "",
         isSearchFocus || selected
