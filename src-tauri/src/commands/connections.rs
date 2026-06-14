@@ -46,6 +46,10 @@ pub struct Connection {
     // SSH port-forwarding tunnels, one per line: "L <listenPort> <host> <port>".
     #[serde(default)]
     pub tunnels: String,
+    #[serde(default)]
+    pub rdp_redirect_drives: bool,
+    #[serde(default)]
+    pub rdp_gateway: String,
 }
 
 fn default_rdp_security() -> String { "negotiate".to_string() }
@@ -81,6 +85,10 @@ pub struct NewConnection {
     pub rdp_color_depth: i64,
     #[serde(default)]
     pub tunnels: String,
+    #[serde(default)]
+    pub rdp_redirect_drives: bool,
+    #[serde(default)]
+    pub rdp_gateway: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -138,12 +146,15 @@ fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
         rdp_security: row.get::<_, String>(20).unwrap_or_else(|_| "negotiate".to_string()),
         rdp_color_depth: row.get::<_, i64>(21).unwrap_or(32),
         tunnels: row.get::<_, String>(22).unwrap_or_default(),
+        rdp_redirect_drives: row.get::<_, i64>(23).unwrap_or(0) != 0,
+        rdp_gateway: row.get::<_, String>(24).unwrap_or_default(),
     })
 }
 
 const SELECT_COLS: &str = "id, name, type, host, port, username, auth_type, key_path,
                            folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
-                           sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels";
+                           sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels,
+                           rdp_redirect_drives, rdp_gateway";
 
 #[tauri::command]
 pub fn get_connections() -> Result<Vec<Connection>, String> {
@@ -200,12 +211,13 @@ pub fn save_connection(conn: NewConnection) -> Result<Connection, String> {
         ).unwrap_or(0)
     };
     db.execute(
-        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels, rdp_redirect_drives, rdp_gateway)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
         params![id, conn.name, conn.conn_type, conn.host, conn.port,
                 conn.username, conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
                 conn.description, conn.domain, conn.rdp_admin as i64, sort_order, group_id,
-                conn.icon, conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.tunnels],
+                conn.icon, conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.tunnels,
+                conn.rdp_redirect_drives as i64, conn.rdp_gateway],
     )
     .map_err(|e| e.to_string())?;
 
@@ -224,11 +236,12 @@ pub fn update_connection(conn: Connection) -> Result<Connection, String> {
         "UPDATE connections SET name=?1,type=?2,host=?3,port=?4,username=?5,
          auth_type=?6,key_path=?7,folder_id=?8,notes=?9,description=?10,domain=?11,
          rdp_admin=?12,icon=?13,url=?14,custom_hosts=?15,rdp_security=?16,rdp_color_depth=?17,
-         tunnels=?18,updated_at=datetime('now') WHERE id=?19",
+         tunnels=?18,rdp_redirect_drives=?19,rdp_gateway=?20,updated_at=datetime('now') WHERE id=?21",
         params![conn.name, conn.conn_type, conn.host, conn.port, conn.username,
                 conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
                 conn.description, conn.domain, conn.rdp_admin as i64, conn.icon,
-                conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.tunnels, conn.id],
+                conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.tunnels,
+                conn.rdp_redirect_drives as i64, conn.rdp_gateway, conn.id],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
@@ -603,8 +616,8 @@ pub fn import_connections(json: String) -> Result<usize, String> {
         };
         let ok = db.execute(
             "INSERT OR IGNORE INTO connections
-             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id,sort_order,icon,url,custom_hosts,tunnels)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id,sort_order,icon,url,custom_hosts,tunnels,rdp_redirect_drives,rdp_gateway)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
             params![
                 id,
                 item["name"].as_str().unwrap_or("Imported"),
@@ -624,6 +637,8 @@ pub fn import_connections(json: String) -> Result<usize, String> {
                 item["url"].as_str().unwrap_or(""),
                 item["custom_hosts"].as_str().unwrap_or(""),
                 item["tunnels"].as_str().unwrap_or(""),
+                item["rdp_redirect_drives"].as_bool().unwrap_or(false) as i64,
+                item["rdp_gateway"].as_str().unwrap_or(""),
             ],
         ).is_ok();
 

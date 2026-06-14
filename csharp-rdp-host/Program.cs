@@ -160,9 +160,9 @@ static class Program
         Application.SetCompatibleTextRenderingDefault(false);
 
         // Parse arguments
-        string server = null, user = null, domain = "", password = "", security = "";
+        string server = null, user = null, domain = "", password = "", security = "", gateway = "";
         IntPtr parentHwnd = IntPtr.Zero;
-        bool adminMode = false;
+        bool adminMode = false, redirectDrives = false;
         int port = 3389, width = 1280, height = 800;
 
         for (int i = 0; i < args.Length; i++)
@@ -177,6 +177,7 @@ static class Program
                     case "--height": height = int.Parse(args[++i]); break;
                     case "--parent":   parentHwnd = new IntPtr(long.Parse(args[++i])); break;
                     case "--security": security  = args[++i]; break;
+                    case "--gateway":  gateway   = args[++i]; break;
                     case "--user":
                         string raw = args[++i];
                         if (raw.Contains("\\"))
@@ -196,6 +197,7 @@ static class Program
                 }
             }
             if (args[i].ToLower() == "--admin") adminMode = true;
+            if (args[i].ToLower() == "--drives") redirectDrives = true;
         }
 
         if (server == null || user == null)
@@ -222,7 +224,7 @@ static class Program
         // Build and run the form
         var form = new RdpHostForm(
             server, port, user, domain, password,
-            parentHwnd, adminMode, width, height, clsid);
+            parentHwnd, adminMode, width, height, clsid, redirectDrives, gateway);
         Application.Run(form);
         return 0;
     }
@@ -295,9 +297,9 @@ static class Program
 // ── Host form ─────────────────────────────────────────────────────────────────
 public sealed class RdpHostForm : Form
 {
-    readonly string _server, _user, _domain, _password, _clsid;
+    readonly string _server, _user, _domain, _password, _clsid, _gateway;
     readonly IntPtr _parentHwnd;
-    readonly bool _adminMode;
+    readonly bool _adminMode, _redirectDrives;
     readonly int _port, _rdpWidth, _rdpHeight;
 
     RdpAxControl _ax;
@@ -327,7 +329,8 @@ public sealed class RdpHostForm : Form
 
     public RdpHostForm(string server, int port, string user, string domain,
                        string password, IntPtr parentHwnd, bool adminMode,
-                       int width, int height, string clsid)
+                       int width, int height, string clsid,
+                       bool redirectDrives, string gateway)
     {
         _server    = server;
         _port      = port;
@@ -339,6 +342,8 @@ public sealed class RdpHostForm : Form
         _rdpWidth  = width;
         _rdpHeight = height;
         _clsid     = clsid;
+        _redirectDrives = redirectDrives;
+        _gateway   = gateway;
 
         Text            = "OrbitalRdpHost";
         FormBorderStyle = FormBorderStyle.None;
@@ -437,6 +442,26 @@ public sealed class RdpHostForm : Form
 
             if (_adminMode)
                 try { _rdp.AdvancedSettings9.ConnectToAdministerServer = true; } catch { }
+
+            // Redirect local drives into the session
+            if (_redirectDrives)
+            {
+                try { _rdp.AdvancedSettings9.RedirectDrives = true; } catch { }
+                try { _rdp.AdvancedSettings2.RedirectDrives = true; } catch { }
+            }
+
+            // RD Gateway — route through the gateway using the session credentials
+            if (!string.IsNullOrEmpty(_gateway))
+            {
+                try
+                {
+                    _rdp.TransportSettings.GatewayUsageMethod = 1;        // TSC_PROXY_MODE_DIRECT
+                    _rdp.TransportSettings.GatewayHostname    = _gateway;
+                    _rdp.TransportSettings2.GatewayProfileUsageMethod = 1; // explicit
+                    _rdp.TransportSettings2.GatewayCredsSource = 0;        // NTLM / same creds
+                }
+                catch { }
+            }
 
             Emit("STATE:connecting");
             _rdp.Connect();

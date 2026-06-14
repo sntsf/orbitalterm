@@ -114,6 +114,8 @@ function ConnectionProperties() {
   const [url, setUrl] = useState("");
   const [customHosts, setCustomHosts] = useState("");
   const [tunnels, setTunnels] = useState("");
+  const [rdpRedirectDrives, setRdpRedirectDrives] = useState(false);
+  const [rdpGateway, setRdpGateway] = useState("");
   const [connectError, setConnectError] = useState("");
   const [focusedField, setFocusedField] = useState<FieldKey | null>(null);
 
@@ -143,6 +145,8 @@ function ConnectionProperties() {
         url: url.trim(),
         custom_hosts: customHosts,
         tunnels,
+        rdp_redirect_drives: rdpRedirectDrives,
+        rdp_gateway: rdpGateway.trim(),
       });
       setConnections(await getConnections());
     } catch (err) {
@@ -170,6 +174,8 @@ function ConnectionProperties() {
     setUrl(existing.url ?? "");
     setCustomHosts(existing.custom_hosts ?? "");
     setTunnels(existing.tunnels ?? "");
+    setRdpRedirectDrives(existing.rdp_redirect_drives ?? false);
+    setRdpGateway(existing.rdp_gateway ?? "");
     setPassword("");
     setConnectError("");
     if (existing.auth_type === "password") {
@@ -186,7 +192,7 @@ function ConnectionProperties() {
     const timer = setTimeout(() => { doSaveRef.current?.(); }, 600);
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts, tunnels]);
+  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts, tunnels, rdpRedirectDrives, rdpGateway]);
 
   const handleTypeChange = (newType: ConnectionType) => {
     setType(newType);
@@ -383,6 +389,23 @@ function ConnectionProperties() {
             <input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="WORKGROUP"
               onFocus={focus("domain")} onBlur={blur} className={inp} />
           </Row>
+        )}
+
+        {type === "rdp" && (
+          <>
+            <Row label="RD Gateway">
+              <input value={rdpGateway} onChange={(e) => setRdpGateway(e.target.value)}
+                placeholder={lang === "es" ? "host del gateway (opcional)" : "gateway host (optional)"}
+                className={inp} />
+            </Row>
+            <Row label={lang === "es" ? "Unidades" : "Drives"}>
+              <label className="flex items-center gap-1.5 text-[12px] text-[var(--color-text-primary)] cursor-pointer">
+                <input type="checkbox" checked={rdpRedirectDrives}
+                  onChange={(e) => setRdpRedirectDrives(e.target.checked)} />
+                {lang === "es" ? "Redirigir mis discos locales" : "Redirect my local drives"}
+              </label>
+            </Row>
+          </>
         )}
 
         {type === "browser" ? (

@@ -640,6 +640,8 @@ export function Sidebar() {
       domain: conn.domain, group_id: conn.group_id,
       icon: conn.icon, url: conn.url ?? "", custom_hosts: conn.custom_hosts ?? "",
       tunnels: conn.tunnels ?? "",
+      rdp_redirect_drives: conn.rdp_redirect_drives ?? false,
+      rdp_gateway: conn.rdp_gateway ?? "",
     });
     await copyPassword(conn.id, created.id).catch(() => {});
 

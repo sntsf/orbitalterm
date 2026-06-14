@@ -232,5 +232,12 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE schema_version SET version=8", [])?;
     }
 
+    if ver < 9 {
+        // RDP: local drive redirection + RD Gateway host.
+        conn.execute("ALTER TABLE connections ADD COLUMN rdp_redirect_drives INTEGER NOT NULL DEFAULT 0", []).ok();
+        conn.execute("ALTER TABLE connections ADD COLUMN rdp_gateway TEXT NOT NULL DEFAULT ''", []).ok();
+        conn.execute("UPDATE schema_version SET version=9", [])?;
+    }
+
     Ok(())
 }

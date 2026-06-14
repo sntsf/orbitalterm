@@ -32,6 +32,8 @@ export interface Connection {
   rdp_security?: string;
   rdp_color_depth?: number;
   tunnels: string;
+  rdp_redirect_drives: boolean;
+  rdp_gateway: string;
 }
 
 export interface Folder {
