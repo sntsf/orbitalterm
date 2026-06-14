@@ -86,6 +86,7 @@ export function Sidebar() {
   const groups = useAppStore((s) => s.groups);
   const searchQuery = useAppStore((s) => s.searchQuery);
   const selectedConnectionId = useAppStore((s) => s.selectedConnectionId);
+  const selectedFolderId = useAppStore((s) => s.selectedFolderId);
   const setConnections = useAppStore((s) => s.setConnections);
   const setFolders = useAppStore((s) => s.setFolders);
   const setGroups = useAppStore((s) => s.setGroups);
@@ -188,6 +189,31 @@ export function Sidebar() {
 
   // Search keyboard navigation
   const [searchFocusIdx, setSearchFocusIdx] = useState(0);
+
+  // Keyboard navigation of the connection tree (↑/↓ move the selection through
+  // the visible rows). Uses the live DOM order so it always matches what's
+  // rendered, regardless of folders/groups/search state.
+  const treeRef = useRef<HTMLDivElement>(null);
+  const navigateTree = (dir: 1 | -1) => {
+    const root = treeRef.current;
+    if (!root) return;
+    const els = Array.from(root.querySelectorAll<HTMLElement>("[data-conn-id],[data-folder-id]"));
+    if (els.length === 0) return;
+    const cursor = selectedConnectionId ?? selectedFolderId;
+    let idx = els.findIndex(
+      (el) => el.dataset.connId === cursor || el.dataset.folderId === cursor,
+    );
+    if (idx < 0) idx = dir > 0 ? -1 : els.length; // start from an edge
+    const next = els[Math.max(0, Math.min(els.length - 1, idx + dir))];
+    if (!next) return;
+    if (next.dataset.connId) selectConnection(next.dataset.connId);
+    else if (next.dataset.folderId) selectFolder(next.dataset.folderId);
+    next.scrollIntoView({ block: "nearest" });
+  };
+  const handleTreeKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); navigateTree(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); navigateTree(-1); }
+  };
 
   useEffect(() => {
     getConnections().then(setConnections).catch(console.error);
@@ -723,6 +749,14 @@ export function Sidebar() {
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setSearchFocusIdx((i) => (i - 1 + searchMatches.length) % searchMatches.length);
+    } else if (e.key === "ArrowRight") {
+      // Move from the search box into the tree: select the focused match and
+      // hand keyboard focus to the tree so ↑/↓ then walk the connections.
+      e.preventDefault();
+      const hit = searchMatches[searchFocusIdx];
+      if (hit?.kind === "conn") selectConnection(hit.id);
+      else if (hit?.kind === "folder") selectFolder(hit.id);
+      treeRef.current?.focus();
     } else if (e.key === "Enter") {
       const hit = searchMatches[searchFocusIdx];
       if (hit?.kind === "conn") {
@@ -892,7 +926,12 @@ export function Sidebar() {
       </div>
 
       {/* Connection list — tree view; search reveals & jumps to the focused match */}
-      <div className="flex-1 overflow-y-auto min-h-0 py-0.5">
+      <div
+        ref={treeRef}
+        tabIndex={-1}
+        onKeyDown={handleTreeKeyDown}
+        className="flex-1 overflow-y-auto min-h-0 py-0.5 outline-none"
+      >
         {/* New group input */}
         {creatingGroup && (
           <div className="flex items-center gap-1 px-2 py-1">
