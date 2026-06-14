@@ -207,6 +207,9 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
               host: connection.host,
               raw,
             });
+            // The notification reports the failure — don't leave a dead error
+            // tab open; close it (matches RDP behaviour).
+            closeTab(tab.id);
             return;
           }
         }
