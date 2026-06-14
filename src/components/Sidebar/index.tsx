@@ -87,6 +87,7 @@ export function Sidebar() {
   const searchQuery = useAppStore((s) => s.searchQuery);
   const selectedConnectionId = useAppStore((s) => s.selectedConnectionId);
   const selectedFolderId = useAppStore((s) => s.selectedFolderId);
+  const selectedGroupId = useAppStore((s) => s.selectedGroupId);
   const setConnections = useAppStore((s) => s.setConnections);
   const setFolders = useAppStore((s) => s.setFolders);
   const setGroups = useAppStore((s) => s.setGroups);
@@ -197,17 +198,18 @@ export function Sidebar() {
   const navigateTree = (dir: 1 | -1) => {
     const root = treeRef.current;
     if (!root) return;
-    const els = Array.from(root.querySelectorAll<HTMLElement>("[data-conn-id],[data-folder-id]"));
+    const els = Array.from(root.querySelectorAll<HTMLElement>("[data-conn-id],[data-folder-id],[data-group-id]"));
     if (els.length === 0) return;
-    const cursor = selectedConnectionId ?? selectedFolderId;
+    const cursor = selectedConnectionId ?? selectedFolderId ?? selectedGroupId;
     let idx = els.findIndex(
-      (el) => el.dataset.connId === cursor || el.dataset.folderId === cursor,
+      (el) => el.dataset.connId === cursor || el.dataset.folderId === cursor || el.dataset.groupId === cursor,
     );
     if (idx < 0) idx = dir > 0 ? -1 : els.length; // start from an edge
     const next = els[Math.max(0, Math.min(els.length - 1, idx + dir))];
     if (!next) return;
     if (next.dataset.connId) selectConnection(next.dataset.connId);
     else if (next.dataset.folderId) selectFolder(next.dataset.folderId);
+    else if (next.dataset.groupId) selectGroup(next.dataset.groupId);
     next.scrollIntoView({ block: "nearest" });
   };
   const handleTreeKeyDown = (e: React.KeyboardEvent) => {
@@ -825,6 +827,7 @@ export function Sidebar() {
     searchMatchIds,
     searchFocusId,
     searchFocusFolderId,
+    selectedFolderId,
   };
 
   return (
@@ -989,7 +992,9 @@ export function Sidebar() {
                     "flex items-center gap-1.5 w-full px-2 py-1 transition-colors",
                     isGroupDropTarget
                       ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
-                      : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
+                      : selectedGroupId === group.id
+                        ? "bg-[var(--color-accent)]/25 text-[var(--color-text-primary)]"
+                        : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
                   ].join(" ")}
                 >
                   {expanded
@@ -1219,6 +1224,7 @@ interface SharedProps {
   searchMatchIds: Set<string>;
   searchFocusId: string | null;
   searchFocusFolderId: string | null;
+  selectedFolderId: string | null;
 }
 
 // ── FolderItem (recursive) ────────────────────────────────────────────────────
@@ -1235,7 +1241,7 @@ function FolderItem({
     creatingFolder, newFolderParentId, newFolderName,
     onSubfolderNameChange, onSubfolderConfirm, onSubfolderCancel, folderInputRef,
     dragId, dropTarget, onConnPointerDown, onFolderPointerDown,
-    searchMatchIds, searchFocusId, searchFocusFolderId,
+    searchMatchIds, searchFocusId, searchFocusFolderId, selectedFolderId,
   } = shared;
 
   const expanded = expandedFolders.has(folder.id);
@@ -1243,7 +1249,7 @@ function FolderItem({
   const myConns = connsByFolder.get(folder.id) ?? [];
 
   const isFolderDropTarget = dropTarget === `folder:${folder.id}`;
-  const isSearchFocus = searchFocusFolderId === folder.id;
+  const isSearchFocus = searchFocusFolderId === folder.id || selectedFolderId === folder.id;
   const Icon = expanded ? FolderOpen : Folder;
   const folderColor = iconColorClass(folder.color);
   const isRenaming = renamingFolderId === folder.id;
