@@ -351,7 +351,14 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
           </div>
         )}
         <div ref={containerRef} className="w-full h-full" style={{ padding: "4px" }}
-          onMouseDown={() => termRef.current?.focus()} />
+          onMouseDown={() => termRef.current?.focus()}
+          onContextMenu={(e) => {
+            // Right-click pastes the clipboard into the session (PuTTY-style).
+            e.preventDefault();
+            navigator.clipboard.readText().then((text) => {
+              if (text && sessionIdRef.current) sendInput(sessionIdRef.current, text).catch(console.error);
+            }).catch(() => {});
+          }} />
         {credPrompt && (
           <CredentialPrompt
             needUser={credPrompt.needUser}
