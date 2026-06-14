@@ -418,8 +418,8 @@ function ConnectionProperties() {
               rows={2}
               spellCheck={false}
               placeholder={lang === "es"
-                ? "Uno por línea:\nL 8080 db.interna 5432"
-                : "One per line:\nL 8080 db.internal 5432"}
+                ? "Uno por línea:\nL 8080 db.interna 5432\nR 9000 localhost 3000"
+                : "One per line:\nL 8080 db.internal 5432\nR 9000 localhost 3000"}
               className={inp + " resize-none font-mono text-[11px]"}
             />
           </Row>

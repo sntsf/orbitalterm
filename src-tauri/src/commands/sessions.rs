@@ -195,13 +195,23 @@ pub async fn connect_ssh(
         .or_else(|| if connection.username.is_empty() { None } else { Some(connection.username.clone()) });
     let Some(username) = username else { return Err(NEED_CREDENTIALS.to_string()); };
 
+    // Parse port-forwarding tunnels up front: remote (-R) routing must be known
+    // when the connection handler is created.
+    let tunnels = parse_tunnels(&connection.tunnels);
+    let mut forwards = std::collections::HashMap::new();
+    for (kind, listen_port, dest_host, dest_port) in &tunnels {
+        if *kind == 'R' {
+            forwards.insert(*listen_port as u32, (dest_host.clone(), *dest_port));
+        }
+    }
+
     let config = Arc::new(russh::client::Config {
         inactivity_timeout: None,
         keepalive_interval: Some(std::time::Duration::from_secs(30)),
         ..Default::default()
     });
     let addr = (connection.host.as_str(), connection.port as u16);
-    let mut sh = russh::client::connect(config, addr, SshHandler)
+    let mut sh = russh::client::connect(config, addr, SshHandler { forwards })
         .await
         .map_err(|e| format!("SSH connect failed: {e}"))?;
 
@@ -256,6 +266,14 @@ pub async fn connect_ssh(
         }
     }
 
+    // Ask the server to listen for each remote (-R) tunnel. Incoming forwarded
+    // connections are routed to the local destination by the handler.
+    for (kind, listen_port, _dest_host, _dest_port) in &tunnels {
+        if *kind == 'R' {
+            let _ = sh.tcpip_forward("", *listen_port as u32).await;
+        }
+    }
+
     // Open the interactive shell channel (PTY + shell).
     let mut channel = sh
         .channel_open_session()
@@ -305,14 +323,15 @@ pub async fn connect_ssh(
         let _ = app2.emit(&format!("ssh-closed-{sid2}"), ());
     });
 
-    // Set up port-forwarding tunnels (background tasks; aborted on disconnect).
+    // Set up local (-L) forwards as background tasks (aborted on disconnect).
+    // Remote (-R) forwards were already requested above and are routed by the
+    // handler. Dynamic (-D / SOCKS) comes in a later wave.
     let mut tunnel_tasks = Vec::new();
-    for (kind, listen_port, dest_host, dest_port) in parse_tunnels(&connection.tunnels) {
+    for (kind, listen_port, dest_host, dest_port) in tunnels {
         if kind == 'L' {
             let task = tokio::spawn(local_forward(Arc::clone(&handle), listen_port, dest_host, dest_port));
             tunnel_tasks.push(task.abort_handle());
         }
-        // -R / -D are handled in a later wave.
     }
 
     sessions.lock().unwrap().insert(session_id.clone(), SshSession { tx, handle, tunnel_tasks });
