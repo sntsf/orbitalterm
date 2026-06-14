@@ -138,6 +138,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(new_detached_session_store())
         .manage(browser::new_browser_sessions())
         .manage(ssh::new_ssh_sessions())

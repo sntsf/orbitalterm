@@ -46,6 +46,7 @@ roxmltree = "0.20"
 aes-gcm = "0.10"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 sha1 = "0.10"
+tauri-plugin-clipboard-manager = "2.3.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 

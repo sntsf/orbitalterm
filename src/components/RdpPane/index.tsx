@@ -18,6 +18,7 @@ import { useNotifStore, NOTIF_H_EXPANDED } from "../../store/useNotifStore";
 import { useT, useI18nStore } from "../../store/useI18nStore";
 import { friendlyConnError } from "../../lib/connErrors";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
+import { clipboardWrite } from "../../lib/clipboard";
 import type { Tab } from "../../types";
 
 function parseMissingClient(msg: string): { pkg: string; rest: string } | null {
@@ -622,7 +623,7 @@ export function RdpPane({ tab }: RdpPaneProps) {
                 <code
                   className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-3 py-2 text-xs font-mono text-[var(--color-text-primary)] text-left cursor-pointer select-all"
                   title="Click to copy"
-                  onClick={() => navigator.clipboard.writeText(`sudo apt install freerdp3-x11`)}
+                  onClick={() => clipboardWrite(`sudo apt install freerdp3-x11`)}
                 >
                   sudo apt install freerdp3-x11
                 </code>

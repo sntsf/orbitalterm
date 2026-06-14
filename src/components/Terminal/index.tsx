@@ -7,6 +7,7 @@ import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
 import { HardDrive } from "lucide-react";
 import { connectSsh, disconnectSsh, resizePty, sendInput, sftpDisconnect } from "../../lib/commands";
+import { clipboardRead, clipboardWrite } from "../../lib/clipboard";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import { useAppStore } from "../../store/useAppStore";
 import { usePrefsStore, resolvedTermTheme } from "../../store/usePrefsStore";
@@ -140,7 +141,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
     });
     term.onSelectionChange(() => {
       const sel = term.getSelection();
-      if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+      if (sel) clipboardWrite(sel);
     });
 
     const cleanups: Array<() => void> = [];
@@ -355,9 +356,9 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
           onContextMenu={(e) => {
             // Right-click pastes the clipboard into the session (PuTTY-style).
             e.preventDefault();
-            navigator.clipboard.readText().then((text) => {
+            clipboardRead().then((text) => {
               if (text && sessionIdRef.current) sendInput(sessionIdRef.current, text).catch(console.error);
-            }).catch(() => {});
+            });
           }} />
         {credPrompt && (
           <CredentialPrompt
