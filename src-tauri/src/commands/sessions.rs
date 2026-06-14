@@ -321,10 +321,12 @@ pub async fn connect_ssh(
     let connection = load_connection(&connection_id)?;
 
     // Effective username: explicit (prompt) → saved → none (ask the frontend).
-    let username = username
+    // Resolved here but NOT enforced yet — we attempt the TCP transport first so
+    // an offline/unreachable host fails with a network error instead of
+    // pointlessly prompting for credentials a dead box will never accept.
+    let username_opt = username
         .filter(|u| !u.is_empty())
         .or_else(|| if connection.username.is_empty() { None } else { Some(connection.username.clone()) });
-    let Some(username) = username else { return Err(NEED_CREDENTIALS.to_string()); };
 
     // Parse port-forwarding tunnels up front: remote (-R) routing must be known
     // when the connection handler is created.
@@ -350,13 +352,19 @@ pub async fn connect_ssh(
 
     // Connect directly, or via a bastion (ProxyJump) when configured. The jump
     // session is kept alive in SshSession for the lifetime of this connection.
+    // The transport is established BEFORE we require a username, so a host that
+    // is off / out of network reports a connection error rather than a
+    // credential prompt.
     let (mut sh, jump_handle) = if connection.proxy_jump.trim().is_empty() {
         let sh = russh::client::connect(config, addr, handler)
             .await
             .map_err(|e| format!("SSH connect failed: {e}"))?;
         (sh, None)
     } else {
-        let (juser, jhost, jport) = parse_jump(&connection.proxy_jump, &username);
+        // ProxyJump needs a username to default the bastion user, so it must be
+        // known before we can reach the target through the bastion.
+        let Some(ref username) = username_opt else { return Err(NEED_CREDENTIALS.to_string()); };
+        let (juser, jhost, jport) = parse_jump(&connection.proxy_jump, username);
         let jconfig = Arc::new(russh::client::Config {
             keepalive_interval: Some(std::time::Duration::from_secs(30)),
             ..Default::default()
@@ -376,6 +384,9 @@ pub async fn connect_ssh(
             .map_err(|e| format!("SSH connect via bastion failed: {e}"))?;
         (sh, Some(Arc::new(jump)))
     };
+
+    // Transport is up — NOW require a username (prompt only reaches a live host).
+    let Some(username) = username_opt else { return Err(NEED_CREDENTIALS.to_string()); };
 
     // One russh session authenticates ONCE; the terminal shell and any SFTP
     // browser then share it (MobaXterm-style single session).
