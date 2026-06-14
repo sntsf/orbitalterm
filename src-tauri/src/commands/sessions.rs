@@ -287,7 +287,12 @@ pub async fn connect_ssh(
         ..Default::default()
     });
     let addr = (connection.host.as_str(), connection.port as u16);
-    let mut sh = russh::client::connect(config, addr, SshHandler { forwards })
+    let handler = SshHandler {
+        host: connection.host.clone(),
+        port: connection.port as u16,
+        forwards,
+    };
+    let mut sh = russh::client::connect(config, addr, handler)
         .await
         .map_err(|e| format!("SSH connect failed: {e}"))?;
 

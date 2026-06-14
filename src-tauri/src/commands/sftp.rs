@@ -47,7 +47,12 @@ pub async fn sftp_connect(
     });
 
     let addr = (connection.host.as_str(), connection.port as u16);
-    let mut sh = russh::client::connect(config, addr, SshHandler::default())
+    let handler = SshHandler {
+        host: connection.host.clone(),
+        port: connection.port as u16,
+        ..Default::default()
+    };
+    let mut sh = russh::client::connect(config, addr, handler)
         .await
         .map_err(|e| format!("SSH connect failed: {e}"))?;
 
