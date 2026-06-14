@@ -322,17 +322,13 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
           <button
             onClick={toggleSftp}
             title={showSftp
-              ? (paneLang === "es" ? "Ocultar vista de ficheros" : "Hide file view")
-              : (paneLang === "es" ? "Mostrar vista de ficheros" : "Show file view")}
-            className={`flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-medium shadow-sm transition-colors ${
-              showSftp
-                ? "bg-[var(--color-accent)] text-white"
-                : "bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]"
-            }`}
+              ? (paneLang === "es" ? "Ocultar panel de ficheros" : "Hide file panel")
+              : (paneLang === "es" ? "Mostrar panel de ficheros" : "Show file panel")}
+            className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-medium shadow-sm transition-colors bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]"
           >
             <HardDrive size={14} />
             <span>{showSftp
-              ? (paneLang === "es" ? "Ocultar vista de ficheros" : "Hide file view")
+              ? (paneLang === "es" ? "Ocultar panel de ficheros" : "Hide file panel")
               : (paneLang === "es" ? "Vista de ficheros" : "File view")}</span>
           </button>
         </div>

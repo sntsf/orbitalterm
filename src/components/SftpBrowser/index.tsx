@@ -575,6 +575,7 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
           label={selectedFiles.length > 1 ? `Download (${selectedFiles.length})` : "Download"}
           onClick={handleDownloadSelected}
           disabled={selectedFiles.length === 0}
+          active={selectedFiles.length > 0}
         />
         <TBtn icon={<FolderPlus size={11} />} label="Carpeta" onClick={() => setNewFolderMode(true)} />
         <TBtn icon={<FilePlus size={11} />} label="Archivo" onClick={() => setNewFileMode(true)} />
