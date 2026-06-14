@@ -231,6 +231,27 @@ export function Sidebar() {
   const handleTreeKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") { e.preventDefault(); navigateTree(1); }
     else if (e.key === "ArrowUp") { e.preventDefault(); navigateTree(-1); }
+    // →/← expand/collapse the highlighted folder or BD (group). Connections
+    // have nothing to expand, so the keys are ignored when one is selected.
+    else if (e.key === "ArrowRight") {
+      if (selectedFolderId) {
+        e.preventDefault();
+        setExpandedFolders((prev) => new Set(prev).add(selectedFolderId));
+      } else if (selectedGroupId) {
+        e.preventDefault();
+        const gid = selectedGroupId;
+        setGroupExpanded((prev) => ({ ...prev, [gid]: true }));
+      }
+    } else if (e.key === "ArrowLeft") {
+      if (selectedFolderId) {
+        e.preventDefault();
+        setExpandedFolders((prev) => { const next = new Set(prev); next.delete(selectedFolderId); return next; });
+      } else if (selectedGroupId) {
+        e.preventDefault();
+        const gid = selectedGroupId;
+        setGroupExpanded((prev) => ({ ...prev, [gid]: false }));
+      }
+    }
   };
 
   useEffect(() => {
