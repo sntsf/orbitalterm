@@ -216,6 +216,24 @@ export default function App() {
       .catch(() => setLabel("main"));
   }, []);
 
+  // Swallow the webview reload shortcuts (F5, Ctrl/Cmd+R, Ctrl+Shift+R). A
+  // reload tears down the whole frontend and drops every open tab/session, so
+  // we block it at the window level. Captured so it runs before any other
+  // handler. Refreshing a file browser has its own in-app button.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const isReload =
+        e.key === "F5" ||
+        ((e.ctrlKey || e.metaKey) && (e.key === "r" || e.key === "R"));
+      if (isReload) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, []);
+
   if (label === "checking") return null;
   if (label === "main") return <MainApp />;
   return <DetachedApp connectionId={label.slice("detached-".length)} windowLabel={label} />;
