@@ -151,13 +151,28 @@ fn send_set_pixel_format(s: &mut TcpStream) -> Result<(), String> {
     write_all(s, msg)
 }
 
-// Request Raw (0) and CopyRect (1) encodings
+// Advertise Hextile (5), CopyRect (1) and Raw (0) in preference order. Hextile
+// drastically cuts bandwidth vs Raw for typical desktop content.
 fn send_set_encodings(s: &mut TcpStream) -> Result<(), String> {
     let mut msg = vec![2u8, 0]; // type=2, padding
-    msg.extend_from_slice(&2u16.to_be_bytes()); // num-encodings=2
-    msg.extend_from_slice(&0i32.to_be_bytes()); // Raw
+    msg.extend_from_slice(&3u16.to_be_bytes()); // num-encodings=3
+    msg.extend_from_slice(&5i32.to_be_bytes()); // Hextile (preferred)
     msg.extend_from_slice(&1i32.to_be_bytes()); // CopyRect
+    msg.extend_from_slice(&0i32.to_be_bytes()); // Raw
     write_all(s, &msg)
+}
+
+// Fill a rectangle of the framebuffer with a single 4-byte (RGBA) colour.
+fn fill_rect(fb: &mut [u8], fb_width: u32, x: u32, y: u32, w: u32, h: u32, color: &[u8; 4]) {
+    for row in 0..h {
+        let mut off = (((y + row) * fb_width + x) * 4) as usize;
+        for _ in 0..w {
+            if off + 4 <= fb.len() {
+                fb[off..off + 4].copy_from_slice(color);
+            }
+            off += 4;
+        }
+    }
 }
 
 fn send_fb_update_request(
@@ -350,6 +365,60 @@ fn session_thread(
                                     let dst_off = (((ry + row) * width + rx) * BPP) as usize;
                                     if dst_off + row_bytes <= fb.len() {
                                         fb[dst_off..dst_off + row_bytes].copy_from_slice(&temp);
+                                    }
+                                }
+                            }
+                        }
+                        5 => {
+                            // Hextile: 16x16 tiles. bg/fg colours persist across
+                            // tiles until re-specified.
+                            let mut bg = [0u8; 4];
+                            let mut fg = [0u8; 4];
+                            let tiles_x = rw.div_ceil(16);
+                            let tiles_y = rh_.div_ceil(16);
+                            'tiles: for tyi in 0..tiles_y {
+                                for txi in 0..tiles_x {
+                                    let tx = rx + txi * 16;
+                                    let ty = ry + tyi * 16;
+                                    let tw = (rw - txi * 16).min(16);
+                                    let th = (rh_ - tyi * 16).min(16);
+
+                                    let mut sub = [0u8; 1];
+                                    if read_s.read_exact(&mut sub).is_err() { bad = true; break 'tiles; }
+                                    let mask = sub[0];
+
+                                    if mask & 0x01 != 0 {
+                                        // Raw tile
+                                        let mut px = vec![0u8; (tw * th * BPP) as usize];
+                                        if read_s.read_exact(&mut px).is_err() { bad = true; break 'tiles; }
+                                        for row in 0..th {
+                                            let src = (row * tw * BPP) as usize;
+                                            let dst = (((ty + row) * width + tx) * BPP) as usize;
+                                            let rb = (tw * BPP) as usize;
+                                            if dst + rb <= fb.len() { fb[dst..dst + rb].copy_from_slice(&px[src..src + rb]); }
+                                        }
+                                        continue;
+                                    }
+                                    if mask & 0x02 != 0 && read_s.read_exact(&mut bg).is_err() { bad = true; break 'tiles; }
+                                    if mask & 0x04 != 0 && read_s.read_exact(&mut fg).is_err() { bad = true; break 'tiles; }
+                                    fill_rect(&mut fb, width, tx, ty, tw, th, &bg);
+
+                                    if mask & 0x08 != 0 {
+                                        let mut nb = [0u8; 1];
+                                        if read_s.read_exact(&mut nb).is_err() { bad = true; break 'tiles; }
+                                        let coloured = mask & 0x10 != 0;
+                                        for _ in 0..nb[0] {
+                                            let mut color = fg;
+                                            if coloured && read_s.read_exact(&mut color).is_err() { bad = true; break 'tiles; }
+                                            let mut xy = [0u8; 1];
+                                            let mut wh = [0u8; 1];
+                                            if read_s.read_exact(&mut xy).is_err() || read_s.read_exact(&mut wh).is_err() { bad = true; break 'tiles; }
+                                            let sx = (xy[0] >> 4) as u32;
+                                            let sy = (xy[0] & 0x0f) as u32;
+                                            let sw = (wh[0] >> 4) as u32 + 1;
+                                            let sh = (wh[0] & 0x0f) as u32 + 1;
+                                            fill_rect(&mut fb, width, tx + sx, ty + sy, sw, sh, &color);
+                                        }
                                     }
                                 }
                             }
