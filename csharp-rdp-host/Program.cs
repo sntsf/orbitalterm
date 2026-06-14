@@ -207,8 +207,19 @@ static class Program
             return 1;
         }
 
-        // Read password from stdin (Rust writes it and closes stdin immediately)
-        try { password = Console.In.ReadLine() ?? ""; } catch { password = ""; }
+        // Read password from stdin (Rust writes it as UTF-8 and closes stdin
+        // immediately). Decode explicitly as UTF-8 — Console.In would use the
+        // console's ANSI/OEM code page and corrupt non-ASCII characters
+        // (e.g. '£'), producing a wrong password.
+        try
+        {
+            using (var stdin = Console.OpenStandardInput())
+            using (var reader = new System.IO.StreamReader(stdin, new System.Text.UTF8Encoding(false)))
+            {
+                password = reader.ReadLine() ?? "";
+            }
+        }
+        catch { password = ""; }
 
         // Pick the best available CLSID
         string clsid = PickClsid();
