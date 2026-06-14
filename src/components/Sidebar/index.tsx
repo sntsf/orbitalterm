@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
-  Plus, Minus, Search, FolderOpen, Folder, Terminal,
+  Plus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
-  ChevronRight, ChevronDown, Database, X, Bell, Globe,
+  ChevronRight, ChevronDown, Database, X, Bell, Globe, SquarePlus, SquareMinus,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useI18nStore, useT } from "../../store/useI18nStore";
@@ -868,14 +868,14 @@ export function Sidebar() {
               className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
               title={t("expandAll")}
             >
-              <Plus size={14} />
+              <SquarePlus size={14} />
             </button>
             <button
               onClick={collapseAllFolders}
               className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
               title={t("collapseAll")}
             >
-              <Minus size={14} />
+              <SquareMinus size={14} />
             </button>
             <span className="w-px h-4 bg-[var(--color-border)] mx-0.5" />
             <button
@@ -1296,11 +1296,15 @@ function FolderItem({
           ].join(" ")}
         >
           <TreePrefix continuations={continuations} isLast={isLast} />
+          {childItems.length > 0 ? (
+            expanded
+              ? <SquareMinus size={12} className="shrink-0 mr-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] rounded-[2px] hover:bg-[var(--color-bg-hover)]" />
+              : <SquarePlus size={12} className="shrink-0 mr-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] rounded-[2px] hover:bg-[var(--color-bg-hover)]" />
+          ) : (
+            <span className="shrink-0 mr-1" style={{ width: 12 }} />
+          )}
           <Icon size={12} className={`${folderColor} shrink-0`} />
           <span className="text-[13px] truncate flex-1 ml-1 text-left font-medium">{folder.name}</span>
-          {expanded
-            ? <ChevronDown size={9} className="shrink-0 opacity-40 mr-0.5" />
-            : <ChevronRight size={9} className="shrink-0 opacity-30 mr-0.5" />}
         </button>
       )}
 
