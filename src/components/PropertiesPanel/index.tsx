@@ -38,6 +38,13 @@ const AUTH_FOR_TYPE: Record<ConnectionType, AuthType[]> = {
 
 type FieldKey = "type" | "name" | "desc" | "host" | "port" | "user" | "auth" | "key" | "password" | "domain" | "notes" | "icon" | "url" | "customHosts";
 
+// Sentinel shown in the password field when a password is already saved: eight
+// real, deletable bullet characters (not a placeholder). The actual stored
+// password is never loaded into the UI. A value that is only bullets is treated
+// as "unchanged" on blur, so an untouched field never overwrites what's saved.
+const PWD_DOTS = "••••••••";
+const isAllDots = (s: string) => s.length > 0 && /^•+$/.test(s);
+
 const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string }>> = {
   es: {
     type:     { title: "Tipo de conexión", body: "Protocolo usado para conectarse al servidor remoto: SSH (Linux/Unix), RDP (Windows), VNC (escritorio remoto), FTP o SFTP (transferencia de archivos)." },
@@ -182,7 +189,11 @@ function ConnectionProperties() {
     setPassword("");
     setConnectError("");
     if (existing.auth_type === "password") {
-      hasPassword(existing.id).then(setHasSaved).catch(() => setHasSaved(false));
+      hasPassword(existing.id).then((has) => {
+        setHasSaved(has);
+        // Show eight deletable dots when a password is stored; empty otherwise.
+        setPassword(has ? PWD_DOTS : "");
+      }).catch(() => setHasSaved(false));
     } else {
       setHasSaved(false);
     }
@@ -210,13 +221,23 @@ function ConnectionProperties() {
     });
   };
 
-  // Password is saved on blur (not on debounce) to avoid saving on every keystroke
+  // Password is saved on blur (not on debounce) to avoid saving on every keystroke.
+  //  • only-dots (untouched sentinel)  → keep the stored password as-is
+  //  • empty                            → delete the stored password
+  //  • anything else                    → save it, then show the dots again
   const handlePasswordBlur = async () => {
-    if (!existing || !password) return;
+    if (!existing) return;
+    const val = password;
+    if (isAllDots(val)) return;
     try {
-      await savePassword(existing.id, password);
+      if (val === "") {
+        if (hasSaved) await deletePassword(existing.id);
+        setHasSaved(false);
+        return;
+      }
+      await savePassword(existing.id, val);
       setHasSaved(true);
-      setPassword("");
+      setPassword(PWD_DOTS);
     } catch (err) {
       console.error("[save-password]", err);
     }
@@ -228,6 +249,7 @@ function ConnectionProperties() {
     if (newAuth !== "password" && existing) {
       await deletePassword(existing.id).catch(() => {});
       setHasSaved(false);
+      setPassword("");
     }
   };
 
@@ -372,7 +394,7 @@ function ConnectionProperties() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 onBlur={handlePasswordBlur}
-                placeholder={hasSaved ? t("propPasswordSaved") : t("propPasswordPlaceholder")}
+                placeholder=""
                 onFocus={focus("password")}
                 className={inp + " pr-7"}
               />
