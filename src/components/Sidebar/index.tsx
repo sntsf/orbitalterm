@@ -23,6 +23,22 @@ import type { Connection, Folder as FolderType, Group } from "../../types";
 // Shared empty set so we don't allocate a new one each render.
 const EMPTY_ID_SET = new Set<string>();
 
+// Drop-target encoding. Folder targets carry a zone so dragging onto the top/
+// bottom edge REORDERS (sibling) and only the middle NESTS — encoded as
+// "folder:<id>|<zone>". Connections and groups have no zone.
+type DropZone = "before" | "after" | "inside";
+function parseDrop(dt: string | null):
+  | { kind: "folder" | "group" | "conn"; id: string; zone: DropZone }
+  | null {
+  if (!dt) return null;
+  if (dt.startsWith("folder:")) {
+    const [id, zone] = dt.slice(7).split("|");
+    return { kind: "folder", id, zone: (zone as DropZone) || "inside" };
+  }
+  if (dt.startsWith("group:")) return { kind: "group", id: dt.slice(6), zone: "inside" };
+  return { kind: "conn", id: dt, zone: "inside" };
+}
+
 // ── Sidebar hint builders ──────────────────────────────────────────────────────
 
 function buildConnHint(conn: Connection, lang: string) {
@@ -507,7 +523,20 @@ export function Sidebar() {
         const h = el as HTMLElement;
         // Skip the item being dragged as a drop target
         if (d.kind === "folder" && h.dataset.folderId === d.connId) continue;
-        if (h.dataset.folderId) { target = `folder:${h.dataset.folderId}`; break; }
+        if (h.dataset.folderId) {
+          // Folder rows have edge zones: top → reorder before, bottom → reorder
+          // after (both as siblings), middle → drop inside. For connection drags
+          // we always drop inside, so no zone needed.
+          if (d.kind === "folder") {
+            const r = h.getBoundingClientRect();
+            const rel = r.height > 0 ? (e.clientY - r.top) / r.height : 0.5;
+            const zone = rel < 0.3 ? "before" : rel > 0.7 ? "after" : "inside";
+            target = `folder:${h.dataset.folderId}|${zone}`;
+          } else {
+            target = `folder:${h.dataset.folderId}|inside`;
+          }
+          break;
+        }
         if (h.dataset.groupId)  { target = `group:${h.dataset.groupId}`;   break; }
         if (h.dataset.connId && h.dataset.connId !== d.connId) { target = h.dataset.connId; break; }
       }
@@ -534,11 +563,12 @@ export function Sidebar() {
       if (d.kind === "folder") {
         const draggedFolder = folderList.find((f) => f.id === d.connId);
         if (!draggedFolder) { finish(); return; }
+        const drop = parseDrop(dt);
+        if (!drop) { finish(); return; }
 
         // Cross-BD or "move to group root": drop on a group header
-        if (dt.startsWith("group:")) {
-          const targetGroupId = dt.slice(6);
-          // moveFolderToGroup works for both cross-BD and same-BD (moves to root of that group)
+        if (drop.kind === "group") {
+          const targetGroupId = drop.id;
           if (targetGroupId !== draggedFolder.group_id || draggedFolder.parent_id !== null) {
             await moveFolderToGroup(d.connId, targetGroupId).catch(console.error);
             setConns(await getConnections());
@@ -547,39 +577,76 @@ export function Sidebar() {
           finish(); return;
         }
 
-        const parentId = draggedFolder.parent_id;
-        const groupId  = draggedFolder.group_id;
+        // Resolve the destination scope (parent + group) and the target item to
+        // position relative to, from where the folder was dropped.
+        let parentId: string | null;
+        let groupId: string;
+        let beforeId: string | null = null; // insert before this sibling (null = end)
 
-        // Build the unified sorted list of all sibling items (same parent scope)
+        // True if `maybeAncestor` is the dragged folder or one of its descendants
+        // — moving a folder into its own subtree would create a cycle.
+        const isSelfOrDescendant = (fid: string | null): boolean => {
+          let cur = fid;
+          while (cur) {
+            if (cur === d.connId) return true;
+            cur = folderList.find((f) => f.id === cur)?.parent_id ?? null;
+          }
+          return false;
+        };
+
+        if (drop.kind === "folder") {
+          const targetFolder = folderList.find((f) => f.id === drop.id);
+          if (!targetFolder) { finish(); return; }
+          if (drop.zone === "inside") {
+            if (isSelfOrDescendant(targetFolder.id)) { finish(); return; } // no cycles
+            parentId = targetFolder.id;
+            groupId = targetFolder.group_id;
+            beforeId = null; // append inside
+          } else {
+            if (isSelfOrDescendant(targetFolder.parent_id)) { finish(); return; }
+            parentId = targetFolder.parent_id;
+            groupId = targetFolder.group_id;
+            beforeId = drop.zone === "before" ? targetFolder.id : null;
+            // "after" → insert before the item following the target (computed below)
+            if (drop.zone === "after") beforeId = `__after__${targetFolder.id}`;
+          }
+        } else {
+          // Dropped on a connection → join that connection's scope, before it.
+          const targetConn = conns.find((c) => c.id === drop.id);
+          if (!targetConn) { finish(); return; }
+          if (isSelfOrDescendant(targetConn.folder_id)) { finish(); return; }
+          parentId = targetConn.folder_id;
+          groupId = targetConn.group_id;
+          beforeId = targetConn.id;
+        }
+
+        // Unified sorted sibling list of the DESTINATION scope (excl. dragged).
         type ScopeItem = { kind: "conn" | "folder"; id: string; sort_order: number; name: string };
         const siblings: ScopeItem[] = [
-          ...conns.filter((c) => c.folder_id === parentId && c.group_id === groupId)
+          ...conns.filter((c) => c.folder_id === parentId && c.group_id === groupId && c.id !== d.connId)
             .map((c) => ({ kind: "conn" as const, id: c.id, sort_order: c.sort_order, name: c.name })),
-          ...folderList.filter((f) => f.parent_id === parentId && f.group_id === groupId)
+          ...folderList.filter((f) => f.parent_id === parentId && f.group_id === groupId && f.id !== d.connId)
             .map((f) => ({ kind: "folder" as const, id: f.id, sort_order: f.sort_order, name: f.name })),
         ].sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
 
-        const withoutDragged = siblings.filter((i) => i.id !== d.connId);
-
-        // Find insertion index based on the drop target
-        let insertIdx = withoutDragged.length; // default: end
-        if (dt.startsWith("folder:")) {
-          const targetId = dt.slice(7);
-          const idx = withoutDragged.findIndex((i) => i.id === targetId);
-          if (idx >= 0) insertIdx = idx;
-        } else if (!dt.startsWith("group:")) {
-          const idx = withoutDragged.findIndex((i) => i.id === dt);
+        let insertIdx = siblings.length; // default: end
+        if (beforeId?.startsWith("__after__")) {
+          const tid = beforeId.slice(9);
+          const idx = siblings.findIndex((i) => i.id === tid);
+          if (idx >= 0) insertIdx = idx + 1;
+        } else if (beforeId) {
+          const idx = siblings.findIndex((i) => i.id === beforeId);
           if (idx >= 0) insertIdx = idx;
         }
 
-        withoutDragged.splice(insertIdx, 0, { kind: "folder", id: d.connId, sort_order: 0, name: d.connName });
+        siblings.splice(insertIdx, 0, { kind: "folder", id: d.connId, sort_order: 0, name: d.connName });
 
-        const connUpdates = withoutDragged
+        const connUpdates = siblings
           .filter((i) => i.kind === "conn")
-          .map((i) => ({ id: i.id, sort_order: withoutDragged.indexOf(i) * 10, folder_id: parentId, group_id: groupId }));
-        const folderUpdates = withoutDragged
+          .map((i) => ({ id: i.id, sort_order: siblings.indexOf(i) * 10, folder_id: parentId, group_id: groupId }));
+        const folderUpdates = siblings
           .filter((i) => i.kind === "folder")
-          .map((i) => ({ id: i.id, sort_order: withoutDragged.indexOf(i) * 10, parent_id: parentId, group_id: groupId }));
+          .map((i) => ({ id: i.id, sort_order: siblings.indexOf(i) * 10, parent_id: parentId, group_id: groupId }));
 
         if (connUpdates.length > 0) await reorderConnections(connUpdates).catch(console.error);
         if (folderUpdates.length > 0) await reorderFolders(folderUpdates).catch(console.error);
@@ -591,10 +658,12 @@ export function Sidebar() {
       // ── Connection drag ───────────────────────────────────────────────────────
       const dragged = conns.find((c) => c.id === d.connId);
       if (!dragged) { finish(); return; }
+      const cdrop = parseDrop(dt);
+      if (!cdrop) { finish(); return; }
 
-      if (dt.startsWith("folder:") || dt.startsWith("group:")) {
-        const folderId = dt.startsWith("folder:") ? dt.slice(7) : null;
-        const groupId  = dt.startsWith("group:")  ? dt.slice(6)  : undefined;
+      if (cdrop.kind === "folder" || cdrop.kind === "group") {
+        const folderId = cdrop.kind === "folder" ? cdrop.id : null;
+        const groupId  = cdrop.kind === "group"  ? cdrop.id : undefined;
 
         let targetGroupId: string;
         if (folderId) {
@@ -616,7 +685,7 @@ export function Sidebar() {
         setConns(await getConnections());
       } else {
         // Drop onto another connection — reorder within the same unified scope
-        const target = conns.find((c) => c.id === dt);
+        const target = conns.find((c) => c.id === cdrop.id);
         if (!target) { finish(); return; }
 
         const targetGroupId = target.group_id;
@@ -1248,7 +1317,11 @@ function FolderItem({
   const subfolders = foldersByParent.get(folder.id) ?? [];
   const myConns = connsByFolder.get(folder.id) ?? [];
 
-  const isFolderDropTarget = dropTarget === `folder:${folder.id}`;
+  const dropInfo = parseDrop(dropTarget);
+  const isDropHere = dropInfo?.kind === "folder" && dropInfo.id === folder.id;
+  const isFolderDropTarget = isDropHere && dropInfo!.zone === "inside";
+  const isDropBefore = isDropHere && dropInfo!.zone === "before";
+  const isDropAfter = isDropHere && dropInfo!.zone === "after";
   const isSearchFocus = searchFocusFolderId === folder.id || selectedFolderId === folder.id;
   const Icon = expanded ? FolderOpen : Folder;
   const folderColor = iconColorClass(folder.color);
@@ -1288,6 +1361,8 @@ function FolderItem({
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
           className={[
             "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
+            isDropBefore ? "shadow-[inset_0_2px_0_0_var(--color-accent)]" : "",
+            isDropAfter ? "shadow-[inset_0_-2px_0_0_var(--color-accent)]" : "",
             isFolderDropTarget
               ? "bg-[var(--color-accent)]/20 text-amber-400"
               : isSearchFocus
