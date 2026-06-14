@@ -3,7 +3,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import {
   Plus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
-  ChevronRight, ChevronDown, Database, X, Bell, Globe, SquarePlus, SquareMinus,
+  Database, X, Bell, Globe, SquarePlus, SquareMinus,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useI18nStore, useT } from "../../store/useI18nStore";
@@ -821,12 +821,40 @@ export function Sidebar() {
       e.preventDefault();
       setSearchFocusIdx((i) => (i - 1 + searchMatches.length) % searchMatches.length);
     } else if (e.key === "ArrowRight") {
-      // Move from the search box into the tree: select the focused match and
-      // hand keyboard focus to the tree so ↑/↓ then walk the connections.
+      // Move from the search box into the tree: reveal the focused match in
+      // place (persist its ancestor folders + its group as expanded), select
+      // it, then CLEAR the query so we leave "search mode". This matters
+      // because while a query is active isGroupExpanded() forces every group
+      // open; if we entered the tree without clearing it the BD (group)
+      // toggles would appear stuck. Clearing here restores normal toggling.
       e.preventDefault();
       const hit = searchMatches[searchFocusIdx];
-      if (hit?.kind === "conn") selectConnection(hit.id);
-      else if (hit?.kind === "folder") selectFolder(hit.id);
+      if (!hit) return;
+      // Walk the ancestor folder chain and collect it + the owning group.
+      const ancestors: string[] = [];
+      let groupId: string | undefined;
+      if (hit.kind === "conn") {
+        const conn = connById.get(hit.id);
+        groupId = conn?.group_id;
+        let fid = conn?.folder_id ?? null;
+        while (fid) { ancestors.push(fid); fid = folderById.get(fid)?.parent_id ?? null; }
+      } else {
+        const folder = folderById.get(hit.id);
+        groupId = folder?.group_id;
+        let fid = folder?.parent_id ?? null;
+        while (fid) { ancestors.push(fid); fid = folderById.get(fid)?.parent_id ?? null; }
+      }
+      if (ancestors.length > 0) {
+        setExpandedFolders((prev) => {
+          const next = new Set(prev);
+          for (const id of ancestors) next.add(id);
+          return next;
+        });
+      }
+      if (groupId) setGroupExpanded((prev) => ({ ...prev, [groupId!]: true }));
+      if (hit.kind === "conn") selectConnection(hit.id);
+      else selectFolder(hit.id);
+      setSearchQuery("");
       treeRef.current?.focus();
     } else if (e.key === "Enter") {
       const hit = searchMatches[searchFocusIdx];
@@ -1067,8 +1095,8 @@ export function Sidebar() {
                   ].join(" ")}
                 >
                   {expanded
-                    ? <ChevronDown size={11} className="shrink-0" />
-                    : <ChevronRight size={11} className="shrink-0" />}
+                    ? <SquareMinus size={12} className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] rounded-[2px] hover:bg-[var(--color-bg-hover)]" />
+                    : <SquarePlus size={12} className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] rounded-[2px] hover:bg-[var(--color-bg-hover)]" />}
                   <Database size={13} className={`shrink-0 ${iconColorClass(group.color, "text-[var(--color-accent)]")}`} />
                   <span className="text-[13px] font-medium flex-1 text-left text-[var(--color-text-primary)]">{group.name}</span>
                   <span className="text-[11px] text-[var(--color-text-muted)] opacity-60">{groupConnCount}</span>
