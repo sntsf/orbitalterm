@@ -251,6 +251,17 @@ export function Sidebar() {
         const gid = selectedGroupId;
         setGroupExpanded((prev) => ({ ...prev, [gid]: false }));
       }
+    } else if (e.key === "Enter") {
+      // Enter on a highlighted connection opens it (no double-click / Connect
+      // button needed). Ignore it while a field is focused — editing saves
+      // live, so Enter there shouldn't trigger a connection.
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (selectedConnectionId) {
+        e.preventDefault();
+        const conn = connById.get(selectedConnectionId);
+        if (conn) openTab(conn);
+      }
     }
   };
 
