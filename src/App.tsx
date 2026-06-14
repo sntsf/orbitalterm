@@ -10,6 +10,7 @@ import { SftpDualPane } from "./components/SftpDualPane";
 import { Welcome } from "./components/Welcome";
 import { MenuBar } from "./components/MenuBar";
 import { NotificationOverlay } from "./components/NotificationBar";
+import { TransferPanel } from "./components/TransferPanel";
 import { useAppStore } from "./store/useAppStore";
 import { useNotifStore } from "./store/useNotifStore";
 import {
@@ -196,6 +197,7 @@ function MainApp() {
           </div>
         </div>
       </div>
+      <TransferPanel />
     </div>
   );
 }

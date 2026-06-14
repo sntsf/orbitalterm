@@ -14,6 +14,7 @@ import {
 import type { FtpEntry } from "../../lib/commands";
 import { friendlyFsError } from "../../lib/transferErrors";
 import { resolveUploadOverwrites } from "../../lib/overwrite";
+import { useTransferStore } from "../../store/useTransferStore";
 
 interface FtpBrowserProps {
   sessionId: string | null;
@@ -100,19 +101,15 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
     if (!sessionId) return;
     const toUpload = resolveUploadOverwrites(localPaths, new Set(entries.map((e) => e.name)));
     if (toUpload.length === 0) return;
-    for (const localPath of toUpload) {
+    useTransferStore.getState().enqueue(toUpload.map((localPath) => {
       const fileName = localPath.split(/[\\/]/).pop() ?? "file";
-      flushSync(() => { setTransferFile(`↑ ${fileName}`); setProgress({ transferred: 0, total: 0 }); });
       const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
-      try {
-        await ftpUpload(sessionId, localPath, remotePath);
-      } catch (err) {
-        handleError(err);
-        break;
-      }
-    }
-    setTransferFile(null);
-    loadDir(sessionId, currentPath);
+      return {
+        label: fileName, dir: "up" as const,
+        run: () => ftpUpload(sessionId, localPath, remotePath),
+        onComplete: () => loadDir(sessionId, currentPath),
+      };
+    }));
   }, [sessionId, currentPath, loadDir, entries]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Drag files from the OS onto the panel to upload them to the current folder.

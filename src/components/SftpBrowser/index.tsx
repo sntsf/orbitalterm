@@ -13,6 +13,7 @@ import {
 } from "../../lib/commands";
 import { friendlyFsError } from "../../lib/transferErrors";
 import { resolveUploadOverwrites } from "../../lib/overwrite";
+import { useTransferStore } from "../../store/useTransferStore";
 import type { SftpEntry } from "../../types";
 
 interface SftpBrowserProps {
@@ -200,19 +201,15 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
     if (!sessionId) return;
     const toUpload = resolveUploadOverwrites(localPaths, new Set(entries.map((e) => e.name)));
     if (toUpload.length === 0) return;
-    for (const localPath of toUpload) {
+    useTransferStore.getState().enqueue(toUpload.map((localPath) => {
       const fileName = localPath.split(/[\\/]/).pop() ?? "file";
-      flushSync(() => { setTransferFile(`↑ ${fileName}`); setProgress({ transferred: 0, total: 0 }); });
       const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
-      try {
-        await sftpUpload(sessionId, localPath, remotePath);
-      } catch (err) {
-        handleError(err);
-        break;
-      }
-    }
-    setTransferFile(null);
-    loadDir(sessionId, currentPath);
+      return {
+        label: fileName, dir: "up" as const,
+        run: () => sftpUpload(sessionId, localPath, remotePath),
+        onComplete: () => loadDir(sessionId, currentPath),
+      };
+    }));
   }, [sessionId, currentPath, loadDir, entries]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const doDownload = useCallback(async (remoteEntries: SftpEntry[], destDir: string) => {
