@@ -128,6 +128,8 @@ pub const NEED_CREDENTIALS: &str = "NEED_CREDENTIALS";
 
 /// Parse the per-connection tunnel spec. One tunnel per line:
 ///   "L <listenPort> <destHost> <destPort>"   (local forward, -L)
+///   "R <bindPort> <destHost> <destPort>"     (remote forward, -R)
+///   "D <listenPort>"                          (dynamic SOCKS5 proxy, -D)
 /// Lines that are empty, comments (#) or malformed are ignored.
 fn parse_tunnels(spec: &str) -> Vec<(char, u16, String, u16)> {
     spec.lines()
@@ -137,11 +139,14 @@ fn parse_tunnels(spec: &str) -> Vec<(char, u16, String, u16)> {
                 return None;
             }
             let p: Vec<&str> = l.split_whitespace().collect();
-            if p.len() != 4 {
-                return None;
+            let kind = p.first()?.chars().next()?.to_ascii_uppercase();
+            if kind == 'D' {
+                if p.len() != 2 { return None; }
+                Some(('D', p[1].parse().ok()?, String::new(), 0))
+            } else {
+                if p.len() != 4 { return None; }
+                Some((kind, p[1].parse().ok()?, p[2].to_string(), p[3].parse().ok()?))
             }
-            let kind = p[0].chars().next()?.to_ascii_uppercase();
-            Some((kind, p[1].parse().ok()?, p[2].to_string(), p[3].parse().ok()?))
         })
         .collect()
 }
@@ -177,6 +182,74 @@ async fn local_forward(
             let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
         });
     }
+}
+
+/// Dynamic forward (-D): a minimal SOCKS5 proxy on 127.0.0.1:listen_port that
+/// tunnels each CONNECT request to its target through the SSH session.
+async fn dynamic_forward(handle: Arc<russh::client::Handle<SshHandler>>, listen_port: u16) {
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", listen_port)).await {
+        Ok(l) => l,
+        Err(e) => { eprintln!("[ssh] tunnel -D {listen_port}: bind failed: {e}"); return; }
+    };
+    loop {
+        let socket = match listener.accept().await {
+            Ok((s, _)) => s,
+            Err(_) => break,
+        };
+        let h = Arc::clone(&handle);
+        tokio::spawn(async move { let _ = socks5_serve(socket, h).await; });
+    }
+}
+
+async fn socks5_serve(
+    mut socket: tokio::net::TcpStream,
+    handle: Arc<russh::client::Handle<SshHandler>>,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Greeting: VER, NMETHODS, METHODS...
+    let mut hdr = [0u8; 2];
+    socket.read_exact(&mut hdr).await?;
+    if hdr[0] != 0x05 { return Ok(()); }
+    let mut methods = vec![0u8; hdr[1] as usize];
+    socket.read_exact(&mut methods).await?;
+    socket.write_all(&[0x05, 0x00]).await?; // no authentication
+
+    // Request: VER, CMD, RSV, ATYP, ADDR, PORT
+    let mut req = [0u8; 4];
+    socket.read_exact(&mut req).await?;
+    if req[1] != 0x01 {
+        // Only CONNECT is supported.
+        socket.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+        return Ok(());
+    }
+    let host = match req[3] {
+        0x01 => { let mut a = [0u8; 4];  socket.read_exact(&mut a).await?; std::net::Ipv4Addr::from(a).to_string() }
+        0x04 => { let mut a = [0u8; 16]; socket.read_exact(&mut a).await?; std::net::Ipv6Addr::from(a).to_string() }
+        0x03 => {
+            let mut len = [0u8; 1];
+            socket.read_exact(&mut len).await?;
+            let mut d = vec![0u8; len[0] as usize];
+            socket.read_exact(&mut d).await?;
+            String::from_utf8_lossy(&d).to_string()
+        }
+        _ => { socket.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?; return Ok(()); }
+    };
+    let mut pbuf = [0u8; 2];
+    socket.read_exact(&mut pbuf).await?;
+    let port = u16::from_be_bytes(pbuf);
+
+    match handle.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0).await {
+        Ok(channel) => {
+            socket.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+            let mut stream = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+        }
+        Err(_) => {
+            socket.write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -328,9 +401,16 @@ pub async fn connect_ssh(
     // handler. Dynamic (-D / SOCKS) comes in a later wave.
     let mut tunnel_tasks = Vec::new();
     for (kind, listen_port, dest_host, dest_port) in tunnels {
-        if kind == 'L' {
-            let task = tokio::spawn(local_forward(Arc::clone(&handle), listen_port, dest_host, dest_port));
-            tunnel_tasks.push(task.abort_handle());
+        match kind {
+            'L' => {
+                let task = tokio::spawn(local_forward(Arc::clone(&handle), listen_port, dest_host, dest_port));
+                tunnel_tasks.push(task.abort_handle());
+            }
+            'D' => {
+                let task = tokio::spawn(dynamic_forward(Arc::clone(&handle), listen_port));
+                tunnel_tasks.push(task.abort_handle());
+            }
+            _ => {}
         }
     }
 
