@@ -184,6 +184,8 @@ struct LaunchParams {
     admin_mode: bool,
     rdp_security: String,
     _color_depth: i32,
+    redirect_drives: bool,
+    gateway: String,
 }
 
 // ── Host thread ───────────────────────────────────────────────────────────────
@@ -250,6 +252,8 @@ fn host_thread(params: LaunchParams, session: Arc<SessionShared>) {
        .arg("--height").arg(phys_height.to_string())
        .arg("--security").arg(&params.rdp_security);
     if params.admin_mode { cmd.arg("--admin"); }
+    if params.redirect_drives { cmd.arg("--drives"); }
+    if !params.gateway.is_empty() { cmd.arg("--gateway").arg(&params.gateway); }
     cmd.stdin(Stdio::piped())
        .stdout(Stdio::piped())
        .stderr(Stdio::null())
@@ -441,6 +445,8 @@ pub fn launch(
     admin_mode: bool,
     rdp_security: &str,
     color_depth: i32,
+    redirect_drives: bool,
+    gateway: &str,
 ) -> Result<WindowsRdpSession, String> {
     let shared = Arc::new(SessionShared {
         connected:          Arc::new(AtomicBool::new(false)),
@@ -481,6 +487,8 @@ pub fn launch(
         admin_mode,
         rdp_security: rdp_security.to_string(),
         _color_depth: color_depth,
+        redirect_drives,
+        gateway: gateway.to_string(),
     };
 
     let shared_thread = Arc::clone(&shared);

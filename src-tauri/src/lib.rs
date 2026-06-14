@@ -12,7 +12,7 @@ use commands::connections::{
     delete_connection, delete_folder, delete_group, export_connections, export_selected_to_file,
     export_to_file, get_connections, get_folders, get_groups, import_connections, import_from_file,
     import_from_mremoteng, move_folder_to_group, reorder_connections, reorder_folders, rename_group,
-    save_connection, save_folder, save_group, update_connection,
+    save_connection, save_folder, save_group, update_connection, update_folder, update_group,
 };
 use commands::local_fs::{local_delete, local_get_home, local_get_parent, local_list_dir, local_mkdir};
 use commands::ftp::{
@@ -27,10 +27,10 @@ use commands::sessions::{
     save_password, send_input, show_rdp_tab_menu,
 };
 use commands::sftp::{
-    sftp_connect, sftp_create_file, sftp_delete, sftp_disconnect, sftp_download, sftp_list_dir,
-    sftp_mkdir, sftp_rename, sftp_upload,
+    sftp_chmod, sftp_connect, sftp_connect_from_ssh, sftp_create_file, sftp_delete, sftp_disconnect,
+    sftp_download, sftp_list_dir, sftp_mkdir, sftp_rename, sftp_upload,
 };
-use commands::vnc::{vnc_connect, vnc_disconnect, vnc_key_event, vnc_pointer_event};
+use commands::vnc::{vnc_connect, vnc_disconnect, vnc_key_event, vnc_pointer_event, vnc_send_clipboard};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
@@ -138,6 +138,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(new_detached_session_store())
         .manage(browser::new_browser_sessions())
         .manage(ssh::new_ssh_sessions())
@@ -170,6 +171,7 @@ pub fn run() {
             move_folder_to_group,
             get_folders,
             save_folder,
+            update_folder,
             delete_folder,
             export_connections,
             export_to_file,
@@ -181,6 +183,7 @@ pub fn run() {
             get_groups,
             save_group,
             rename_group,
+            update_group,
             delete_group,
             // Local filesystem
             local_list_dir,
@@ -215,12 +218,14 @@ pub fn run() {
             has_password,
             // SFTP
             sftp_connect,
+            sftp_connect_from_ssh,
             sftp_list_dir,
             sftp_upload,
             sftp_download,
             sftp_mkdir,
             sftp_create_file,
             sftp_rename,
+            sftp_chmod,
             sftp_delete,
             sftp_disconnect,
             // FTP
@@ -237,6 +242,7 @@ pub fn run() {
             vnc_connect,
             vnc_key_event,
             vnc_pointer_event,
+            vnc_send_clipboard,
             vnc_disconnect,
             // Browser
             browser_open,

@@ -2,10 +2,12 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { SearchAddon } from "@xterm/addon-search";
 import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
 import { HardDrive } from "lucide-react";
-import { connectSsh, disconnectSsh, resizePty, sendInput, sftpConnect, sftpDisconnect } from "../../lib/commands";
+import { connectSsh, disconnectSsh, resizePty, sendInput, sftpDisconnect } from "../../lib/commands";
+import { clipboardRead, clipboardWrite } from "../../lib/clipboard";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
 import { useAppStore } from "../../store/useAppStore";
 import { usePrefsStore, resolvedTermTheme } from "../../store/usePrefsStore";
@@ -23,14 +25,31 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const searchAddonRef = useRef<SearchAddon | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const termRef = useRef<XTerm | null>(null);
+
+  // In-terminal search (Ctrl+F)
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
   const { setTabStatus, setTabSessionId, getConnectionById, closeTab } = useAppStore();
   const { fontSize, theme } = usePrefsStore();
+  const paneLang = useI18nStore((s) => s.lang);
 
   // SFTP panel state
   const [showSftp, setShowSftp] = useState(false);
   const [sftpSessionId, setSftpSessionId] = useState<string | null>(null);
   const sftpSessionIdRef = useRef<string | null>(null);
   const [sftpWidth, setSftpWidth] = useState(35); // percentage
+
+  // The interactive SSH session id (russh) — reused by the SFTP browser so both
+  // share one authenticated connection.
+  const [sshSessionId, setSshSessionId] = useState<string | null>(null);
+
+  // Credential prompt shown when the connection has no saved username/password
+  // (russh authenticates up-front; the prompt's resolver feeds connect_ssh).
+  const [credPrompt, setCredPrompt] = useState<{ needUser: boolean; authFailed?: boolean } | null>(null);
+  const credResolveRef = useRef<((c: { username?: string; password?: string } | null) => void) | null>(null);
 
   // Drag handle state
   const draggingDivider = useRef(false);
@@ -86,13 +105,45 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
       scrollback: 5000,
       allowProposedApi: true,
     });
+    termRef.current = term;
 
     const fitAddon = new FitAddon();
     fitAddonRef.current = fitAddon;
     term.loadAddon(fitAddon);
     term.loadAddon(new WebLinksAddon());
+    const searchAddon = new SearchAddon();
+    searchAddonRef.current = searchAddon;
+    term.loadAddon(searchAddon);
     term.open(containerRef.current);
     fitAddon.fit();
+
+    // Ctrl+F opens the in-terminal search bar (don't forward it to the shell).
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type === "keydown" && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        setShowSearch(true);
+        setTimeout(() => searchInputRef.current?.focus(), 0);
+        return false;
+      }
+      return true;
+    });
+
+    // Wire keyboard/resize/selection up-front (NOT inside the async connect
+    // flow) so typing always reaches the session once connected — independent
+    // of where the connect routine happens to be.
+    term.onData((data) => {
+      if (sessionIdRef.current) {
+        sendInput(sessionIdRef.current, data).catch(console.error);
+      }
+    });
+    term.onResize(({ cols, rows }) => {
+      if (sessionIdRef.current) {
+        resizePty(sessionIdRef.current, cols, rows).catch(console.error);
+      }
+    });
+    term.onSelectionChange(() => {
+      const sel = term.getSelection();
+      if (sel) clipboardWrite(sel);
+    });
 
     const cleanups: Array<() => void> = [];
 
@@ -105,7 +156,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         return;
       }
 
-      let sessionId: string;
+      let sessionId = "";
 
       if (tab.session_id) {
         // Resume a transferred session — skip the SSH handshake
@@ -115,35 +166,61 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         term.writeln(`\x1b[2m[${t("sshSessionResumed")}]\x1b[0m`);
       } else {
         term.writeln(
-          `\x1b[2m${t("sshConnecting")} \x1b[0m\x1b[33m${connection.username}@${connection.host}\x1b[0m\x1b[2m...\x1b[0m`
+          `\x1b[2m${t("sshConnecting")} \x1b[0m\x1b[33m${connection.username || "?"}@${connection.host}\x1b[0m\x1b[2m...\x1b[0m`
         );
-        try {
-          sessionId = await connectSsh(connection.id);
-          sessionIdRef.current = sessionId;
-          setTabSessionId(tab.id, sessionId);
-          setTabStatus(tab.id, "connected");
-        } catch (err) {
-          const raw = String(err);
-          const friendly = friendlyConnError(raw, lang, "ssh");
-          term.writeln(`\r\n\x1b[31m[${t("sshConnFailed")}: ${friendly}]\x1b[0m`);
-          setTabStatus(tab.id, "error");
-          useNotifStore.getState().add({
-            connName: connection.name,
-            connType: connection.type,
-            host: connection.host,
-            raw,
-          });
-          return;
+        // russh authenticates up-front. If credentials are missing, prompt for
+        // them and retry (so the terminal AND the SFTP browser share the
+        // session that this single login establishes).
+        let creds: { username?: string; password?: string } = {};
+        let connected = false;
+        while (!connected) {
+          try {
+            sessionId = await connectSsh(connection.id, creds.username, creds.password);
+            connected = true;
+          } catch (err) {
+            const raw = String(err);
+            const needCreds = raw.includes("NEED_CREDENTIALS");
+            const authFailed = raw.includes("AUTH_FAILED");
+            // Missing OR rejected credentials → (re)prompt and retry instead of
+            // failing, so a typo doesn't kill the tab.
+            if (needCreds || authFailed) {
+              const provided = await new Promise<{ username?: string; password?: string } | null>((resolve) => {
+                credResolveRef.current = resolve;
+                setCredPrompt({ needUser: !connection.username, authFailed });
+              });
+              setCredPrompt(null);
+              credResolveRef.current = null;
+              if (!provided) {
+                term.writeln(`\r\n\x1b[2m[${t("sshConnClosed")}]\x1b[0m`);
+                setTabStatus(tab.id, "error");
+                return;
+              }
+              creds = provided;
+              continue;
+            }
+            const friendly = friendlyConnError(raw, lang, "ssh");
+            term.writeln(`\r\n\x1b[31m[${t("sshConnFailed")}: ${friendly}]\x1b[0m`);
+            setTabStatus(tab.id, "error");
+            useNotifStore.getState().add({
+              connName: connection.name,
+              connType: connection.type,
+              host: connection.host,
+              raw,
+            });
+            return;
+          }
         }
+        sessionIdRef.current = sessionId!;
+        setTabSessionId(tab.id, sessionId!);
+        setTabStatus(tab.id, "connected");
       }
 
-      // Auto-open SFTP panel and connect (always reconnect SFTP — it's independent)
+      // Reuse THIS SSH session for the SFTP browser (shared single connection).
+      // The SFTP panel auto-connects from sshSessionId and shows its own
+      // friendly message if SFTP isn't available — the terminal is unaffected.
+      setSshSessionId(sessionId);
       setShowSftp(true);
       setTimeout(() => fitAddonRef.current?.fit(), 50);
-      sftpConnect(connection.id).then((sid) => {
-        setSftpSessionId(sid);
-        sftpSessionIdRef.current = sid;
-      }).catch(console.error);
 
       // Buffer SSH output to detect connection errors emitted by the ssh process.
       // connectSsh() returns immediately after spawning; errors appear as PTY text.
@@ -189,28 +266,12 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
       });
       cleanups.push(unlistenClosed);
 
-      // Copy-on-select (like PuTTY): selecting text copies it automatically
-      term.onSelectionChange(() => {
-        const sel = term.getSelection();
-        if (sel) navigator.clipboard.writeText(sel).catch(() => {});
-      });
-
-      // Forward keystrokes to SSH
-      term.onData((data) => {
-        if (sessionIdRef.current) {
-          sendInput(sessionIdRef.current, data).catch(console.error);
-        }
-      });
-
-      // Sync terminal size with PTY on resize
-      term.onResize(({ cols, rows }) => {
-        if (sessionIdRef.current) {
-          resizePty(sessionIdRef.current, cols, rows).catch(console.error);
-        }
-      });
-
       // Initial size sync
       await resizePty(sessionId, term.cols, term.rows);
+
+      // Focus the terminal so the user can type immediately (the credential
+      // prompt / SFTP panel may have taken focus during connect).
+      setTimeout(() => term.focus(), 80);
     };
 
     init();
@@ -256,21 +317,60 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         className="flex flex-col overflow-hidden"
         style={{ width: showSftp ? `${100 - sftpWidth}%` : "100%" }}
       >
-        {/* Toggle button */}
+        {/* Toggle button — labelled so it's easy to find */}
         <div className="absolute top-1 right-1 z-10">
           <button
             onClick={toggleSftp}
-            title={showSftp ? "Hide SFTP panel" : "Show SFTP panel"}
-            className={`p-1 rounded transition-colors ${
-              showSftp
-                ? "bg-[var(--color-accent)] text-white"
-                : "bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
-            }`}
+            title={showSftp
+              ? (paneLang === "es" ? "Ocultar panel de ficheros" : "Hide file panel")
+              : (paneLang === "es" ? "Mostrar panel de ficheros" : "Show file panel")}
+            className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-medium shadow-sm transition-colors bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]"
           >
-            <HardDrive size={13} />
+            <HardDrive size={14} />
+            <span>{showSftp
+              ? (paneLang === "es" ? "Ocultar panel de ficheros" : "Hide file panel")
+              : (paneLang === "es" ? "Vista de ficheros" : "File view")}</span>
           </button>
         </div>
-        <div ref={containerRef} className="w-full h-full" style={{ padding: "4px" }} />
+        {showSearch && (
+          <div className="absolute top-1 left-1 z-10 flex items-center gap-1 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-1.5 py-1 shadow-lg">
+            <input
+              ref={searchInputRef}
+              value={searchTerm}
+              onChange={(e) => { setSearchTerm(e.target.value); searchAddonRef.current?.findNext(e.target.value); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); (e.shiftKey ? searchAddonRef.current?.findPrevious(searchTerm) : searchAddonRef.current?.findNext(searchTerm)); }
+                if (e.key === "Escape") { setShowSearch(false); }
+              }}
+              placeholder="Buscar…"
+              className="bg-transparent outline-none text-[11px] text-[var(--color-text-primary)] w-32"
+            />
+            <button onClick={() => searchAddonRef.current?.findPrevious(searchTerm)} title="Anterior (Shift+Enter)"
+              className="px-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">↑</button>
+            <button onClick={() => searchAddonRef.current?.findNext(searchTerm)} title="Siguiente (Enter)"
+              className="px-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">↓</button>
+            <button onClick={() => setShowSearch(false)} title="Cerrar (Esc)"
+              className="px-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">✕</button>
+          </div>
+        )}
+        <div ref={containerRef} className="w-full h-full" style={{ padding: "4px" }}
+          onMouseDown={() => termRef.current?.focus()}
+          onContextMenu={(e) => {
+            // Right-click pastes the clipboard into the session (PuTTY-style).
+            e.preventDefault();
+            clipboardRead().then((text) => {
+              if (text && sessionIdRef.current) sendInput(sessionIdRef.current, text).catch(console.error);
+            });
+          }} />
+        {credPrompt && (
+          <CredentialPrompt
+            needUser={credPrompt.needUser}
+            authFailed={credPrompt.authFailed}
+            host={connection?.host ?? ""}
+            onSubmit={(c) => credResolveRef.current?.(c)}
+            onCancel={() => credResolveRef.current?.(null)}
+          />
+        )}
       </div>
 
       {/* Drag handle */}
@@ -287,10 +387,77 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
       >
         <SftpBrowser
           sessionId={sftpSessionId}
+          sshSessionId={sshSessionId}
           connectionId={connection?.id ?? tab.connection_id}
           username={connection?.username}
           onConnect={handleSftpConnect}
         />
+      </div>
+    </div>
+  );
+}
+
+// Inline credential prompt for SSH connections without saved username/password.
+function CredentialPrompt({
+  needUser, authFailed, host, onSubmit, onCancel,
+}: {
+  needUser: boolean;
+  authFailed?: boolean;
+  host: string;
+  onSubmit: (c: { username?: string; password?: string }) => void;
+  onCancel: () => void;
+}) {
+  const { lang } = useI18nStore();
+  const es = lang === "es";
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const userRef = useRef<HTMLInputElement>(null);
+  const passRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { (needUser ? userRef : passRef).current?.focus(); }, [needUser]);
+
+  const submit = () => onSubmit({ username: needUser ? username : undefined, password });
+
+  return (
+    <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/50">
+      <div className="w-72 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-4 shadow-xl">
+        <p className="text-[13px] font-semibold text-[var(--color-text-primary)] mb-0.5">
+          {es ? "Credenciales requeridas" : "Credentials required"}
+        </p>
+        <p className="text-[11px] text-[var(--color-text-muted)] mb-3 truncate">{host}</p>
+        {authFailed && (
+          <p className="text-[11px] text-[var(--color-danger)] mb-2 -mt-1">
+            {es ? "Credenciales incorrectas, intenta de nuevo." : "Invalid credentials, try again."}
+          </p>
+        )}
+        {needUser && (
+          <input
+            ref={userRef}
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") passRef.current?.focus(); if (e.key === "Escape") onCancel(); }}
+            placeholder={es ? "Usuario" : "Username"}
+            className="w-full mb-2 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-1 text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+          />
+        )}
+        <input
+          ref={passRef}
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") onCancel(); }}
+          placeholder={es ? "Contraseña" : "Password"}
+          className="w-full mb-3 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-1 text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
+        />
+        <div className="flex gap-2 justify-end">
+          <button onClick={onCancel}
+            className="px-2 py-1 text-[12px] rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]">
+            {es ? "Cancelar" : "Cancel"}
+          </button>
+          <button onClick={submit}
+            className="px-3 py-1 text-[12px] rounded bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-hover)]">
+            {es ? "Conectar" : "Connect"}
+          </button>
+        </div>
       </div>
     </div>
   );

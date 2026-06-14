@@ -151,13 +151,28 @@ fn send_set_pixel_format(s: &mut TcpStream) -> Result<(), String> {
     write_all(s, msg)
 }
 
-// Request Raw (0) and CopyRect (1) encodings
+// Advertise Hextile (5), CopyRect (1) and Raw (0) in preference order. Hextile
+// drastically cuts bandwidth vs Raw for typical desktop content.
 fn send_set_encodings(s: &mut TcpStream) -> Result<(), String> {
     let mut msg = vec![2u8, 0]; // type=2, padding
-    msg.extend_from_slice(&2u16.to_be_bytes()); // num-encodings=2
-    msg.extend_from_slice(&0i32.to_be_bytes()); // Raw
+    msg.extend_from_slice(&3u16.to_be_bytes()); // num-encodings=3
+    msg.extend_from_slice(&5i32.to_be_bytes()); // Hextile (preferred)
     msg.extend_from_slice(&1i32.to_be_bytes()); // CopyRect
+    msg.extend_from_slice(&0i32.to_be_bytes()); // Raw
     write_all(s, &msg)
+}
+
+// Fill a rectangle of the framebuffer with a single 4-byte (RGBA) colour.
+fn fill_rect(fb: &mut [u8], fb_width: u32, x: u32, y: u32, w: u32, h: u32, color: &[u8; 4]) {
+    for row in 0..h {
+        let mut off = (((y + row) * fb_width + x) * 4) as usize;
+        for _ in 0..w {
+            if off + 4 <= fb.len() {
+                fb[off..off + 4].copy_from_slice(color);
+            }
+            off += 4;
+        }
+    }
 }
 
 fn send_fb_update_request(
@@ -186,6 +201,15 @@ fn send_pointer_event(s: &mut TcpStream, buttons: u8, x: u16, y: u16) -> Result<
     let mut msg = vec![5u8, buttons];
     msg.extend_from_slice(&x.to_be_bytes());
     msg.extend_from_slice(&y.to_be_bytes());
+    write_all(s, &msg)
+}
+
+// ClientCutText (type 6): send the local clipboard to the server (Latin-1).
+fn send_cut_text(s: &mut TcpStream, text: &str) -> Result<(), String> {
+    let bytes: Vec<u8> = text.chars().map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }).collect();
+    let mut msg = vec![6u8, 0, 0, 0];
+    msg.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    msg.extend_from_slice(&bytes);
     write_all(s, &msg)
 }
 
@@ -255,6 +279,9 @@ fn session_thread(
                 }
                 Ok(VncMsg::PointerEvent { buttons, x, y }) => {
                     send_pointer_event(&mut write_s, buttons, x, y).ok();
+                }
+                Ok(VncMsg::CutText { text }) => {
+                    send_cut_text(&mut write_s, &text).ok();
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return,
@@ -342,6 +369,60 @@ fn session_thread(
                                 }
                             }
                         }
+                        5 => {
+                            // Hextile: 16x16 tiles. bg/fg colours persist across
+                            // tiles until re-specified.
+                            let mut bg = [0u8; 4];
+                            let mut fg = [0u8; 4];
+                            let tiles_x = rw.div_ceil(16);
+                            let tiles_y = rh_.div_ceil(16);
+                            'tiles: for tyi in 0..tiles_y {
+                                for txi in 0..tiles_x {
+                                    let tx = rx + txi * 16;
+                                    let ty = ry + tyi * 16;
+                                    let tw = (rw - txi * 16).min(16);
+                                    let th = (rh_ - tyi * 16).min(16);
+
+                                    let mut sub = [0u8; 1];
+                                    if read_s.read_exact(&mut sub).is_err() { bad = true; break 'tiles; }
+                                    let mask = sub[0];
+
+                                    if mask & 0x01 != 0 {
+                                        // Raw tile
+                                        let mut px = vec![0u8; (tw * th * BPP) as usize];
+                                        if read_s.read_exact(&mut px).is_err() { bad = true; break 'tiles; }
+                                        for row in 0..th {
+                                            let src = (row * tw * BPP) as usize;
+                                            let dst = (((ty + row) * width + tx) * BPP) as usize;
+                                            let rb = (tw * BPP) as usize;
+                                            if dst + rb <= fb.len() { fb[dst..dst + rb].copy_from_slice(&px[src..src + rb]); }
+                                        }
+                                        continue;
+                                    }
+                                    if mask & 0x02 != 0 && read_s.read_exact(&mut bg).is_err() { bad = true; break 'tiles; }
+                                    if mask & 0x04 != 0 && read_s.read_exact(&mut fg).is_err() { bad = true; break 'tiles; }
+                                    fill_rect(&mut fb, width, tx, ty, tw, th, &bg);
+
+                                    if mask & 0x08 != 0 {
+                                        let mut nb = [0u8; 1];
+                                        if read_s.read_exact(&mut nb).is_err() { bad = true; break 'tiles; }
+                                        let coloured = mask & 0x10 != 0;
+                                        for _ in 0..nb[0] {
+                                            let mut color = fg;
+                                            if coloured && read_s.read_exact(&mut color).is_err() { bad = true; break 'tiles; }
+                                            let mut xy = [0u8; 1];
+                                            let mut wh = [0u8; 1];
+                                            if read_s.read_exact(&mut xy).is_err() || read_s.read_exact(&mut wh).is_err() { bad = true; break 'tiles; }
+                                            let sx = (xy[0] >> 4) as u32;
+                                            let sy = (xy[0] & 0x0f) as u32;
+                                            let sw = (wh[0] >> 4) as u32 + 1;
+                                            let sh = (wh[0] & 0x0f) as u32 + 1;
+                                            fill_rect(&mut fb, width, tx + sx, ty + sy, sw, sh, &color);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         _ => {
                             // Unsupported encoding — we can't skip without knowing the length
                             bad = true;
@@ -373,7 +454,7 @@ fn session_thread(
             }
             // Bell — ignore
             2 => {}
-            // ServerCutText — skip
+            // ServerCutText — forward the remote clipboard to the frontend
             3 => {
                 let mut skip = [0u8; 3];
                 if read_s.read_exact(&mut skip).is_err() { break; }
@@ -382,6 +463,9 @@ fn session_thread(
                 let len = u32::from_be_bytes(lbuf) as usize;
                 let mut text = vec![0u8; len];
                 if read_s.read_exact(&mut text).is_err() { break; }
+                // RFB cut text is Latin-1; lossy UTF-8 is fine for typical text.
+                let s = String::from_utf8_lossy(&text).to_string();
+                app.emit(&format!("vnc-clipboard-{session_id}"), s).ok();
             }
             _ => break, // Unknown — bail
         }
@@ -466,6 +550,17 @@ pub async fn vnc_pointer_event(
         .tx
         .send(VncMsg::PointerEvent { buttons, x, y })
         .map_err(|_| "VNC thread gone".to_string())
+}
+
+#[tauri::command]
+pub async fn vnc_send_clipboard(
+    vnc_sessions: State<'_, VncSessionMap>,
+    session_id: String,
+    text: String,
+) -> Result<(), String> {
+    let map = vnc_sessions.lock().unwrap();
+    let session = map.get(&session_id).ok_or("VNC session not found")?;
+    session.tx.send(VncMsg::CutText { text }).map_err(|_| "VNC thread gone".to_string())
 }
 
 #[tauri::command]

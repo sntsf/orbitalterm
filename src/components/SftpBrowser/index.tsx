@@ -2,19 +2,26 @@ import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { flushSync } from "react-dom";
 import {
   Folder, FolderOpen, File, Upload, Download, FolderPlus, FilePlus, RefreshCw,
-  HardDrive, ChevronLeft, Pencil, Trash2, WifiOff, ChevronRight,
+  HardDrive, ChevronLeft, Pencil, Trash2, WifiOff, ChevronRight, Lock, Eye, EyeOff,
+  SquarePlus, SquareMinus,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
-  sftpConnect, sftpListDir, sftpUpload, sftpDownload, sftpMkdir,
-  sftpCreateFile, sftpRename, sftpDelete,
+  sftpConnect, sftpConnectFromSsh, sftpListDir, sftpUpload, sftpDownload, sftpMkdir,
+  sftpCreateFile, sftpRename, sftpDelete, sftpChmod,
 } from "../../lib/commands";
+import { friendlyFsError } from "../../lib/transferErrors";
+import { resolveUploadOverwrites } from "../../lib/overwrite";
+import { useTransferStore } from "../../store/useTransferStore";
 import type { SftpEntry } from "../../types";
 
 interface SftpBrowserProps {
   sessionId: string | null;
+  // When set, SFTP reuses this interactive SSH session (shared connection)
+  // instead of opening its own. Null for standalone SFTP connections.
+  sshSessionId?: string | null;
   connectionId: string;
   username?: string;
   onConnect: (sessionId: string) => void;
@@ -43,11 +50,16 @@ function TreePrefix({ continuations, isLast }: { continuations: boolean[]; isLas
   );
 }
 
-export function SftpBrowser({ sessionId, connectionId, username, onConnect }: SftpBrowserProps) {
+export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, onConnect }: SftpBrowserProps) {
   const [currentPath, setCurrentPath] = useState("/");
   const [pathInput, setPathInput] = useState("/");
   const [editingPath, setEditingPath] = useState(false);
   const [entries, setEntries] = useState<SftpEntry[]>([]);
+  // Live mirrors so the (single) OS drag-drop listener reads the current path /
+  // entries instead of values captured when it was first registered — otherwise
+  // a dropped file uploads both here and at the connection's initial path.
+  const currentPathRef = useRef("/");
+  const entriesRef = useRef<SftpEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [disconnected, setDisconnected] = useState(false);
@@ -66,6 +78,8 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
   // Multi-select
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastClickedRef = useRef<string | null>(null);
+  // Focusable file list, for keyboard navigation (↑/↓/→/←, Enter, Backspace).
+  const listRef = useRef<HTMLDivElement>(null);
 
   // Path autocomplete
   const [pathSuggestions, setPathSuggestions] = useState<string[]>([]);
@@ -77,6 +91,8 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
   const [newFolderName, setNewFolderName] = useState("");
   const [newFileMode, setNewFileMode] = useState(false);
   const [newFileName, setNewFileName] = useState("");
+  // Hidden (dot-) files are filtered out by default, like a file manager.
+  const [showHidden, setShowHidden] = useState(false);
   const [renamingEntry, setRenamingEntry] = useState<SftpEntry | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
@@ -99,14 +115,22 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   const isSftpGone = (err: unknown) => {
     const s = String(err);
-    return s.includes("session not found") || s.includes("SFTP session") || s.includes("closed") || s.includes("EOF");
+    return s.includes("session not found") || s.includes("SFTP session not found") || s.includes("closed") || s.includes("EOF");
+  };
+
+  // Turn raw russh/SFTP errors into a short, friendly message.
+  const friendlySftp = (err: unknown): string => {
+    const s = String(err).toLowerCase();
+    if (s.includes("subsystem") || s.includes("channel open") || s.includes("sftp session init") || s.includes("init failed"))
+      return "SFTP no disponible en este servidor (el subsistema SFTP podría estar deshabilitado). El SSH sigue funcionando.";
+    return friendlyFsError(err);
   };
 
   const handleError = (err: unknown) => {
     if (isSftpGone(err)) {
       setDisconnected(true);
     } else {
-      setError(String(err));
+      setError(friendlySftp(err));
     }
   };
 
@@ -118,7 +142,9 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     try {
       const result = await sftpListDir(sid, path);
       setEntries(result);
+      entriesRef.current = result;
       setCurrentPath(path);
+      currentPathRef.current = path;
       setPathInput(path);
       setSelected(new Set());
       setExpandedDirs(new Set());
@@ -160,7 +186,8 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
   // ── flatten tree ───────────────────────────────────────────────────────────
 
   const flattenTree = useCallback((items: SftpEntry[], depth: number, continuations: boolean[]): FlatRow[] => {
-    const sorted = [...items].sort((a, b) => {
+    const visible = showHidden ? items : items.filter((e) => !e.name.startsWith("."));
+    const sorted = [...visible].sort((a, b) => {
       if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
@@ -177,7 +204,7 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
       }
     }
     return result;
-  }, [expandedDirs, loadingDirs, dirChildren]);
+  }, [expandedDirs, loadingDirs, dirChildren, showHidden]);
 
   const flatRows = useMemo(() => flattenTree(entries, 0, []), [entries, flattenTree]);
 
@@ -185,20 +212,21 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   const doUpload = useCallback(async (localPaths: string[]) => {
     if (!sessionId) return;
-    for (const localPath of localPaths) {
+    // Read the CURRENT path/entries from refs so a single, stable drag-drop
+    // listener always targets the folder the user is viewing.
+    const dir = currentPathRef.current;
+    const toUpload = resolveUploadOverwrites(localPaths, new Set(entriesRef.current.map((e) => e.name)));
+    if (toUpload.length === 0) return;
+    useTransferStore.getState().enqueue(toUpload.map((localPath) => {
       const fileName = localPath.split(/[\\/]/).pop() ?? "file";
-      flushSync(() => { setTransferFile(`↑ ${fileName}`); setProgress({ transferred: 0, total: 0 }); });
-      const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
-      try {
-        await sftpUpload(sessionId, localPath, remotePath);
-      } catch (err) {
-        handleError(err);
-        break;
-      }
-    }
-    setTransferFile(null);
-    loadDir(sessionId, currentPath);
-  }, [sessionId, currentPath, loadDir]); // eslint-disable-line react-hooks/exhaustive-deps
+      const remotePath = dir === "/" ? `/${fileName}` : `${dir}/${fileName}`;
+      return {
+        label: fileName, dir: "up" as const,
+        run: () => sftpUpload(sessionId, localPath, remotePath),
+        onComplete: () => loadDir(sessionId, currentPathRef.current),
+      };
+    }));
+  }, [sessionId, loadDir]);
 
   const doDownload = useCallback(async (remoteEntries: SftpEntry[], destDir: string) => {
     if (!sessionId) return;
@@ -259,7 +287,7 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     setDisconnected(false);
     const home = username ? `/home/${username}` : "/";
     sftpListDir(sessionId, home)
-      .then((r) => { setEntries(r); setCurrentPath(home); setPathInput(home); })
+      .then((r) => { setEntries(r); entriesRef.current = r; setCurrentPath(home); currentPathRef.current = home; setPathInput(home); })
       .catch(() => loadDir(sessionId, "/"));
   }, [sessionId, username, loadDir]);
 
@@ -307,16 +335,67 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     if (p !== currentPath) navigateTo(p);
   };
 
+  // ── keyboard navigation of the file list ─────────────────────────────────────
+  const cursorEntry = () => flatRows.find((r) => r.entry.path === lastClickedRef.current)?.entry;
+  const moveCursor = (delta: 1 | -1) => {
+    if (flatRows.length === 0) return;
+    const curIdx = flatRows.findIndex((r) => r.entry.path === lastClickedRef.current);
+    let nextIdx = curIdx < 0 ? (delta > 0 ? 0 : flatRows.length - 1) : curIdx + delta;
+    nextIdx = Math.max(0, Math.min(flatRows.length - 1, nextIdx));
+    const entry = flatRows[nextIdx].entry;
+    lastClickedRef.current = entry.path;
+    setSelected(new Set([entry.path]));
+    const rows = listRef.current?.querySelectorAll<HTMLElement>("[data-sftp-path]");
+    if (rows) Array.from(rows).find((el) => el.dataset.sftpPath === entry.path)?.scrollIntoView({ block: "nearest" });
+  };
+  const handleListKeyDown = (e: React.KeyboardEvent) => {
+    // Right=expand, Left=collapse, ↑/↓=move, Enter=open/download, Backspace=go up.
+    if (e.key === "ArrowDown") { e.preventDefault(); moveCursor(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveCursor(-1); }
+    else if (e.key === "ArrowRight") {
+      const entry = cursorEntry();
+      if (entry?.is_dir && !expandedDirs.has(entry.path)) { e.preventDefault(); toggleExpand(entry); }
+    } else if (e.key === "ArrowLeft") {
+      const entry = cursorEntry();
+      if (entry?.is_dir && expandedDirs.has(entry.path)) { e.preventDefault(); toggleExpand(entry); }
+    } else if (e.key === "Backspace") {
+      e.preventDefault(); navigateUp();
+    } else if (e.key === "Enter") {
+      const entry = cursorEntry();
+      if (!entry) return;
+      e.preventDefault();
+      if (entry.is_dir) navigateTo(entry.path); else handleDownloadEntry(entry);
+    }
+  };
+
   // ── connect ────────────────────────────────────────────────────────────────
 
   const handleConnect = async () => {
     setConnecting(true);
     setError(null);
     setDisconnected(false);
-    try { onConnect(await sftpConnect(connectionId)); }
-    catch (err) { setError(String(err)); }
+    try {
+      // Reuse the interactive SSH session when available (shared connection);
+      // otherwise open a standalone SFTP connection.
+      const sid = sshSessionId
+        ? await sftpConnectFromSsh(sshSessionId)
+        : await sftpConnect(connectionId);
+      onConnect(sid);
+    }
+    catch (err) { setError(friendlySftp(err)); }
     finally { setConnecting(false); }
   };
+
+  // Auto-connect once when reusing an interactive SSH session (the terminal
+  // sets sshSessionId after login). If SFTP isn't available the panel shows a
+  // friendly message and the SSH terminal keeps working — no retry loop.
+  const autoConnectedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (sshSessionId && !sessionId && !disconnected && autoConnectedRef.current !== sshSessionId) {
+      autoConnectedRef.current = sshSessionId;
+      handleConnect();
+    }
+  }, [sshSessionId, sessionId, disconnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── upload ─────────────────────────────────────────────────────────────────
 
@@ -329,7 +408,14 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
   // ── download ───────────────────────────────────────────────────────────────
 
   const handleDownloadEntry = async (entry: SftpEntry) => {
-    if (!sessionId || entry.is_dir) return;
+    if (!sessionId) return;
+    // Folders are downloaded recursively into a chosen destination directory.
+    if (entry.is_dir) {
+      const destDir = await openDialog({ directory: true, multiple: false }).catch(() => null) as string | null;
+      if (!destDir) return;
+      await doDownload([entry], destDir);
+      return;
+    }
     const localPath = await saveDialog({ defaultPath: entry.name }).catch(() => null);
     if (!localPath) return;
     flushSync(() => { setTransferFile(`↓ ${entry.name}`); setProgress({ transferred: 0, total: 0 }); });
@@ -340,7 +426,7 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   const handleDownloadSelected = async () => {
     if (!sessionId) return;
-    const toDownload = flatRows.map((r) => r.entry).filter((e) => selected.has(e.path) && !e.is_dir);
+    const toDownload = flatRows.map((r) => r.entry).filter((e) => selected.has(e.path));
     if (toDownload.length === 0) return;
     if (toDownload.length === 1) {
       await handleDownloadEntry(toDownload[0]);
@@ -389,6 +475,18 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
     catch (err) { handleError(err); }
   };
 
+  const handleChmod = (entry: SftpEntry) => {
+    if (!sessionId) return;
+    const current = (entry.mode & 0o777).toString(8).padStart(3, "0");
+    const input = window.prompt(`Permisos de "${entry.name}" (octal, ej. 755):`, current);
+    if (input == null) return;
+    const mode = parseInt(input.trim(), 8);
+    if (Number.isNaN(mode)) { setError("Permisos inválidos (usa octal, ej. 644)."); return; }
+    sftpChmod(sessionId, entry.path, mode)
+      .then(() => loadDir(sessionId, currentPath))
+      .catch((err) => handleError(err));
+  };
+
   // ── selection ──────────────────────────────────────────────────────────────
 
   const toggleSelect = (e: React.MouseEvent, entry: SftpEntry) => {
@@ -414,7 +512,7 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   const openCtxMenu = (e: React.MouseEvent, entry?: SftpEntry) => {
     e.preventDefault();
-    if (entry && !entry.is_dir && !selected.has(entry.path)) {
+    if (entry && !selected.has(entry.path)) {
       setSelected(new Set([entry.path]));
     }
     setCtxMenu({ x: e.clientX, y: e.clientY, entry });
@@ -422,7 +520,8 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
 
   // ── derived values ─────────────────────────────────────────────────────────
 
-  const selectedFiles = flatRows.map((r) => r.entry).filter((e) => selected.has(e.path) && !e.is_dir);
+  // Downloadable selection includes folders (downloaded recursively).
+  const selectedFiles = flatRows.map((r) => r.entry).filter((e) => selected.has(e.path));
   const pct = progress.total > 0 ? Math.round(progress.transferred * 100 / progress.total) : 0;
 
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); };
@@ -455,6 +554,7 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       onClick={() => setCtxMenu(null)}
+      onKeyDown={(e) => { if (e.key === "F5") { e.preventDefault(); if (sessionId) loadDir(sessionId, currentPathRef.current); } }}
       onContextMenu={(e) => { e.preventDefault(); openCtxMenu(e); }}
     >
       {/* Path bar */}
@@ -523,17 +623,23 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
       </div>
 
       {/* Action toolbar */}
-      <div className="flex items-center gap-0.5 px-1.5 py-1 border-b border-[var(--color-border)] shrink-0">
+      <div className="flex items-center gap-0.5 px-1.5 py-1 border-b border-[var(--color-border)] shrink-0 flex-wrap">
         <TBtn icon={<Upload size={11} />} label="Upload" onClick={handleUpload} />
-        {selectedFiles.length > 0 && (
-          <TBtn
-            icon={<Download size={11} />}
-            label={selectedFiles.length === 1 ? "Download" : `Download (${selectedFiles.length})`}
-            onClick={handleDownloadSelected}
-          />
-        )}
+        <TBtn
+          icon={<Download size={11} />}
+          label={selectedFiles.length > 1 ? `Download (${selectedFiles.length})` : "Download"}
+          onClick={handleDownloadSelected}
+          disabled={selectedFiles.length === 0}
+          active={selectedFiles.length > 0}
+        />
         <TBtn icon={<FolderPlus size={11} />} label="Carpeta" onClick={() => setNewFolderMode(true)} />
         <TBtn icon={<FilePlus size={11} />} label="Archivo" onClick={() => setNewFileMode(true)} />
+        <TBtn
+          icon={showHidden ? <EyeOff size={11} /> : <Eye size={11} />}
+          label={showHidden ? "Ocultar" : "Ver ocultos"}
+          onClick={() => setShowHidden((v) => !v)}
+          active={showHidden}
+        />
       </div>
 
       {/* Error banner */}
@@ -544,7 +650,7 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
       )}
 
       {/* File list */}
-      <div className="flex-1 overflow-y-auto min-h-0">
+      <div ref={listRef} tabIndex={0} onKeyDown={handleListKeyDown} className="flex-1 overflow-y-auto min-h-0 outline-none">
         {loading ? (
           <div className="flex items-center justify-center h-full text-[var(--color-text-muted)]">
             <RefreshCw size={16} className="animate-spin" />
@@ -596,9 +702,9 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
               {flatRows.map(({ entry, isExpanded, isLoading, isLast, continuations, depth }) => {
                 const isSelected = selected.has(entry.path);
                 return (
-                  <tr key={entry.path}
+                  <tr key={entry.path} data-sftp-path={entry.path}
                     className={`cursor-pointer ${isSelected ? "bg-[var(--color-accent)]/15" : "hover:bg-[var(--color-bg-hover)]"}`}
-                    onClick={(e) => toggleSelect(e, entry)}
+                    onClick={(e) => { listRef.current?.focus(); toggleSelect(e, entry); }}
                     onContextMenu={(e) => { e.stopPropagation(); openCtxMenu(e, entry); }}
                     onDoubleClick={() => { entry.is_dir ? navigateTo(entry.path) : handleDownloadEntry(entry); }}
                   >
@@ -614,8 +720,8 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
                             {isLoading
                               ? <RefreshCw size={10} className="animate-spin" />
                               : isExpanded
-                                ? <ChevronRight size={10} className="rotate-90 transition-transform" />
-                                : <ChevronRight size={10} className="transition-transform" />
+                                ? <SquareMinus size={11} className="transition-transform" />
+                                : <SquarePlus size={11} className="transition-transform" />
                             }
                           </button>
                         ) : (
@@ -690,6 +796,9 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
                 <>
                   <CtxItem icon={<FolderOpen size={12} />} label="Abrir (navegar)"
                     onClick={() => { navigateTo(ctxMenu.entry!.path); setCtxMenu(null); }} />
+                  <CtxItem icon={<Download size={12} />}
+                    label={selectedFiles.length > 1 ? `Descargar ${selectedFiles.length} elementos` : "Descargar carpeta"}
+                    onClick={() => { selectedFiles.length > 1 ? handleDownloadSelected() : handleDownloadEntry(ctxMenu.entry!); setCtxMenu(null); }} />
                   <CtxItem icon={ctxMenu.entry && expandedDirs.has(ctxMenu.entry.path) ? <ChevronRight size={12} className="rotate-90" /> : <ChevronRight size={12} />}
                     label={ctxMenu.entry && expandedDirs.has(ctxMenu.entry.path) ? "Contraer" : "Expandir"}
                     onClick={() => { toggleExpand(ctxMenu.entry!); setCtxMenu(null); }} />
@@ -697,6 +806,8 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
               )}
               <CtxItem icon={<Pencil size={12} />} label="Renombrar"
                 onClick={() => { setRenamingEntry(ctxMenu.entry!); setRenameValue(ctxMenu.entry!.name); setCtxMenu(null); }} />
+              <CtxItem icon={<Lock size={12} />} label="Permisos…"
+                onClick={() => { handleChmod(ctxMenu.entry!); setCtxMenu(null); }} />
               <div className="my-0.5 border-t border-[var(--color-border)]" />
               <CtxItem icon={<Trash2 size={12} />} label="Eliminar" danger
                 onClick={() => { handleDelete(ctxMenu.entry!); setCtxMenu(null); }} />
@@ -714,10 +825,16 @@ export function SftpBrowser({ sessionId, connectionId, username, onConnect }: Sf
   );
 }
 
-function TBtn({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+function TBtn({ icon, label, onClick, active = false, disabled = false }: { icon: React.ReactNode; label: string; onClick: () => void; active?: boolean; disabled?: boolean }) {
   return (
-    <button onClick={onClick}
-      className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors">
+    <button onClick={onClick} disabled={disabled}
+      className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] transition-colors ${
+        disabled
+          ? "text-[var(--color-text-muted)] opacity-40 cursor-default"
+          : active
+            ? "bg-[var(--color-accent)] text-white"
+            : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]"
+      }`}>
       {icon}{label}
     </button>
   );

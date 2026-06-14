@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
-  ChevronLeft, ChevronRight, ChevronDown, RefreshCw, FolderPlus, Pencil, Trash2,
+  ChevronLeft, ChevronRight, RefreshCw, FolderPlus, Pencil, Trash2,
   ArrowRight, ArrowLeft, Loader, WifiOff, HardDrive, Home, Eye, EyeOff,
-  File, Folder, Scissors, ClipboardPaste,
+  File, Folder, Scissors, ClipboardPaste, SquarePlus, SquareMinus,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useAppStore } from "../../store/useAppStore";
 import { useNotifStore } from "../../store/useNotifStore";
 import {
@@ -15,6 +16,9 @@ import {
 } from "../../lib/commands";
 import type { LocalEntry } from "../../lib/commands";
 import type { SftpEntry } from "../../types";
+import { friendlyFsError } from "../../lib/transferErrors";
+import { resolveUploadOverwrites } from "../../lib/overwrite";
+import { useTransferStore } from "../../store/useTransferStore";
 import type { Tab } from "../../types";
 
 type AnyEntry = (SftpEntry | LocalEntry) & { is_dir: boolean; name: string; path: string; size: number };
@@ -207,9 +211,13 @@ function FilePanel({
     onFlatRowsChange?.(flatRows.map((r) => r.entry));
   }, [flatRows]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Expand/collapse a folder inline
-  const handleToggleExpand = async (e: React.MouseEvent, entry: AnyEntry) => {
-    e.stopPropagation();
+  // Focusable list + keyboard cursor (↑/↓/→/←, Enter, Backspace).
+  const listRef = useRef<HTMLDivElement>(null);
+  const cursorRef = useRef<string | null>(null);
+
+  // Expand/collapse a folder inline (event optional — keyboard nav passes null).
+  const handleToggleExpand = async (e: React.MouseEvent | null, entry: AnyEntry) => {
+    e?.stopPropagation();
     if (!entry.is_dir) return;
     if (expandedDirs.has(entry.path)) {
       setExpandedDirs((prev) => { const n = new Set(prev); n.delete(entry.path); return n; });
@@ -227,6 +235,35 @@ function FilePanel({
     }
   };
 
+  const cursorEntry = () => flatRows.find((r) => r.entry.path === cursorRef.current)?.entry;
+  const moveCursor = (delta: 1 | -1) => {
+    if (flatRows.length === 0) return;
+    const idx = flatRows.findIndex((r) => r.entry.path === cursorRef.current);
+    let next = idx < 0 ? (delta > 0 ? 0 : flatRows.length - 1) : idx + delta;
+    next = Math.max(0, Math.min(flatRows.length - 1, next));
+    const entry = flatRows[next].entry;
+    cursorRef.current = entry.path;
+    onSelect({ shiftKey: false, ctrlKey: false, metaKey: false } as React.MouseEvent, entry);
+    const rows = listRef.current?.querySelectorAll<HTMLElement>("[data-row-path]");
+    if (rows) Array.from(rows).find((el) => el.dataset.rowPath === entry.path)?.scrollIntoView({ block: "nearest" });
+  };
+  const handleListKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); moveCursor(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveCursor(-1); }
+    else if (e.key === "ArrowRight") {
+      const en = cursorEntry();
+      if (en?.is_dir && !expandedDirs.has(en.path)) { e.preventDefault(); handleToggleExpand(null, en); }
+    } else if (e.key === "ArrowLeft") {
+      const en = cursorEntry();
+      if (en?.is_dir && expandedDirs.has(en.path)) { e.preventDefault(); handleToggleExpand(null, en); }
+    } else if (e.key === "Backspace") {
+      e.preventDefault(); onUp();
+    } else if (e.key === "Enter") {
+      const en = cursorEntry();
+      if (en?.is_dir) { e.preventDefault(); onNavigate(en.path); }
+    }
+  };
+
   const toggleSort = (col: SortCol) => {
     if (sortBy === col) setSortAsc((v) => !v);
     else { setSortBy(col); setSortAsc(true); }
@@ -238,6 +275,7 @@ function FilePanel({
   return (
     <div
       className="flex flex-col h-full bg-[var(--color-bg-surface)] min-w-0 relative"
+      onKeyDown={(e) => { if (e.key === "F5") { e.preventDefault(); onRefresh(); } }}
       onContextMenu={(e) => { e.preventDefault(); onCtxMenu(e); }}
     >
       {/* Drag-over overlay */}
@@ -351,7 +389,10 @@ function FilePanel({
 
       {/* File list */}
       <div
-        className="flex-1 overflow-y-auto min-h-0 text-xs"
+        ref={listRef}
+        tabIndex={0}
+        onKeyDown={handleListKeyDown}
+        className="flex-1 overflow-y-auto min-h-0 text-xs outline-none"
         onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; onPanelDragOver(e); }}
         onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) onDragLeave(); }}
         onDrop={(e) => { e.preventDefault(); e.stopPropagation(); onDropOnPanel(null); }}
@@ -407,6 +448,7 @@ function FilePanel({
                 return (
                   <tr
                     key={entry.path}
+                    data-row-path={entry.path}
                     draggable
                     className={`cursor-pointer border-b border-[var(--color-border)]/30 ${
                       isFolderDragTarget
@@ -415,7 +457,7 @@ function FilePanel({
                           ? "bg-[var(--color-accent)]/20"
                           : "hover:bg-[var(--color-bg-hover)]"
                     } ${isCut ? "opacity-40" : ""}`}
-                    onClick={(e) => onSelect(e, entry)}
+                    onClick={(e) => { cursorRef.current = entry.path; listRef.current?.focus(); onSelect(e, entry); }}
                     onDoubleClick={() => { if (entry.is_dir) onNavigate(entry.path); }}
                     onContextMenu={(e) => { e.stopPropagation(); onCtxMenu(e, entry); }}
                     onDragStart={(e) => {
@@ -450,8 +492,8 @@ function FilePanel({
                             {isLoading
                               ? <Loader size={9} className="animate-spin" />
                               : isExpanded
-                                ? <ChevronDown size={9} />
-                                : <ChevronRight size={9} />}
+                                ? <SquareMinus size={11} />
+                                : <SquarePlus size={11} />}
                           </button>
                         ) : (
                           <span className="w-[14px] shrink-0" />
@@ -574,6 +616,13 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   const [remoteSelected, setRemoteSelected] = useState<Set<string>>(new Set());
   const remoteLastClick = useRef<string | null>(null);
   const remoteFlatRowsRef = useRef<AnyEntry[]>([]);
+  // Live mirrors so the (single) OS drag-drop listener always reads the current
+  // remote path / entries instead of a value captured at registration time.
+  const remotePathRef = useRef(remotePath);
+  const remoteEntriesRef = useRef<SftpEntry[]>([]);
+  // OS file drag-drop onto the remote panel (upload from the local PC).
+  const remotePanelRef = useRef<HTMLDivElement>(null);
+  const [osDragOverRemote, setOsDragOverRemote] = useState(false);
   const [remoteLoading, setRemoteLoading] = useState(false);
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [showRemoteHidden, setShowRemoteHidden] = useState(false);
@@ -653,17 +702,62 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
     try {
       const result = await sftpListDir(sid, p);
       setRemoteEntries(result);
+      remoteEntriesRef.current = result;
       setRemotePath(p);
+      remotePathRef.current = p;
       setRemoteSelected(new Set());
       remoteLastClick.current = null;
     } catch (err) {
       const s = String(err);
       if (s.includes("session not found") || s.includes("closed")) setDisconnected(true);
-      else setRemoteError(s);
+      else setRemoteError(friendlyFsError(err));
     } finally {
       setRemoteLoading(false);
     }
   }, []);
+
+  // Upload OS-dropped file paths to the current remote folder (files only,
+  // matching the mini-SFTP behaviour).
+  const doUploadLocalPaths = useCallback(async (paths: string[]) => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    // Read the CURRENT path/entries from refs — the listener is registered once
+    // and must not act on a path captured when it was first attached.
+    const dir = remotePathRef.current;
+    const toUpload = resolveUploadOverwrites(paths, new Set(remoteEntriesRef.current.map((e) => e.name)));
+    if (toUpload.length === 0) return;
+    useTransferStore.getState().enqueue(toUpload.map((localPath) => {
+      const fileName = localPath.split(/[\\/]/).pop() ?? "file";
+      const dest = dir === "/" ? `/${fileName}` : `${dir}/${fileName}`;
+      return {
+        label: fileName, dir: "up" as const,
+        run: () => sftpUpload(sid, localPath, dest),
+        onComplete: () => loadRemote(sid, remotePathRef.current),
+      };
+    }));
+  }, [loadRemote]);
+
+  // Drag files from the OS onto the REMOTE panel to upload them there.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    getCurrentWebviewWindow().onDragDropEvent((event) => {
+      const p = event.payload;
+      if (p.type === "leave") { setOsDragOverRemote(false); return; }
+      const rect = remotePanelRef.current?.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const inside = rect
+        ? p.position.x / dpr >= rect.left && p.position.x / dpr <= rect.right
+          && p.position.y / dpr >= rect.top && p.position.y / dpr <= rect.bottom
+        : false;
+      if (p.type === "enter" || p.type === "over") {
+        setOsDragOverRemote(inside);
+      } else if (p.type === "drop") {
+        setOsDragOverRemote(false);
+        if (inside && p.paths?.length) doUploadLocalPaths(p.paths);
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [doUploadLocalPaths]);
 
   const remoteUp = () => {
     if (remotePath === "/" || !sessionIdRef.current) return;
@@ -1176,7 +1270,10 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
         </div>
 
         {/* Remote panel */}
-        <div className="flex-1 min-w-0 flex flex-col">
+        <div
+          ref={remotePanelRef}
+          className={`flex-1 min-w-0 flex flex-col ${osDragOverRemote ? "ring-2 ring-inset ring-[var(--color-accent)]" : ""}`}
+        >
           {newFolderMode === "remote" && (
             <div className="px-3 pt-2 pb-1 border-b border-[var(--color-border)] flex items-center gap-2 shrink-0">
               <Folder size={12} className="text-[var(--color-accent)] shrink-0" />

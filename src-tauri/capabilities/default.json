@@ -16,6 +16,8 @@
     "shell:allow-open",
     "dialog:allow-open",
     "dialog:allow-save",
-    "dialog:allow-ask"
+    "dialog:allow-ask",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text"
   ]
 }

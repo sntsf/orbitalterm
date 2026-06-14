@@ -4,6 +4,7 @@ use std::sync::{mpsc, Mutex};
 pub enum VncMsg {
     KeyEvent { down: bool, key: u32 },
     PointerEvent { buttons: u8, x: u16, y: u16 },
+    CutText { text: String },
     Disconnect,
 }
 

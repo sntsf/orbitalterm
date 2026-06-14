@@ -5,6 +5,8 @@ export type ConnectionStatus = "idle" | "connecting" | "connected" | "error";
 export interface Group {
   id: string;
   name: string;
+  description: string;
+  color: string;
 }
 
 export interface Connection {
@@ -27,6 +29,12 @@ export interface Connection {
   icon: string;
   url: string;
   custom_hosts: string;
+  rdp_security?: string;
+  rdp_color_depth?: number;
+  tunnels: string;
+  rdp_redirect_drives: boolean;
+  rdp_gateway: string;
+  proxy_jump: string;
 }
 
 export interface Folder {
@@ -36,6 +44,8 @@ export interface Folder {
   expanded: boolean;
   group_id: string;
   sort_order: number;
+  description: string;
+  color: string;
 }
 
 export interface Tab {
@@ -54,4 +64,5 @@ export interface SftpEntry {
   is_dir: boolean;
   size: number;
   modified: number;
+  mode: number;
 }

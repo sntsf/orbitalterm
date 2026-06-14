@@ -36,8 +36,9 @@ russh = "0.44"
 russh-sftp = "2"
 russh-keys = "0.44"
 async-trait = "0.1"
-tokio = { version = "1", features = ["io-util"] }
-suppaftp = "6"
+tokio = { version = "1", features = ["io-util", "rt", "macros", "sync", "time", "net"] }
+suppaftp = { version = "6", features = ["native-tls", "deprecated"] }
+native-tls = "0.2"
 des = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
@@ -45,6 +46,7 @@ roxmltree = "0.20"
 aes-gcm = "0.10"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 sha1 = "0.10"
+tauri-plugin-clipboard-manager = "2.3.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 

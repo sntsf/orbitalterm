@@ -1,7 +1,7 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use russh::ChannelMsg;
+use tokio::sync::mpsc;
 use rusqlite::params;
-use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -11,7 +11,8 @@ use crate::{
     commands::connections::Connection,
     db,
     rdp::{EmbeddedRdpSessionMap, RdpSessionMap},
-    ssh::{SshSession, SshSessionMap},
+    ssh::{SshCmd, SshSession, SshSessionMap},
+    sftp::SshHandler,
 };
 
 // ── DB helper ────────────────────────────────────────────────────────────────
@@ -21,7 +22,8 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
     db.query_row(
         "SELECT id, name, type, host, port, username, auth_type, key_path,
                 folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
-                sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth
+                sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels,
+                rdp_redirect_drives, rdp_gateway, proxy_jump
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -48,6 +50,10 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 custom_hosts: row.get::<_, String>(19).unwrap_or_default(),
                 rdp_security: row.get::<_, String>(20).unwrap_or_else(|_| "negotiate".to_string()),
                 rdp_color_depth: row.get::<_, i64>(21).unwrap_or(32),
+                tunnels: row.get::<_, String>(22).unwrap_or_default(),
+                rdp_redirect_drives: row.get::<_, i64>(23).unwrap_or(0) != 0,
+                rdp_gateway: row.get::<_, String>(24).unwrap_or_default(),
+                proxy_jump: row.get::<_, String>(25).unwrap_or_default(),
             })
         },
     )
@@ -119,105 +125,396 @@ pub async fn has_password(connection_id: String) -> Result<bool, String> {
 
 // ── SSH ──────────────────────────────────────────────────────────────────────
 
+/// Sentinel error: the frontend should prompt for the missing username/password
+/// and call `connect_ssh` again with them. Returned when a username is missing
+/// or password auth has no password available.
+pub const NEED_CREDENTIALS: &str = "NEED_CREDENTIALS";
+
+/// Parse the per-connection tunnel spec. One tunnel per line:
+///   "L <listenPort> <destHost> <destPort>"   (local forward, -L)
+///   "R <bindPort> <destHost> <destPort>"     (remote forward, -R)
+///   "D <listenPort>"                          (dynamic SOCKS5 proxy, -D)
+/// Lines that are empty, comments (#) or malformed are ignored.
+fn parse_tunnels(spec: &str) -> Vec<(char, u16, String, u16)> {
+    spec.lines()
+        .filter_map(|line| {
+            let l = line.trim();
+            if l.is_empty() || l.starts_with('#') {
+                return None;
+            }
+            let p: Vec<&str> = l.split_whitespace().collect();
+            let kind = p.first()?.chars().next()?.to_ascii_uppercase();
+            if kind == 'D' {
+                if p.len() != 2 { return None; }
+                Some(('D', p[1].parse().ok()?, String::new(), 0))
+            } else {
+                if p.len() != 4 { return None; }
+                Some((kind, p[1].parse().ok()?, p[2].to_string(), p[3].parse().ok()?))
+            }
+        })
+        .collect()
+}
+
+/// Local port forward (-L): listen on 127.0.0.1:listen_port and tunnel each
+/// accepted connection to dest_host:dest_port through the SSH session.
+async fn local_forward(
+    handle: Arc<russh::client::Handle<SshHandler>>,
+    listen_port: u16,
+    dest_host: String,
+    dest_port: u16,
+) {
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", listen_port)).await {
+        Ok(l) => l,
+        Err(e) => { eprintln!("[ssh] tunnel -L {listen_port}: bind failed: {e}"); return; }
+    };
+    loop {
+        let (mut socket, peer) = match listener.accept().await {
+            Ok(x) => x,
+            Err(_) => break,
+        };
+        let h = Arc::clone(&handle);
+        let dhost = dest_host.clone();
+        tokio::spawn(async move {
+            let channel = match h
+                .channel_open_direct_tcpip(dhost, dest_port as u32, peer.ip().to_string(), peer.port() as u32)
+                .await
+            {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let mut stream = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+        });
+    }
+}
+
+/// Dynamic forward (-D): a minimal SOCKS5 proxy on 127.0.0.1:listen_port that
+/// tunnels each CONNECT request to its target through the SSH session.
+async fn dynamic_forward(handle: Arc<russh::client::Handle<SshHandler>>, listen_port: u16) {
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", listen_port)).await {
+        Ok(l) => l,
+        Err(e) => { eprintln!("[ssh] tunnel -D {listen_port}: bind failed: {e}"); return; }
+    };
+    loop {
+        let socket = match listener.accept().await {
+            Ok((s, _)) => s,
+            Err(_) => break,
+        };
+        let h = Arc::clone(&handle);
+        tokio::spawn(async move { let _ = socks5_serve(socket, h).await; });
+    }
+}
+
+async fn socks5_serve(
+    mut socket: tokio::net::TcpStream,
+    handle: Arc<russh::client::Handle<SshHandler>>,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Greeting: VER, NMETHODS, METHODS...
+    let mut hdr = [0u8; 2];
+    socket.read_exact(&mut hdr).await?;
+    if hdr[0] != 0x05 { return Ok(()); }
+    let mut methods = vec![0u8; hdr[1] as usize];
+    socket.read_exact(&mut methods).await?;
+    socket.write_all(&[0x05, 0x00]).await?; // no authentication
+
+    // Request: VER, CMD, RSV, ATYP, ADDR, PORT
+    let mut req = [0u8; 4];
+    socket.read_exact(&mut req).await?;
+    if req[1] != 0x01 {
+        // Only CONNECT is supported.
+        socket.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+        return Ok(());
+    }
+    let host = match req[3] {
+        0x01 => { let mut a = [0u8; 4];  socket.read_exact(&mut a).await?; std::net::Ipv4Addr::from(a).to_string() }
+        0x04 => { let mut a = [0u8; 16]; socket.read_exact(&mut a).await?; std::net::Ipv6Addr::from(a).to_string() }
+        0x03 => {
+            let mut len = [0u8; 1];
+            socket.read_exact(&mut len).await?;
+            let mut d = vec![0u8; len[0] as usize];
+            socket.read_exact(&mut d).await?;
+            String::from_utf8_lossy(&d).to_string()
+        }
+        _ => { socket.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?; return Ok(()); }
+    };
+    let mut pbuf = [0u8; 2];
+    socket.read_exact(&mut pbuf).await?;
+    let port = u16::from_be_bytes(pbuf);
+
+    match handle.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0).await {
+        Ok(channel) => {
+            socket.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+            let mut stream = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+        }
+        Err(_) => {
+            socket.write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Parse a ProxyJump spec "[user@]host[:port]".
+fn parse_jump(spec: &str, default_user: &str) -> (String, String, u16) {
+    let s = spec.trim();
+    let (user, rest) = match s.split_once('@') {
+        Some((u, r)) => (u.to_string(), r),
+        None => (default_user.to_string(), s),
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(22)),
+        None => (rest.to_string(), 22u16),
+    };
+    (user, host, port)
+}
+
+/// Authenticate a russh session with a connection's credentials. Used for the
+/// bastion in ProxyJump (the target uses the richer inline flow with prompts).
+async fn ssh_authenticate(
+    sh: &mut russh::client::Handle<SshHandler>,
+    username: &str,
+    connection: &Connection,
+    password: Option<String>,
+) -> Result<(), String> {
+    match connection.auth_type.as_str() {
+        "key" => {
+            if connection.key_path.is_empty() { return Err("Bastion key path is empty".to_string()); }
+            let key = russh_keys::load_secret_key(std::path::Path::new(&connection.key_path), None)
+                .map_err(|e| format!("Bastion key load failed: {e}"))?;
+            let ok = sh.authenticate_publickey(username, Arc::new(key)).await
+                .map_err(|e| format!("Bastion key auth failed: {e}"))?;
+            if !ok { return Err("Bastion key rejected".to_string()); }
+        }
+        "agent" => {
+            let mut agent = russh_keys::agent::client::AgentClient::connect_env().await
+                .map_err(|e| format!("Bastion agent unavailable: {e}"))?;
+            let identities = agent.request_identities().await
+                .map_err(|e| format!("Bastion agent identities failed: {e}"))?;
+            let mut ok = false;
+            for key in identities {
+                let (a, r) = sh.authenticate_future(username, key, agent).await;
+                agent = a;
+                if let Ok(true) = r { ok = true; break; }
+            }
+            if !ok { return Err("Bastion agent rejected".to_string()); }
+        }
+        _ => {
+            let Some(pw) = password else { return Err("Bastion password required".to_string()); };
+            let ok = sh.authenticate_password(username, pw).await
+                .map_err(|e| format!("Bastion password auth failed: {e}"))?;
+            if !ok { return Err("Bastion password rejected".to_string()); }
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn connect_ssh(
     app: AppHandle,
     sessions: State<'_, SshSessionMap>,
     connection_id: String,
+    username: Option<String>,
+    password: Option<String>,
 ) -> Result<String, String> {
     let connection = load_connection(&connection_id)?;
-    let saved_password = get_saved_password(&connection_id);
 
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| e.to_string())?;
+    // Effective username: explicit (prompt) → saved → none (ask the frontend).
+    // Resolved here but NOT enforced yet — we attempt the TCP transport first so
+    // an offline/unreachable host fails with a network error instead of
+    // pointlessly prompting for credentials a dead box will never accept.
+    let username_opt = username
+        .filter(|u| !u.is_empty())
+        .or_else(|| if connection.username.is_empty() { None } else { Some(connection.username.clone()) });
 
-    // Build ssh command — CommandBuilder::arg returns () so no chaining
-    let mut cmd = CommandBuilder::new("ssh");
-    cmd.arg("-o");
-    cmd.arg("StrictHostKeyChecking=accept-new");
-    cmd.arg("-o");
-    cmd.arg("ServerAliveInterval=30");
-    cmd.arg("-o");
-    cmd.arg("ConnectTimeout=10");
-    cmd.arg("-p");
-    cmd.arg(connection.port.to_string());
-
-    if connection.auth_type == "key" && !connection.key_path.is_empty() {
-        cmd.arg("-i");
-        cmd.arg(&connection.key_path);
-        cmd.arg("-o");
-        cmd.arg("IdentitiesOnly=yes");
+    // Parse port-forwarding tunnels up front: remote (-R) routing must be known
+    // when the connection handler is created.
+    let tunnels = parse_tunnels(&connection.tunnels);
+    let mut forwards = std::collections::HashMap::new();
+    for (kind, listen_port, dest_host, dest_port) in &tunnels {
+        if *kind == 'R' {
+            forwards.insert(*listen_port as u32, (dest_host.clone(), *dest_port));
+        }
     }
 
-    cmd.arg(format!("{}@{}", connection.username, connection.host));
+    let config = Arc::new(russh::client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        ..Default::default()
+    });
+    let addr = (connection.host.as_str(), connection.port as u16);
+    let handler = SshHandler {
+        host: connection.host.clone(),
+        port: connection.port as u16,
+        forwards,
+    };
 
-    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    // Connect directly, or via a bastion (ProxyJump) when configured. The jump
+    // session is kept alive in SshSession for the lifetime of this connection.
+    // The transport is established BEFORE we require a username, so a host that
+    // is off / out of network reports a connection error rather than a
+    // credential prompt.
+    let (mut sh, jump_handle) = if connection.proxy_jump.trim().is_empty() {
+        let sh = russh::client::connect(config, addr, handler)
+            .await
+            .map_err(|e| format!("SSH connect failed: {e}"))?;
+        (sh, None)
+    } else {
+        // ProxyJump needs a username to default the bastion user, so it must be
+        // known before we can reach the target through the bastion.
+        let Some(ref username) = username_opt else { return Err(NEED_CREDENTIALS.to_string()); };
+        let (juser, jhost, jport) = parse_jump(&connection.proxy_jump, username);
+        let jconfig = Arc::new(russh::client::Config {
+            keepalive_interval: Some(std::time::Duration::from_secs(30)),
+            ..Default::default()
+        });
+        let jhandler = SshHandler { host: jhost.clone(), port: jport, ..Default::default() };
+        let mut jump = russh::client::connect(jconfig, (jhost.as_str(), jport), jhandler)
+            .await
+            .map_err(|e| format!("Bastion connect failed: {e}"))?;
+        let jpw = password.clone().or_else(|| get_saved_password(&connection_id));
+        ssh_authenticate(&mut jump, &juser, &connection, jpw).await?;
+        let channel = jump
+            .channel_open_direct_tcpip(connection.host.clone(), connection.port as u32, "127.0.0.1", 0)
+            .await
+            .map_err(|e| format!("Bastion → target channel failed: {e}"))?;
+        let sh = russh::client::connect_stream(config, channel.into_stream(), handler)
+            .await
+            .map_err(|e| format!("SSH connect via bastion failed: {e}"))?;
+        (sh, Some(Arc::new(jump)))
+    };
 
-    let raw_writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-    let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(raw_writer));
-    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+    // Transport is up — NOW require a username (prompt only reaches a live host).
+    let Some(username) = username_opt else { return Err(NEED_CREDENTIALS.to_string()); };
 
-    let session_id = Uuid::new_v4().to_string();
-    let sid = session_id.clone();
-    let app_handle = app.clone();
-    let writer_ref = Arc::clone(&writer);
-
-    // Thread 1: stream PTY output to the frontend as ssh-data events.
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        let mut password_injected = false;
-
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
-
-                    if !password_injected {
-                        if let Some(ref pass) = saved_password {
-                            let lower = data.to_lowercase();
-                            if lower.contains("password:") || lower.contains("password for")
-                                || lower.contains("passphrase for")
-                            {
-                                if let Ok(mut w) = writer_ref.lock() {
-                                    let _ = write!(w, "{}\r", pass);
-                                    let _ = w.flush();
-                                    password_injected = true;
-                                }
-                            }
-                        }
-                    }
-
-                    app_handle.emit(&format!("ssh-data-{sid}"), &data).ok();
+    // One russh session authenticates ONCE; the terminal shell and any SFTP
+    // browser then share it (MobaXterm-style single session).
+    match connection.auth_type.as_str() {
+        "key" => {
+            if connection.key_path.is_empty() {
+                return Err("Key path is empty".to_string());
+            }
+            let key = russh_keys::load_secret_key(std::path::Path::new(&connection.key_path), None)
+                .map_err(|e| format!("Failed to load private key: {e}"))?;
+            let ok = sh
+                .authenticate_publickey(&username, Arc::new(key))
+                .await
+                .map_err(|e| format!("Key auth failed: {e}"))?;
+            if !ok { return Err("Key authentication rejected by server".to_string()); }
+        }
+        "agent" => {
+            let mut agent = russh_keys::agent::client::AgentClient::connect_env()
+                .await
+                .map_err(|e| format!("SSH agent not available (SSH_AUTH_SOCK): {e}"))?;
+            let identities = agent
+                .request_identities()
+                .await
+                .map_err(|e| format!("Agent identities request failed: {e}"))?;
+            if identities.is_empty() {
+                return Err("SSH agent has no loaded identities".to_string());
+            }
+            let mut authenticated = false;
+            for key in identities {
+                let (returned_agent, result) = sh.authenticate_future(&username, key, agent).await;
+                agent = returned_agent;
+                match result {
+                    Ok(true) => { authenticated = true; break; }
+                    Ok(false) => {}
+                    Err(e) => return Err(format!("Agent auth attempt failed: {e}")),
                 }
             }
+            if !authenticated { return Err("SSH agent authentication rejected by server".to_string()); }
         }
-        // On Linux the PTY reader reaches EOF when the process exits, which
-        // is sufficient. On Windows the ConPTY may not signal EOF reliably,
-        // so this path is a fallback — Thread 2 is the primary mechanism.
-        app_handle.emit(&format!("ssh-closed-{sid}"), ()).ok();
-    });
-
-    // Thread 2: wait for the child process to exit, then emit ssh-closed.
-    // This is the primary exit detection on Windows, where ConPTY does not
-    // reliably deliver EOF to the PTY reader when the ssh process exits.
-    {
-        let app2 = app.clone();
-        let sid2 = session_id.clone();
-        std::thread::spawn(move || {
-            let mut c = child;
-            let _ = c.wait(); // blocks until ssh process exits
-            app2.emit(&format!("ssh-closed-{sid2}"), ()).ok();
-        });
+        // default: password
+        _ => {
+            let Some(pw) = password.or_else(|| get_saved_password(&connection_id)) else {
+                return Err(NEED_CREDENTIALS.to_string());
+            };
+            let ok = sh
+                .authenticate_password(&username, pw)
+                .await
+                .map_err(|e| format!("Password auth failed: {e}"))?;
+            if !ok { return Err("AUTH_FAILED".to_string()); }
+        }
     }
 
-    sessions.lock().unwrap().insert(
-        session_id.clone(),
-        SshSession { writer, master: pair.master },
-    );
+    // Ask the server to listen for each remote (-R) tunnel. Incoming forwarded
+    // connections are routed to the local destination by the handler.
+    for (kind, listen_port, _dest_host, _dest_port) in &tunnels {
+        if *kind == 'R' {
+            let _ = sh.tcpip_forward("", *listen_port as u32).await;
+        }
+    }
 
+    // Open the interactive shell channel (PTY + shell).
+    let mut channel = sh
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("Channel open failed: {e}"))?;
+    channel
+        .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
+        .await
+        .map_err(|e| format!("PTY request failed: {e}"))?;
+    channel
+        .request_shell(false)
+        .await
+        .map_err(|e| format!("Shell request failed: {e}"))?;
+
+    let session_id = Uuid::new_v4().to_string();
+    let (tx, mut rx) = mpsc::unbounded_channel::<SshCmd>();
+    let handle = Arc::new(sh);
+
+    // Pump task: owns the shell channel. Streams remote output to the frontend
+    // and applies input/resize commands. Ends when the channel closes or the
+    // session is dropped (sender closed on disconnect).
+    let app2 = app.clone();
+    let sid2 = session_id.clone();
+    tokio::spawn(async move {
+        let mut channel = channel;
+        loop {
+            tokio::select! {
+                msg = channel.wait() => match msg {
+                    Some(ChannelMsg::Data { data }) => {
+                        let s = String::from_utf8_lossy(&data).to_string();
+                        let _ = app2.emit(&format!("ssh-data-{sid2}"), &s);
+                    }
+                    Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        let s = String::from_utf8_lossy(&data).to_string();
+                        let _ = app2.emit(&format!("ssh-data-{sid2}"), &s);
+                    }
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                    _ => {}
+                },
+                cmd = rx.recv() => match cmd {
+                    Some(SshCmd::Data(d)) => { let _ = channel.data(&d[..]).await; }
+                    Some(SshCmd::Resize(c, r)) => { let _ = channel.window_change(c, r, 0, 0).await; }
+                    None => break,
+                },
+            }
+        }
+        let _ = app2.emit(&format!("ssh-closed-{sid2}"), ());
+    });
+
+    // Set up local (-L) forwards as background tasks (aborted on disconnect).
+    // Remote (-R) forwards were already requested above and are routed by the
+    // handler. Dynamic (-D / SOCKS) comes in a later wave.
+    let mut tunnel_tasks = Vec::new();
+    for (kind, listen_port, dest_host, dest_port) in tunnels {
+        match kind {
+            'L' => {
+                let task = tokio::spawn(local_forward(Arc::clone(&handle), listen_port, dest_host, dest_port));
+                tunnel_tasks.push(task.abort_handle());
+            }
+            'D' => {
+                let task = tokio::spawn(dynamic_forward(Arc::clone(&handle), listen_port));
+                tunnel_tasks.push(task.abort_handle());
+            }
+            _ => {}
+        }
+    }
+
+    sessions.lock().unwrap().insert(session_id.clone(), SshSession { tx, handle, tunnel_tasks, _jump: jump_handle });
     Ok(session_id)
 }
 
@@ -227,15 +524,11 @@ pub async fn send_input(
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    let map = sessions.lock().unwrap();
-    let session = map.get(&session_id).ok_or("Session not found")?;
-    let result = session
-        .writer
-        .lock()
-        .unwrap()
-        .write_all(data.as_bytes())
-        .map_err(|e| e.to_string());
-    result
+    let tx = {
+        let map = sessions.lock().unwrap();
+        map.get(&session_id).ok_or("Session not found")?.tx.clone()
+    };
+    tx.send(SshCmd::Data(data.into_bytes())).map_err(|_| "SSH session closed".to_string())
 }
 
 #[tauri::command]
@@ -245,12 +538,11 @@ pub async fn resize_pty(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let map = sessions.lock().unwrap();
-    let session = map.get(&session_id).ok_or("Session not found")?;
-    session
-        .master
-        .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| e.to_string())
+    let tx = {
+        let map = sessions.lock().unwrap();
+        map.get(&session_id).ok_or("Session not found")?.tx.clone()
+    };
+    tx.send(SshCmd::Resize(cols as u32, rows as u32)).map_err(|_| "SSH session closed".to_string())
 }
 
 #[tauri::command]
@@ -345,6 +637,8 @@ pub async fn connect_rdp(
             connection.rdp_admin || admin_mode.unwrap_or(false),
             &connection.rdp_security,
             connection.rdp_color_depth as i32,
+            connection.rdp_redirect_drives,
+            &connection.rdp_gateway,
         )?;
 
         embedded_sessions.lock().unwrap().insert(session_id.clone(), session);

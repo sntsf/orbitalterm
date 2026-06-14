@@ -13,6 +13,7 @@ pub struct SftpEntry {
     pub is_dir: bool,
     pub size: u64,
     pub modified: i64,
+    pub mode: u32,
 }
 
 #[derive(Serialize, Clone)]
@@ -46,7 +47,12 @@ pub async fn sftp_connect(
     });
 
     let addr = (connection.host.as_str(), connection.port as u16);
-    let mut sh = russh::client::connect(config, addr, SshHandler)
+    let handler = SshHandler {
+        host: connection.host.clone(),
+        port: connection.port as u16,
+        ..Default::default()
+    };
+    let mut sh = russh::client::connect(config, addr, handler)
         .await
         .map_err(|e| format!("SSH connect failed: {e}"))?;
 
@@ -126,7 +132,44 @@ pub async fn sftp_connect(
     sftp_sessions
         .lock()
         .unwrap()
-        .insert(session_id.clone(), Arc::new(SftpConn { sftp, _session: sh }));
+        .insert(session_id.clone(), Arc::new(SftpConn { sftp, _session: Arc::new(sh) }));
+
+    Ok(session_id)
+}
+
+/// Open an SFTP session that REUSES an existing interactive SSH session's
+/// connection — so the file browser and terminal share one authenticated
+/// session (MobaXterm-style). No separate connect/auth, and it works even when
+/// the password was only entered at connect time and never saved.
+#[tauri::command]
+pub async fn sftp_connect_from_ssh(
+    ssh_sessions: State<'_, crate::ssh::SshSessionMap>,
+    sftp_sessions: State<'_, SftpSessionMap>,
+    ssh_session_id: String,
+) -> Result<String, String> {
+    let handle = {
+        let map = ssh_sessions.lock().unwrap();
+        let s = map.get(&ssh_session_id).ok_or("SSH session not found")?;
+        Arc::clone(&s.handle)
+    };
+
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("Channel open failed: {e}"))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| format!("SFTP subsystem request failed: {e}"))?;
+    let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| format!("SFTP session init failed: {e}"))?;
+
+    let session_id = Uuid::new_v4().to_string();
+    sftp_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), Arc::new(SftpConn { sftp, _session: handle }));
 
     Ok(session_id)
 }
@@ -153,12 +196,13 @@ pub async fn sftp_list_dir(
             let is_dir = meta.is_dir();
             let size = meta.size.unwrap_or(0);
             let modified = meta.mtime.map(|t| t as i64).unwrap_or(0);
+            let mode = meta.permissions.unwrap_or(0) & 0o7777;
             let entry_path = if path.ends_with('/') {
                 format!("{}{}", path, name)
             } else {
                 format!("{}/{}", path, name)
             };
-            SftpEntry { name, path: entry_path, is_dir, size, modified }
+            SftpEntry { name, path: entry_path, is_dir, size, modified, mode }
         })
         .collect();
 
@@ -247,41 +291,68 @@ pub async fn sftp_download(
     local_path: String,
 ) -> Result<(), String> {
     let conn = get_conn!(sftp_sessions, session_id);
+    download_path(&app, &conn.sftp, &remote_path, Path::new(&local_path)).await
+}
 
-    let stat = conn
-        .sftp
-        .metadata(&remote_path)
-        .await
-        .map_err(|e| format!("Failed to stat remote file: {e}"))?;
-    let total = stat.size.unwrap_or(0);
-
-    let mut remote_file = conn
-        .sftp
-        .open(&remote_path)
-        .await
-        .map_err(|e| format!("Failed to open remote file: {e}"))?;
-
-    use tokio::io::AsyncReadExt;
-    let chunk_size = 32 * 1024usize;
-    let mut data = Vec::with_capacity(total as usize);
-    let mut buf = vec![0u8; chunk_size];
-    let mut transferred = 0u64;
-    loop {
-        let n = remote_file
-            .read(&mut buf)
+/// Download a remote file, or a directory recursively (creating local dirs).
+/// Boxed because it recurses across an await boundary.
+fn download_path<'a>(
+    app: &'a tauri::AppHandle,
+    sftp: &'a russh_sftp::client::SftpSession,
+    remote_path: &'a str,
+    local_path: &'a Path,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        let stat = sftp
+            .metadata(remote_path)
             .await
-            .map_err(|e| format!("Read error: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        data.extend_from_slice(&buf[..n]);
-        transferred += n as u64;
-        app.emit("sftp-download-progress", SftpProgress { transferred, total }).ok();
-    }
+            .map_err(|e| format!("Failed to stat remote path: {e}"))?;
 
-    std::fs::write(&local_path, &data)
-        .map_err(|e| format!("Failed to write local file: {e}"))?;
-    Ok(())
+        if stat.is_dir() {
+            std::fs::create_dir_all(local_path)
+                .map_err(|e| format!("Failed to create local directory: {e}"))?;
+            let read_dir = sftp
+                .read_dir(remote_path)
+                .await
+                .map_err(|e| format!("readdir error: {e}"))?;
+            let base = remote_path.trim_end_matches('/');
+            for entry in read_dir {
+                let name = entry.file_name();
+                let child_remote = format!("{base}/{name}");
+                let child_local = local_path.join(&name);
+                download_path(app, sftp, &child_remote, &child_local).await?;
+            }
+            return Ok(());
+        }
+
+        let total = stat.size.unwrap_or(0);
+        let mut remote_file = sftp
+            .open(remote_path)
+            .await
+            .map_err(|e| format!("Failed to open remote file: {e}"))?;
+
+        use tokio::io::AsyncReadExt;
+        let chunk_size = 32 * 1024usize;
+        let mut data = Vec::with_capacity(total as usize);
+        let mut buf = vec![0u8; chunk_size];
+        let mut transferred = 0u64;
+        loop {
+            let n = remote_file
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("Read error: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            data.extend_from_slice(&buf[..n]);
+            transferred += n as u64;
+            app.emit("sftp-download-progress", SftpProgress { transferred, total }).ok();
+        }
+
+        std::fs::write(local_path, &data)
+            .map_err(|e| format!("Failed to write local file: {e}"))?;
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -296,6 +367,24 @@ pub async fn sftp_rename(
         .rename(&old_path, &new_path)
         .await
         .map_err(|e| format!("rename error: {e}"))
+}
+
+#[tauri::command]
+pub async fn sftp_chmod(
+    sftp_sessions: State<'_, SftpSessionMap>,
+    session_id: String,
+    path: String,
+    mode: u32,
+) -> Result<(), String> {
+    let conn = get_conn!(sftp_sessions, session_id);
+    let attrs = russh_sftp::protocol::FileAttributes {
+        permissions: Some(mode & 0o7777),
+        ..Default::default()
+    };
+    conn.sftp
+        .set_metadata(path, attrs)
+        .await
+        .map_err(|e| format!("chmod error: {e}"))
 }
 
 #[tauri::command]

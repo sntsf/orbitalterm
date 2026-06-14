@@ -10,6 +10,7 @@ import { SftpDualPane } from "./components/SftpDualPane";
 import { Welcome } from "./components/Welcome";
 import { MenuBar } from "./components/MenuBar";
 import { NotificationOverlay } from "./components/NotificationBar";
+import { TransferPanel } from "./components/TransferPanel";
 import { useAppStore } from "./store/useAppStore";
 import { useNotifStore } from "./store/useNotifStore";
 import {
@@ -196,6 +197,7 @@ function MainApp() {
           </div>
         </div>
       </div>
+      <TransferPanel />
     </div>
   );
 }
@@ -212,6 +214,22 @@ export default function App() {
     getWindowLabel()
       .then((l) => setLabel(l.startsWith("detached-") ? l : "main"))
       .catch(() => setLabel("main"));
+  }, []);
+
+  // Stop the webview's reload shortcuts (F5, Ctrl/Cmd+R) from tearing down the
+  // whole frontend and dropping every open tab/session. We only cancel the
+  // browser's default RELOAD action — the event still propagates, so panes can
+  // give F5 their own meaning (SFTP/FTP refresh the listing, RDP/SSH forward it
+  // to the remote session).
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const isReload =
+        e.key === "F5" ||
+        ((e.ctrlKey || e.metaKey) && (e.key === "r" || e.key === "R"));
+      if (isReload) e.preventDefault();
+    };
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
   }, []);
 
   if (label === "checking") return null;

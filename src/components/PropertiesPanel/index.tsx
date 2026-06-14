@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Plug, Eye, EyeOff, Info, Database } from "lucide-react";
+import { Plug, Eye, EyeOff, Info, Database, Folder as FolderIcon, type LucideIcon } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore } from "../../store/useI18nStore";
 import { useImportStore } from "../../store/useImportStore";
@@ -9,9 +9,14 @@ import {
   savePassword,
   deletePassword,
   hasPassword,
+  updateFolder,
+  getFolders,
+  updateGroup,
+  getGroups,
 } from "../../lib/commands";
 import type { AuthType, ConnectionType } from "../../types";
 import { CONN_ICONS, DEFAULT_CONN_ICON, ConnIconDisplay, type ConnIconKey } from "../../lib/connIcons";
+import { ICON_COLORS, iconColorClass } from "../../lib/folderColors";
 
 const DEFAULT_PORTS: Record<ConnectionType, number> = {
   ssh: 22,
@@ -32,6 +37,13 @@ const AUTH_FOR_TYPE: Record<ConnectionType, AuthType[]> = {
 };
 
 type FieldKey = "type" | "name" | "desc" | "host" | "port" | "user" | "auth" | "key" | "password" | "domain" | "notes" | "icon" | "url" | "customHosts";
+
+// Sentinel shown in the password field when a password is already saved: eight
+// real, deletable bullet characters (not a placeholder). The actual stored
+// password is never loaded into the UI. A value that is only bullets is treated
+// as "unchanged" on blur, so an untouched field never overwrites what's saved.
+const PWD_DOTS = "••••••••";
+const isAllDots = (s: string) => s.length > 0 && /^•+$/.test(s);
 
 const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string }>> = {
   es: {
@@ -68,7 +80,16 @@ const HINTS: Record<"es" | "en", Record<FieldKey, { title: string; body: string 
   },
 };
 
+// Router: the panel shows whichever of connection / folder / group is selected.
 export function PropertiesPanel() {
+  const selectedFolderId = useAppStore((s) => s.selectedFolderId);
+  const selectedGroupId = useAppStore((s) => s.selectedGroupId);
+  if (selectedFolderId) return <FolderProperties folderId={selectedFolderId} />;
+  if (selectedGroupId) return <GroupProperties groupId={selectedGroupId} />;
+  return <ConnectionProperties />;
+}
+
+function ConnectionProperties() {
   const t = useT();
   const { lang } = useI18nStore();
   const {
@@ -99,6 +120,10 @@ export function PropertiesPanel() {
   const [icon, setIcon] = useState<string>("");
   const [url, setUrl] = useState("");
   const [customHosts, setCustomHosts] = useState("");
+  const [tunnels, setTunnels] = useState("");
+  const [proxyJump, setProxyJump] = useState("");
+  const [rdpRedirectDrives, setRdpRedirectDrives] = useState(false);
+  const [rdpGateway, setRdpGateway] = useState("");
   const [connectError, setConnectError] = useState("");
   const [focusedField, setFocusedField] = useState<FieldKey | null>(null);
 
@@ -127,6 +152,10 @@ export function PropertiesPanel() {
         icon,
         url: url.trim(),
         custom_hosts: customHosts,
+        tunnels,
+        proxy_jump: proxyJump.trim(),
+        rdp_redirect_drives: rdpRedirectDrives,
+        rdp_gateway: rdpGateway.trim(),
       });
       setConnections(await getConnections());
     } catch (err) {
@@ -153,10 +182,18 @@ export function PropertiesPanel() {
     setIcon(existing.icon || DEFAULT_CONN_ICON[existing.type]);
     setUrl(existing.url ?? "");
     setCustomHosts(existing.custom_hosts ?? "");
+    setTunnels(existing.tunnels ?? "");
+    setProxyJump(existing.proxy_jump ?? "");
+    setRdpRedirectDrives(existing.rdp_redirect_drives ?? false);
+    setRdpGateway(existing.rdp_gateway ?? "");
     setPassword("");
     setConnectError("");
     if (existing.auth_type === "password") {
-      hasPassword(existing.id).then(setHasSaved).catch(() => setHasSaved(false));
+      hasPassword(existing.id).then((has) => {
+        setHasSaved(has);
+        // Show eight deletable dots when a password is stored; empty otherwise.
+        setPassword(has ? PWD_DOTS : "");
+      }).catch(() => setHasSaved(false));
     } else {
       setHasSaved(false);
     }
@@ -169,7 +206,7 @@ export function PropertiesPanel() {
     const timer = setTimeout(() => { doSaveRef.current?.(); }, 600);
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts]);
+  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts, tunnels, proxyJump, rdpRedirectDrives, rdpGateway]);
 
   const handleTypeChange = (newType: ConnectionType) => {
     setType(newType);
@@ -184,13 +221,23 @@ export function PropertiesPanel() {
     });
   };
 
-  // Password is saved on blur (not on debounce) to avoid saving on every keystroke
+  // Password is saved on blur (not on debounce) to avoid saving on every keystroke.
+  //  • only-dots (untouched sentinel)  → keep the stored password as-is
+  //  • empty                            → delete the stored password
+  //  • anything else                    → save it, then show the dots again
   const handlePasswordBlur = async () => {
-    if (!existing || !password) return;
+    if (!existing) return;
+    const val = password;
+    if (isAllDots(val)) return;
     try {
-      await savePassword(existing.id, password);
+      if (val === "") {
+        if (hasSaved) await deletePassword(existing.id);
+        setHasSaved(false);
+        return;
+      }
+      await savePassword(existing.id, val);
       setHasSaved(true);
-      setPassword("");
+      setPassword(PWD_DOTS);
     } catch (err) {
       console.error("[save-password]", err);
     }
@@ -202,6 +249,7 @@ export function PropertiesPanel() {
     if (newAuth !== "password" && existing) {
       await deletePassword(existing.id).catch(() => {});
       setHasSaved(false);
+      setPassword("");
     }
   };
 
@@ -258,7 +306,7 @@ export function PropertiesPanel() {
       </div>
 
       {/* Fields */}
-      <div className="flex-1 overflow-y-auto px-3 py-1.5 space-y-1.5 min-h-0">
+      <div className="flex-1 overflow-y-auto px-3 py-1 space-y-1 min-h-0">
         <Row label={t("propType")}>
           <select
             value={type}
@@ -346,7 +394,7 @@ export function PropertiesPanel() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 onBlur={handlePasswordBlur}
-                placeholder={hasSaved ? t("propPasswordSaved") : t("propPasswordPlaceholder")}
+                placeholder=""
                 onFocus={focus("password")}
                 className={inp + " pr-7"}
               />
@@ -366,6 +414,23 @@ export function PropertiesPanel() {
             <input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="WORKGROUP"
               onFocus={focus("domain")} onBlur={blur} className={inp} />
           </Row>
+        )}
+
+        {type === "rdp" && (
+          <>
+            <Row label="RD Gateway">
+              <input value={rdpGateway} onChange={(e) => setRdpGateway(e.target.value)}
+                placeholder={lang === "es" ? "host del gateway (opcional)" : "gateway host (optional)"}
+                className={inp} />
+            </Row>
+            <Row label={lang === "es" ? "Unidades" : "Drives"}>
+              <label className="flex items-center gap-1.5 text-[12px] text-[var(--color-text-primary)] cursor-pointer">
+                <input type="checkbox" checked={rdpRedirectDrives}
+                  onChange={(e) => setRdpRedirectDrives(e.target.checked)} />
+                {lang === "es" ? "Redirigir mis discos locales" : "Redirect my local drives"}
+              </label>
+            </Row>
+          </>
         )}
 
         {type === "browser" ? (
@@ -390,6 +455,29 @@ export function PropertiesPanel() {
           <Row label={t("propNotes")}>
             <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="…"
               onFocus={focus("notes")} onBlur={blur} className={inp + " resize-none"} />
+          </Row>
+        )}
+
+        {(type === "ssh" || type === "sftp") && (
+          <Row label={lang === "es" ? "Bastión" : "Jump host"}>
+            <input value={proxyJump} onChange={(e) => setProxyJump(e.target.value)}
+              placeholder="[usuario@]host[:puerto]"
+              className={inp} />
+          </Row>
+        )}
+
+        {(type === "ssh" || type === "sftp") && (
+          <Row label={lang === "es" ? "Túneles" : "Tunnels"}>
+            <textarea
+              value={tunnels}
+              onChange={(e) => setTunnels(e.target.value)}
+              rows={2}
+              spellCheck={false}
+              placeholder={lang === "es"
+                ? "Uno por línea:\nL 8080 db.interna 5432\nR 9000 localhost 3000\nD 1080  (proxy SOCKS5)"
+                : "One per line:\nL 8080 db.internal 5432\nR 9000 localhost 3000\nD 1080  (SOCKS5 proxy)"}
+              className={inp + " resize-none font-mono text-[11px]"}
+            />
           </Row>
         )}
 
@@ -480,11 +568,135 @@ function ProgressRing({ pct, indeterminate }: { pct: number; indeterminate?: boo
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="grid grid-cols-[76px_1fr] items-start gap-1">
-      <span className="text-[11px] text-[var(--color-text-muted)] pt-1 truncate">{label}</span>
+      <span className="text-[11px] text-[var(--color-text-muted)] pt-0.5 truncate">{label}</span>
       <div>{children}</div>
     </div>
   );
 }
 
 const inp =
-  "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-px text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";
+  "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-px text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";
+
+// ── Folder / Group properties ──────────────────────────────────────────────────
+
+function FolderProperties({ folderId }: { folderId: string }) {
+  const folders = useAppStore((s) => s.folders);
+  const setFolders = useAppStore((s) => s.setFolders);
+  const folder = folders.find((f) => f.id === folderId);
+  return (
+    <ItemEditor
+      key={folderId}
+      missing={!folder}
+      Icon={FolderIcon}
+      defaultColorKey="amber"
+      initial={{ name: folder?.name ?? "", description: folder?.description ?? "", color: folder?.color ?? "" }}
+      onSave={async (n, d, c) => {
+        if (!folder) return;
+        await updateFolder(folder.id, n, d, c);
+        setFolders(await getFolders());
+      }}
+    />
+  );
+}
+
+function GroupProperties({ groupId }: { groupId: string }) {
+  const groups = useAppStore((s) => s.groups);
+  const setGroups = useAppStore((s) => s.setGroups);
+  const group = groups.find((g) => g.id === groupId);
+  return (
+    <ItemEditor
+      key={groupId}
+      missing={!group}
+      Icon={Database}
+      defaultColorKey="blue"
+      initial={{ name: group?.name ?? "", description: group?.description ?? "", color: group?.color ?? "" }}
+      onSave={async (n, d, c) => {
+        if (!group) return;
+        await updateGroup(group.id, n, d, c);
+        setGroups(await getGroups());
+      }}
+    />
+  );
+}
+
+// Shared editor for folders and connection databases. Remounted per item (via
+// `key`), so it initialises from `initial` once and never clobbers in-progress
+// edits when the list refetches after a save.
+function ItemEditor({
+  missing, Icon, defaultColorKey, initial, onSave,
+}: {
+  missing: boolean;
+  Icon: LucideIcon;
+  defaultColorKey: string;
+  initial: { name: string; description: string; color: string };
+  onSave: (name: string, description: string, color: string) => Promise<void>;
+}) {
+  const t = useT();
+  const { lang } = useI18nStore();
+  const sidebarHint = useAppStore((s) => s.sidebarHint);
+
+  const [name, setName] = useState(initial.name);
+  const [description, setDescription] = useState(initial.description);
+  const [color, setColor] = useState(initial.color || defaultColorKey);
+  const firstRun = useRef(true);
+  const saveRef = useRef(onSave);
+  saveRef.current = onSave;
+
+  // Debounced auto-save, skipping the initial mount.
+  useEffect(() => {
+    if (firstRun.current) { firstRun.current = false; return; }
+    const timer = setTimeout(() => {
+      saveRef.current(name.trim() || initial.name, description.trim(), color).catch(console.error);
+    }, 600);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, description, color]);
+
+  const hintLang = lang === "es" ? "es" : "en";
+
+  if (missing) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex-1 flex items-center justify-center text-[var(--color-text-muted)] text-xs px-4 text-center">
+          {t("propSelectOrCreate")}
+        </div>
+        <HintBox hint={sidebarHint} hintLang={hintLang} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-full overflow-hidden">
+      <div className="flex items-center gap-1.5 px-3 py-0.5 border-b border-[var(--color-border)] shrink-0">
+        <Icon size={13} className="text-[var(--color-text-muted)] shrink-0" />
+        <span className="text-[11px] uppercase tracking-wider text-[var(--color-text-muted)] font-medium">
+          {t("propProperties")}
+        </span>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-3 py-1 space-y-1 min-h-0">
+        <Row label={t("propName")}>
+          <input value={name} onChange={(e) => setName(e.target.value)} className={inp} />
+        </Row>
+        <Row label={t("propColor")}>
+          <div className="flex items-center gap-2">
+            <Icon size={20} className={iconColorClass(color)} />
+            <select value={color} onChange={(e) => setColor(e.target.value)} className={inp}>
+              {ICON_COLORS.map((c) => (
+                <option key={c.key} value={c.key}>
+                  {lang === "es" ? c.label_es : c.label_en}
+                </option>
+              ))}
+            </select>
+          </div>
+        </Row>
+        <Row label={t("propDesc")}>
+          <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3}
+            placeholder="…" className={inp + " resize-none"} />
+        </Row>
+      </div>
+
+      <HintBox hint={sidebarHint} hintLang={hintLang} />
+    </div>
+  );
+}

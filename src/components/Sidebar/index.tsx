@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
-  Plus, Minus, Search, FolderOpen, Folder, Terminal,
+  Plus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
-  ChevronRight, ChevronDown, Database, X, Bell, Globe,
+  Database, X, Bell, Globe, SquarePlus, SquareMinus,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useI18nStore, useT } from "../../store/useI18nStore";
@@ -16,8 +16,28 @@ import {
 import { ContextMenu, useContextMenu } from "../ContextMenu";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
+import { iconColorClass } from "../../lib/folderColors";
 import { TuxIcon, WindowsIcon, VncIcon, SftpIcon } from "../ConnectionIcons";
 import type { Connection, Folder as FolderType, Group } from "../../types";
+
+// Shared empty set so we don't allocate a new one each render.
+const EMPTY_ID_SET = new Set<string>();
+
+// Drop-target encoding. Folder targets carry a zone so dragging onto the top/
+// bottom edge REORDERS (sibling) and only the middle NESTS — encoded as
+// "folder:<id>|<zone>". Connections and groups have no zone.
+type DropZone = "before" | "after" | "inside";
+function parseDrop(dt: string | null):
+  | { kind: "folder" | "group" | "conn"; id: string; zone: DropZone }
+  | null {
+  if (!dt) return null;
+  if (dt.startsWith("folder:")) {
+    const [id, zone] = dt.slice(7).split("|");
+    return { kind: "folder", id, zone: (zone as DropZone) || "inside" };
+  }
+  if (dt.startsWith("group:")) return { kind: "group", id: dt.slice(6), zone: "inside" };
+  return { kind: "conn", id: dt, zone: "inside" };
+}
 
 // ── Sidebar hint builders ──────────────────────────────────────────────────────
 
@@ -82,11 +102,15 @@ export function Sidebar() {
   const groups = useAppStore((s) => s.groups);
   const searchQuery = useAppStore((s) => s.searchQuery);
   const selectedConnectionId = useAppStore((s) => s.selectedConnectionId);
+  const selectedFolderId = useAppStore((s) => s.selectedFolderId);
+  const selectedGroupId = useAppStore((s) => s.selectedGroupId);
   const setConnections = useAppStore((s) => s.setConnections);
   const setFolders = useAppStore((s) => s.setFolders);
   const setGroups = useAppStore((s) => s.setGroups);
   const setSearchQuery = useAppStore((s) => s.setSearchQuery);
   const selectConnection = useAppStore((s) => s.selectConnection);
+  const selectFolder = useAppStore((s) => s.selectFolder);
+  const selectGroup = useAppStore((s) => s.selectGroup);
   const openTab = useAppStore((s) => s.openTab);
   const startNewConnection = useAppStore((s) => s.startNewConnection);
   const setSidebarHint = useAppStore((s) => s.setSidebarHint);
@@ -183,6 +207,64 @@ export function Sidebar() {
   // Search keyboard navigation
   const [searchFocusIdx, setSearchFocusIdx] = useState(0);
 
+  // Keyboard navigation of the connection tree (↑/↓ move the selection through
+  // the visible rows). Uses the live DOM order so it always matches what's
+  // rendered, regardless of folders/groups/search state.
+  const treeRef = useRef<HTMLDivElement>(null);
+  const navigateTree = (dir: 1 | -1) => {
+    const root = treeRef.current;
+    if (!root) return;
+    const els = Array.from(root.querySelectorAll<HTMLElement>("[data-conn-id],[data-folder-id],[data-group-id]"));
+    if (els.length === 0) return;
+    const cursor = selectedConnectionId ?? selectedFolderId ?? selectedGroupId;
+    let idx = els.findIndex(
+      (el) => el.dataset.connId === cursor || el.dataset.folderId === cursor || el.dataset.groupId === cursor,
+    );
+    if (idx < 0) idx = dir > 0 ? -1 : els.length; // start from an edge
+    const next = els[Math.max(0, Math.min(els.length - 1, idx + dir))];
+    if (!next) return;
+    if (next.dataset.connId) selectConnection(next.dataset.connId);
+    else if (next.dataset.folderId) selectFolder(next.dataset.folderId);
+    else if (next.dataset.groupId) selectGroup(next.dataset.groupId);
+    next.scrollIntoView({ block: "nearest" });
+  };
+  const handleTreeKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); navigateTree(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); navigateTree(-1); }
+    // →/← expand/collapse the highlighted folder or BD (group). Connections
+    // have nothing to expand, so the keys are ignored when one is selected.
+    else if (e.key === "ArrowRight") {
+      if (selectedFolderId) {
+        e.preventDefault();
+        setExpandedFolders((prev) => new Set(prev).add(selectedFolderId));
+      } else if (selectedGroupId) {
+        e.preventDefault();
+        const gid = selectedGroupId;
+        setGroupExpanded((prev) => ({ ...prev, [gid]: true }));
+      }
+    } else if (e.key === "ArrowLeft") {
+      if (selectedFolderId) {
+        e.preventDefault();
+        setExpandedFolders((prev) => { const next = new Set(prev); next.delete(selectedFolderId); return next; });
+      } else if (selectedGroupId) {
+        e.preventDefault();
+        const gid = selectedGroupId;
+        setGroupExpanded((prev) => ({ ...prev, [gid]: false }));
+      }
+    } else if (e.key === "Enter") {
+      // Enter on a highlighted connection opens it (no double-click / Connect
+      // button needed). Ignore it while a field is focused — editing saves
+      // live, so Enter there shouldn't trigger a connection.
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (selectedConnectionId) {
+        e.preventDefault();
+        const conn = connById.get(selectedConnectionId);
+        if (conn) openTab(conn);
+      }
+    }
+  };
+
   useEffect(() => {
     getConnections().then(setConnections).catch(console.error);
     getFolders().then(setFolders).catch(console.error);
@@ -223,72 +305,101 @@ export function Sidebar() {
     }
   }, [creatingGroup]);
 
-  // Folder full-path resolver (ancestor names), memoized — used both for
-  // matching ("search by folder name") and for showing each result's location.
-  const folderPath = useMemo(() => {
-    const byId = new Map(folders.map((f) => [f.id, f]));
-    const cache = new Map<string | null, string>();
-    const build = (id: string | null): string => {
-      if (!id) return "";
-      if (cache.has(id)) return cache.get(id)!;
-      const f = byId.get(id);
-      const p = f ? (f.parent_id ? `${build(f.parent_id)} / ${f.name}` : f.name) : "";
-      cache.set(id, p);
-      return p;
-    };
-    return build;
-  }, [folders]);
-
   // Fast folder lookup for walking ancestor chains.
   const folderById = useMemo(
     () => new Map(folders.map((f) => [f.id, f])),
     [folders],
   );
+  const connById = useMemo(
+    () => new Map(connections.map((c) => [c.id, c])),
+    [connections],
+  );
 
-  // Search matches (empty when no query). Matches by connection name, host/IP,
-  // OR the name of any ancestor folder. Memoized so we only recompute when the
-  // query or data actually changes — not on every render.
-  const searchMatches = useMemo(() => {
+  // Child indexes: folders-by-parent and connections-by-folder. Built ONCE per
+  // data change so each FolderItem does an O(1) Map lookup instead of an O(n)
+  // .filter() over every folder/connection. With a large imported tree (a
+  // folder can have hundreds of direct children) the old per-node filters were
+  // O(n²) on every render — the real cause of the laggy search box.
+  const foldersByParent = useMemo(() => {
+    const m = new Map<string | null, FolderType[]>();
+    for (const f of folders) {
+      const k = f.parent_id ?? null;
+      const arr = m.get(k); if (arr) arr.push(f); else m.set(k, [f]);
+    }
+    return m;
+  }, [folders]);
+  const connsByFolder = useMemo(() => {
+    const m = new Map<string | null, Connection[]>();
+    for (const c of connections) {
+      const k = c.folder_id ?? null;
+      const arr = m.get(k); if (arr) arr.push(c); else m.set(k, [c]);
+    }
+    return m;
+  }, [connections]);
+  // Per-group connection count for the header badge (avoids an O(n) filter per
+  // group on every render).
+  const connsByGroupCount = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of connections) m.set(c.group_id, (m.get(c.group_id) ?? 0) + 1);
+    return m;
+  }, [connections]);
+
+  // Search matches (empty when no query). Prefix match (starts-with), like
+  // mRemoteNG: typing "ser" finds names/IPs that BEGIN with "ser", not
+  // "pruebaser60". Connections match by name or host/IP; folders by name.
+  // Connections come first, then matching folders.
+  const searchMatches = useMemo<{ kind: "conn" | "folder"; id: string }[]>(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [];
-    return connections.filter((c) =>
-      c.name.toLowerCase().includes(q) ||
-      c.host.toLowerCase().includes(q) ||
-      folderPath(c.folder_id ?? null).toLowerCase().includes(q),
-    );
-  }, [searchQuery, connections, folderPath]);
+    const hits: { kind: "conn" | "folder"; id: string }[] = [];
+    for (const c of connections) {
+      if (
+        c.name.toLowerCase().startsWith(q) ||
+        c.host.toLowerCase().startsWith(q)
+      ) hits.push({ kind: "conn", id: c.id });
+    }
+    for (const f of folders) {
+      if (f.name.toLowerCase().startsWith(q)) hits.push({ kind: "folder", id: f.id });
+    }
+    return hits;
+  }, [searchQuery, connections, folders]);
 
-  // While searching we only auto-expand the ancestor chain of the CURRENTLY
-  // focused match — not every match — so the tree stays light and jumps
-  // straight to the connection in its real position. ↑/↓ moves the focus.
+  // Auto-expand only the ancestor chain of the CURRENTLY focused match so the
+  // tree stays light and reveals it in place. ↑/↓ moves the focus.
   const searchExpanded = useMemo(() => {
     const ids = new Set<string>();
     if (!searchQuery) return ids;
-    let fid = searchMatches[searchFocusIdx]?.folder_id ?? null;
+    const hit = searchMatches[searchFocusIdx];
+    if (!hit) return ids;
+    // Connections reveal via their folder; folders reveal via their parent.
+    let fid = hit.kind === "conn"
+      ? (connById.get(hit.id)?.folder_id ?? null)
+      : (folderById.get(hit.id)?.parent_id ?? null);
     while (fid) {
       ids.add(fid);
       fid = folderById.get(fid)?.parent_id ?? null;
     }
     return ids;
-  }, [searchQuery, searchMatches, searchFocusIdx, folderById]);
+  }, [searchQuery, searchMatches, searchFocusIdx, folderById, connById]);
 
-  // Reset focus to the first result whenever the query changes, and preview it.
-  useEffect(() => {
-    setSearchFocusIdx(0);
-    if (searchQuery && searchMatches[0]) selectConnection(searchMatches[0].id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery]);
-
-  // Jump straight to the focused match in the tree — instant scroll (no
-  // smooth-scroll jank). Runs after the ancestor chain above has expanded it.
+  // Scroll the focused match into view. Runs in an EFFECT (after the ancestor
+  // chain has expanded and committed to the DOM), so ↑/↓ visibly jumps to each
+  // match. It deliberately does NOT change the global selection — that would
+  // reload the heavy properties panel (and a password IPC) on every keystroke,
+  // which is what made the box feel slow. Only the lightweight focus highlight
+  // moves; Enter opens the match, a click selects it. Fires only when the query
+  // or focus changes (the index is reset to 0 in the search box onChange), so a
+  // manual click in the tree is never yanked back (mRemoteNG behaviour).
   useEffect(() => {
     if (!searchQuery) return;
-    const id = searchMatches[searchFocusIdx]?.id;
-    if (id) {
-      document.querySelector(`[data-conn-id="${id}"]`)
-        ?.scrollIntoView({ block: "nearest" });
-    }
-  }, [searchFocusIdx, searchQuery, searchExpanded]); // eslint-disable-line react-hooks/exhaustive-deps
+    const hit = searchMatches[searchFocusIdx];
+    if (!hit) return;
+    const sel = hit.kind === "conn"
+      ? `[data-conn-id="${hit.id}"]`
+      : `[data-folder-id="${hit.id}"]`;
+    document.querySelector(sel)?.scrollIntoView({ block: "nearest" });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchFocusIdx, searchQuery]);
 
   const toggleGroupExpanded = (groupId: string) => {
     setGroupExpanded((prev) => ({ ...prev, [groupId]: !(prev[groupId] ?? true) }));
@@ -444,7 +555,20 @@ export function Sidebar() {
         const h = el as HTMLElement;
         // Skip the item being dragged as a drop target
         if (d.kind === "folder" && h.dataset.folderId === d.connId) continue;
-        if (h.dataset.folderId) { target = `folder:${h.dataset.folderId}`; break; }
+        if (h.dataset.folderId) {
+          // Folder rows have edge zones: top → reorder before, bottom → reorder
+          // after (both as siblings), middle → drop inside. For connection drags
+          // we always drop inside, so no zone needed.
+          if (d.kind === "folder") {
+            const r = h.getBoundingClientRect();
+            const rel = r.height > 0 ? (e.clientY - r.top) / r.height : 0.5;
+            const zone = rel < 0.3 ? "before" : rel > 0.7 ? "after" : "inside";
+            target = `folder:${h.dataset.folderId}|${zone}`;
+          } else {
+            target = `folder:${h.dataset.folderId}|inside`;
+          }
+          break;
+        }
         if (h.dataset.groupId)  { target = `group:${h.dataset.groupId}`;   break; }
         if (h.dataset.connId && h.dataset.connId !== d.connId) { target = h.dataset.connId; break; }
       }
@@ -471,11 +595,12 @@ export function Sidebar() {
       if (d.kind === "folder") {
         const draggedFolder = folderList.find((f) => f.id === d.connId);
         if (!draggedFolder) { finish(); return; }
+        const drop = parseDrop(dt);
+        if (!drop) { finish(); return; }
 
         // Cross-BD or "move to group root": drop on a group header
-        if (dt.startsWith("group:")) {
-          const targetGroupId = dt.slice(6);
-          // moveFolderToGroup works for both cross-BD and same-BD (moves to root of that group)
+        if (drop.kind === "group") {
+          const targetGroupId = drop.id;
           if (targetGroupId !== draggedFolder.group_id || draggedFolder.parent_id !== null) {
             await moveFolderToGroup(d.connId, targetGroupId).catch(console.error);
             setConns(await getConnections());
@@ -484,39 +609,76 @@ export function Sidebar() {
           finish(); return;
         }
 
-        const parentId = draggedFolder.parent_id;
-        const groupId  = draggedFolder.group_id;
+        // Resolve the destination scope (parent + group) and the target item to
+        // position relative to, from where the folder was dropped.
+        let parentId: string | null;
+        let groupId: string;
+        let beforeId: string | null = null; // insert before this sibling (null = end)
 
-        // Build the unified sorted list of all sibling items (same parent scope)
+        // True if `maybeAncestor` is the dragged folder or one of its descendants
+        // — moving a folder into its own subtree would create a cycle.
+        const isSelfOrDescendant = (fid: string | null): boolean => {
+          let cur = fid;
+          while (cur) {
+            if (cur === d.connId) return true;
+            cur = folderList.find((f) => f.id === cur)?.parent_id ?? null;
+          }
+          return false;
+        };
+
+        if (drop.kind === "folder") {
+          const targetFolder = folderList.find((f) => f.id === drop.id);
+          if (!targetFolder) { finish(); return; }
+          if (drop.zone === "inside") {
+            if (isSelfOrDescendant(targetFolder.id)) { finish(); return; } // no cycles
+            parentId = targetFolder.id;
+            groupId = targetFolder.group_id;
+            beforeId = null; // append inside
+          } else {
+            if (isSelfOrDescendant(targetFolder.parent_id)) { finish(); return; }
+            parentId = targetFolder.parent_id;
+            groupId = targetFolder.group_id;
+            beforeId = drop.zone === "before" ? targetFolder.id : null;
+            // "after" → insert before the item following the target (computed below)
+            if (drop.zone === "after") beforeId = `__after__${targetFolder.id}`;
+          }
+        } else {
+          // Dropped on a connection → join that connection's scope, before it.
+          const targetConn = conns.find((c) => c.id === drop.id);
+          if (!targetConn) { finish(); return; }
+          if (isSelfOrDescendant(targetConn.folder_id)) { finish(); return; }
+          parentId = targetConn.folder_id;
+          groupId = targetConn.group_id;
+          beforeId = targetConn.id;
+        }
+
+        // Unified sorted sibling list of the DESTINATION scope (excl. dragged).
         type ScopeItem = { kind: "conn" | "folder"; id: string; sort_order: number; name: string };
         const siblings: ScopeItem[] = [
-          ...conns.filter((c) => c.folder_id === parentId && c.group_id === groupId)
+          ...conns.filter((c) => c.folder_id === parentId && c.group_id === groupId && c.id !== d.connId)
             .map((c) => ({ kind: "conn" as const, id: c.id, sort_order: c.sort_order, name: c.name })),
-          ...folderList.filter((f) => f.parent_id === parentId && f.group_id === groupId)
+          ...folderList.filter((f) => f.parent_id === parentId && f.group_id === groupId && f.id !== d.connId)
             .map((f) => ({ kind: "folder" as const, id: f.id, sort_order: f.sort_order, name: f.name })),
         ].sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
 
-        const withoutDragged = siblings.filter((i) => i.id !== d.connId);
-
-        // Find insertion index based on the drop target
-        let insertIdx = withoutDragged.length; // default: end
-        if (dt.startsWith("folder:")) {
-          const targetId = dt.slice(7);
-          const idx = withoutDragged.findIndex((i) => i.id === targetId);
-          if (idx >= 0) insertIdx = idx;
-        } else if (!dt.startsWith("group:")) {
-          const idx = withoutDragged.findIndex((i) => i.id === dt);
+        let insertIdx = siblings.length; // default: end
+        if (beforeId?.startsWith("__after__")) {
+          const tid = beforeId.slice(9);
+          const idx = siblings.findIndex((i) => i.id === tid);
+          if (idx >= 0) insertIdx = idx + 1;
+        } else if (beforeId) {
+          const idx = siblings.findIndex((i) => i.id === beforeId);
           if (idx >= 0) insertIdx = idx;
         }
 
-        withoutDragged.splice(insertIdx, 0, { kind: "folder", id: d.connId, sort_order: 0, name: d.connName });
+        siblings.splice(insertIdx, 0, { kind: "folder", id: d.connId, sort_order: 0, name: d.connName });
 
-        const connUpdates = withoutDragged
+        const connUpdates = siblings
           .filter((i) => i.kind === "conn")
-          .map((i) => ({ id: i.id, sort_order: withoutDragged.indexOf(i) * 10, folder_id: parentId, group_id: groupId }));
-        const folderUpdates = withoutDragged
+          .map((i) => ({ id: i.id, sort_order: siblings.indexOf(i) * 10, folder_id: parentId, group_id: groupId }));
+        const folderUpdates = siblings
           .filter((i) => i.kind === "folder")
-          .map((i) => ({ id: i.id, sort_order: withoutDragged.indexOf(i) * 10, parent_id: parentId, group_id: groupId }));
+          .map((i) => ({ id: i.id, sort_order: siblings.indexOf(i) * 10, parent_id: parentId, group_id: groupId }));
 
         if (connUpdates.length > 0) await reorderConnections(connUpdates).catch(console.error);
         if (folderUpdates.length > 0) await reorderFolders(folderUpdates).catch(console.error);
@@ -528,10 +690,12 @@ export function Sidebar() {
       // ── Connection drag ───────────────────────────────────────────────────────
       const dragged = conns.find((c) => c.id === d.connId);
       if (!dragged) { finish(); return; }
+      const cdrop = parseDrop(dt);
+      if (!cdrop) { finish(); return; }
 
-      if (dt.startsWith("folder:") || dt.startsWith("group:")) {
-        const folderId = dt.startsWith("folder:") ? dt.slice(7) : null;
-        const groupId  = dt.startsWith("group:")  ? dt.slice(6)  : undefined;
+      if (cdrop.kind === "folder" || cdrop.kind === "group") {
+        const folderId = cdrop.kind === "folder" ? cdrop.id : null;
+        const groupId  = cdrop.kind === "group"  ? cdrop.id : undefined;
 
         let targetGroupId: string;
         if (folderId) {
@@ -553,7 +717,7 @@ export function Sidebar() {
         setConns(await getConnections());
       } else {
         // Drop onto another connection — reorder within the same unified scope
-        const target = conns.find((c) => c.id === dt);
+        const target = conns.find((c) => c.id === cdrop.id);
         if (!target) { finish(); return; }
 
         const targetGroupId = target.group_id;
@@ -604,6 +768,10 @@ export function Sidebar() {
       folder_id: conn.folder_id, notes: conn.notes, description: conn.description,
       domain: conn.domain, group_id: conn.group_id,
       icon: conn.icon, url: conn.url ?? "", custom_hosts: conn.custom_hosts ?? "",
+      tunnels: conn.tunnels ?? "",
+      rdp_redirect_drives: conn.rdp_redirect_drives ?? false,
+      rdp_gateway: conn.rdp_gateway ?? "",
+      proxy_jump: conn.proxy_jump ?? "",
     });
     await copyPassword(conn.id, created.id).catch(() => {});
 
@@ -680,24 +848,65 @@ export function Sidebar() {
     if (!searchQuery || searchMatches.length === 0) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      const next = (searchFocusIdx + 1) % searchMatches.length;
-      setSearchFocusIdx(next);
-      selectConnection(searchMatches[next].id);
+      setSearchFocusIdx((i) => (i + 1) % searchMatches.length);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      const prev = (searchFocusIdx - 1 + searchMatches.length) % searchMatches.length;
-      setSearchFocusIdx(prev);
-      selectConnection(searchMatches[prev].id);
+      setSearchFocusIdx((i) => (i - 1 + searchMatches.length) % searchMatches.length);
+    } else if (e.key === "ArrowRight") {
+      // Move from the search box into the tree: reveal the focused match in
+      // place (persist its ancestor folders + its group as expanded), select
+      // it, then CLEAR the query so we leave "search mode". This matters
+      // because while a query is active isGroupExpanded() forces every group
+      // open; if we entered the tree without clearing it the BD (group)
+      // toggles would appear stuck. Clearing here restores normal toggling.
+      e.preventDefault();
+      const hit = searchMatches[searchFocusIdx];
+      if (!hit) return;
+      // Walk the ancestor folder chain and collect it + the owning group.
+      const ancestors: string[] = [];
+      let groupId: string | undefined;
+      if (hit.kind === "conn") {
+        const conn = connById.get(hit.id);
+        groupId = conn?.group_id;
+        let fid = conn?.folder_id ?? null;
+        while (fid) { ancestors.push(fid); fid = folderById.get(fid)?.parent_id ?? null; }
+      } else {
+        const folder = folderById.get(hit.id);
+        groupId = folder?.group_id;
+        let fid = folder?.parent_id ?? null;
+        while (fid) { ancestors.push(fid); fid = folderById.get(fid)?.parent_id ?? null; }
+      }
+      if (ancestors.length > 0) {
+        setExpandedFolders((prev) => {
+          const next = new Set(prev);
+          for (const id of ancestors) next.add(id);
+          return next;
+        });
+      }
+      if (groupId) setGroupExpanded((prev) => ({ ...prev, [groupId!]: true }));
+      if (hit.kind === "conn") selectConnection(hit.id);
+      else selectFolder(hit.id);
+      setSearchQuery("");
+      treeRef.current?.focus();
     } else if (e.key === "Enter") {
-      const conn = searchMatches[searchFocusIdx];
-      if (conn) openTab(conn);
+      const hit = searchMatches[searchFocusIdx];
+      if (hit?.kind === "conn") {
+        const conn = connById.get(hit.id);
+        if (conn) openTab(conn);
+      } else if (hit?.kind === "folder") {
+        selectFolder(hit.id);
+      }
     }
   };
 
-  const searchMatchIds = new Set(searchMatches.map((c) => c.id));
-  const searchFocusId = searchQuery && searchMatches[searchFocusIdx]
-    ? searchMatches[searchFocusIdx].id
-    : null;
+  // Only the FOCUSED match is highlighted — the user doesn't want every match
+  // shaded. searchMatchIds is therefore empty (no "all matches" highlight); the
+  // focused connection lights up via ConnItem and the focused folder via
+  // FolderItem.
+  const searchMatchIds = EMPTY_ID_SET;
+  const focusedHit = searchQuery ? searchMatches[searchFocusIdx] : undefined;
+  const searchFocusId = focusedHit?.kind === "conn" ? focusedHit.id : null;
+  const searchFocusFolderId = focusedHit?.kind === "folder" ? focusedHit.id : null;
 
   // Folders the tree should render as open: the ones the user opened, plus the
   // ancestor chain of the focused search match (so it's revealed in place).
@@ -707,8 +916,8 @@ export function Sidebar() {
 
   // Shared props passed down to every FolderItem / ConnItem
   const sharedProps = {
-    allFolders: folders,
-    allConnections: connections,
+    foldersByParent,
+    connsByFolder,
     openTab,
     expandedFolders: effectiveExpanded,
     onToggleFolder: toggleFolderExpand,
@@ -723,6 +932,7 @@ export function Sidebar() {
     onFolderClick: (folder: FolderType) => {
       setQuickCtxFolderId(folder.id);
       setQuickCtxGroupId(folder.group_id);
+      selectFolder(folder.id);
     },
     onConnHint: (conn: Connection) => setSidebarHint(buildConnHint(conn, lang)),
     onFolderHint: (folder: FolderType) => setSidebarHint(buildFolderHint(folder, lang, connections)),
@@ -745,6 +955,8 @@ export function Sidebar() {
     onFolderPointerDown: (folder: FolderType, x: number, y: number) => startFolderDrag(folder, x, y),
     searchMatchIds,
     searchFocusId,
+    searchFocusFolderId,
+    selectedFolderId,
   };
 
   return (
@@ -785,14 +997,14 @@ export function Sidebar() {
               className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
               title={t("expandAll")}
             >
-              <Plus size={14} />
+              <SquarePlus size={14} />
             </button>
             <button
               onClick={collapseAllFolders}
               className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] hover:text-[var(--color-accent-hover)] transition-colors"
               title={t("collapseAll")}
             >
-              <Minus size={14} />
+              <SquareMinus size={14} />
             </button>
             <span className="w-px h-4 bg-[var(--color-border)] mx-0.5" />
             <button
@@ -846,7 +1058,12 @@ export function Sidebar() {
       </div>
 
       {/* Connection list — tree view; search reveals & jumps to the focused match */}
-      <div className="flex-1 overflow-y-auto min-h-0 py-0.5">
+      <div
+        ref={treeRef}
+        tabIndex={-1}
+        onKeyDown={handleTreeKeyDown}
+        className="flex-1 overflow-y-auto min-h-0 py-0.5 outline-none"
+      >
         {/* New group input */}
         {creatingGroup && (
           <div className="flex items-center gap-1 px-2 py-1">
@@ -870,9 +1087,9 @@ export function Sidebar() {
         {/* Render each group */}
         {groups.map((group) => {
           const expanded = isGroupExpanded(group.id);
-          const groupFolders = folders.filter((f) => f.parent_id === null && f.group_id === group.id);
-          const groupRootConns = connections.filter((c) => !c.folder_id && c.group_id === group.id);
-          const groupConnCount = connections.filter((c) => c.group_id === group.id).length;
+          const groupFolders = (foldersByParent.get(null) ?? []).filter((f) => f.group_id === group.id);
+          const groupRootConns = (connsByFolder.get(null) ?? []).filter((c) => c.group_id === group.id);
+          const groupConnCount = connsByGroupCount.get(group.id) ?? 0;
           const isGroupDropTarget = dropTarget === `group:${group.id}`;
           const isRenaming = renamingGroupId === group.id;
 
@@ -898,19 +1115,21 @@ export function Sidebar() {
               ) : (
                 <button
                   data-group-id={group.id}
-                  onClick={() => { toggleGroupExpanded(group.id); setSidebarHint(buildGroupHint(group, lang, connections)); setQuickCtxFolderId(null); setQuickCtxGroupId(group.id); }}
+                  onClick={() => { toggleGroupExpanded(group.id); selectGroup(group.id); setSidebarHint(buildGroupHint(group, lang, connections)); setQuickCtxFolderId(null); setQuickCtxGroupId(group.id); }}
                   onContextMenu={(e) => groupMenu(e, group)}
                   className={[
-                    "flex items-center gap-1.5 w-full px-2 py-1 transition-colors",
+                    "flex items-center gap-1.5 w-full px-2 py-0.5 transition-colors",
                     isGroupDropTarget
                       ? "bg-[var(--color-accent)]/20 text-[var(--color-accent-hover)]"
-                      : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
+                      : selectedGroupId === group.id
+                        ? "bg-[var(--color-accent)]/25 text-[var(--color-text-primary)]"
+                        : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
                   ].join(" ")}
                 >
                   {expanded
-                    ? <ChevronDown size={11} className="shrink-0" />
-                    : <ChevronRight size={11} className="shrink-0" />}
-                  <Database size={13} className="shrink-0 text-[var(--color-accent)]" />
+                    ? <SquareMinus size={12} className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] rounded-[2px] hover:bg-[var(--color-bg-hover)]" />
+                    : <SquarePlus size={12} className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] rounded-[2px] hover:bg-[var(--color-bg-hover)]" />}
+                  <Database size={13} className={`shrink-0 ${iconColorClass(group.color, "text-[var(--color-accent)]")}`} />
                   <span className="text-[13px] font-medium flex-1 text-left text-[var(--color-text-primary)]">{group.name}</span>
                   <span className="text-[11px] text-[var(--color-text-muted)] opacity-60">{groupConnCount}</span>
                 </button>
@@ -1018,7 +1237,7 @@ export function Sidebar() {
             type="text"
             placeholder={t("searchPlaceholder")}
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => { setSearchQuery(e.target.value); setSearchFocusIdx(0); }}
             onKeyDown={handleSearchKeyDown}
             onFocus={() => setSidebarHint(buildSearchHint(lang))}
             onBlur={() => setSidebarHint(null)}
@@ -1092,9 +1311,9 @@ function TreePrefix({ continuations, isLast }: { continuations: boolean[]; isLas
   return (
     <span
       className="font-mono shrink-0 select-none text-[var(--color-border)]"
-      style={{ fontSize: "12px", whiteSpace: "pre", lineHeight: 1 }}
+      style={{ fontSize: "11px", whiteSpace: "pre", lineHeight: 1 }}
     >
-      {continuations.map((c) => (c ? "│   " : "    ")).join("")}{isLast ? "└──" : "├──"}{" "}
+      {continuations.map((c) => (c ? "│ " : "  ")).join("")}{isLast ? "└─" : "├─"}{" "}
     </span>
   );
 }
@@ -1102,8 +1321,8 @@ function TreePrefix({ continuations, isLast }: { continuations: boolean[]; isLas
 // ── Shared types ──────────────────────────────────────────────────────────────
 
 interface SharedProps {
-  allFolders: FolderType[];
-  allConnections: Connection[];
+  foldersByParent: Map<string | null, FolderType[]>;
+  connsByFolder: Map<string | null, Connection[]>;
   openTab: (c: Connection) => void;
   expandedFolders: Set<string>;
   onToggleFolder: (id: string) => void;
@@ -1133,6 +1352,8 @@ interface SharedProps {
   onFolderPointerDown: (folder: FolderType, x: number, y: number) => void;
   searchMatchIds: Set<string>;
   searchFocusId: string | null;
+  searchFocusFolderId: string | null;
+  selectedFolderId: string | null;
 }
 
 // ── FolderItem (recursive) ────────────────────────────────────────────────────
@@ -1142,22 +1363,28 @@ function FolderItem({
 }: { folder: FolderType; continuations: boolean[]; isLast: boolean } & SharedProps) {
   const t = useT();
   const {
-    allFolders, allConnections, openTab, expandedFolders, onToggleFolder,
+    foldersByParent, connsByFolder, openTab, expandedFolders, onToggleFolder,
     onConnContextMenu, onFolderContextMenu, selectedId, onSelect, onFolderClick,
     onConnHint, onFolderHint,
     renamingFolderId, renameFolderName, onRenameChange, onRenameConfirm, onRenameCancel, renameInputRef,
     creatingFolder, newFolderParentId, newFolderName,
     onSubfolderNameChange, onSubfolderConfirm, onSubfolderCancel, folderInputRef,
     dragId, dropTarget, onConnPointerDown, onFolderPointerDown,
-    searchMatchIds, searchFocusId,
+    searchMatchIds, searchFocusId, searchFocusFolderId, selectedFolderId,
   } = shared;
 
   const expanded = expandedFolders.has(folder.id);
-  const subfolders = allFolders.filter((f) => f.parent_id === folder.id);
-  const myConns = allConnections.filter((c) => c.folder_id === folder.id);
+  const subfolders = foldersByParent.get(folder.id) ?? [];
+  const myConns = connsByFolder.get(folder.id) ?? [];
 
-  const isFolderDropTarget = dropTarget === `folder:${folder.id}`;
+  const dropInfo = parseDrop(dropTarget);
+  const isDropHere = dropInfo?.kind === "folder" && dropInfo.id === folder.id;
+  const isFolderDropTarget = isDropHere && dropInfo!.zone === "inside";
+  const isDropBefore = isDropHere && dropInfo!.zone === "before";
+  const isDropAfter = isDropHere && dropInfo!.zone === "after";
+  const isSearchFocus = searchFocusFolderId === folder.id || selectedFolderId === folder.id;
   const Icon = expanded ? FolderOpen : Folder;
+  const folderColor = iconColorClass(folder.color);
   const isRenaming = renamingFolderId === folder.id;
   const creatingSubfolder = creatingFolder && newFolderParentId === folder.id;
   const childContinuations = [...continuations, !isLast];
@@ -1172,7 +1399,7 @@ function FolderItem({
       {isRenaming ? (
         <div className="flex items-center gap-1 py-0.5 pr-3">
           <TreePrefix continuations={continuations} isLast={isLast} />
-          <Icon size={12} className="text-amber-400 shrink-0" />
+          <Icon size={12} className={`${folderColor} shrink-0`} />
           <input
             ref={renameInputRef}
             type="text"
@@ -1193,18 +1420,26 @@ function FolderItem({
           onPointerDown={(e) => onFolderPointerDown(folder, e.clientX, e.clientY)}
           onContextMenu={(e) => onFolderContextMenu(e, folder)}
           className={[
-            "flex items-center w-full py-0.5 pr-2 transition-colors text-left",
+            "flex items-center w-full py-px pr-2 transition-colors text-left",
+            isDropBefore ? "shadow-[inset_0_2px_0_0_var(--color-accent)]" : "",
+            isDropAfter ? "shadow-[inset_0_-2px_0_0_var(--color-accent)]" : "",
             isFolderDropTarget
               ? "bg-[var(--color-accent)]/20 text-amber-400"
-              : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
+              : isSearchFocus
+                ? "bg-[var(--color-accent)]/25 text-[var(--color-text-primary)]"
+                : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]",
           ].join(" ")}
         >
           <TreePrefix continuations={continuations} isLast={isLast} />
-          <Icon size={12} className="text-amber-400 shrink-0" />
+          {childItems.length > 0 ? (
+            expanded
+              ? <SquareMinus size={12} className="shrink-0 mr-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] rounded-[2px] hover:bg-[var(--color-bg-hover)]" />
+              : <SquarePlus size={12} className="shrink-0 mr-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] rounded-[2px] hover:bg-[var(--color-bg-hover)]" />
+          ) : (
+            <span className="shrink-0 mr-1" style={{ width: 12 }} />
+          )}
+          <Icon size={12} className={`${folderColor} shrink-0`} />
           <span className="text-[13px] truncate flex-1 ml-1 text-left font-medium">{folder.name}</span>
-          {expanded
-            ? <ChevronDown size={9} className="shrink-0 opacity-40 mr-0.5" />
-            : <ChevronRight size={9} className="shrink-0 opacity-30 mr-0.5" />}
         </button>
       )}
 
@@ -1317,7 +1552,7 @@ function ConnItem({
         onPointerDragStart?.(e.clientX, e.clientY);
       }}
       className={[
-        "flex items-center w-full py-0.5 pr-2 transition-colors text-left cursor-pointer select-none",
+        "flex items-center w-full py-px pr-2 transition-colors text-left cursor-pointer select-none",
         dragging ? "opacity-40" : "",
         isDropTarget ? "border-t-2 border-[var(--color-accent)]" : "",
         isSearchFocus || selected

@@ -29,6 +29,10 @@ export async function saveFolder(name: string, parentId: string | null, groupId?
   return invoke("save_folder", { name, parentId, groupId: groupId ?? null });
 }
 
+export async function updateFolder(id: string, name: string, description: string, color: string): Promise<void> {
+  return invoke("update_folder", { id, name, description, color });
+}
+
 export async function deleteFolder(id: string): Promise<void> {
   return invoke("delete_folder", { id });
 }
@@ -93,6 +97,10 @@ export async function renameGroup(id: string, name: string): Promise<void> {
   return invoke("rename_group", { id, name });
 }
 
+export async function updateGroup(id: string, name: string, description: string, color: string): Promise<void> {
+  return invoke("update_group", { id, name, description, color });
+}
+
 export async function deleteGroup(id: string): Promise<void> {
   return invoke("delete_group", { id });
 }
@@ -117,8 +125,19 @@ export async function copyPassword(fromId: string, toId: string): Promise<void> 
 
 // ── SSH sessions ─────────────────────────────────────────────────────────────
 
-export async function connectSsh(connectionId: string): Promise<string> {
-  return invoke("connect_ssh", { connectionId });
+// Returns the session id. Rejects with "NEED_CREDENTIALS" when a username or
+// password is required (no saved credentials) — the caller should prompt and
+// retry with `username` / `password` filled in.
+export async function connectSsh(
+  connectionId: string,
+  username?: string,
+  password?: string,
+): Promise<string> {
+  return invoke("connect_ssh", {
+    connectionId,
+    username: username ?? null,
+    password: password ?? null,
+  });
 }
 
 export async function sendInput(sessionId: string, data: string): Promise<void> {
@@ -241,6 +260,12 @@ export async function sftpConnect(connectionId: string): Promise<string> {
   return invoke("sftp_connect", { connectionId });
 }
 
+// Reuse an existing interactive SSH session's connection for SFTP (shared
+// auth — no separate login).
+export async function sftpConnectFromSsh(sshSessionId: string): Promise<string> {
+  return invoke("sftp_connect_from_ssh", { sshSessionId });
+}
+
 export async function sftpListDir(sessionId: string, path: string): Promise<SftpEntry[]> {
   return invoke("sftp_list_dir", { sessionId, path });
 }
@@ -271,6 +296,10 @@ export async function sftpRename(
   newPath: string,
 ): Promise<void> {
   return invoke("sftp_rename", { sessionId, oldPath, newPath });
+}
+
+export async function sftpChmod(sessionId: string, path: string, mode: number): Promise<void> {
+  return invoke("sftp_chmod", { sessionId, path, mode });
 }
 
 export async function sftpCreateFile(sessionId: string, path: string): Promise<void> {
@@ -408,6 +437,10 @@ export async function vncPointerEvent(
   y: number,
 ): Promise<void> {
   return invoke("vnc_pointer_event", { sessionId, buttons, x, y });
+}
+
+export async function vncSendClipboard(sessionId: string, text: string): Promise<void> {
+  return invoke("vnc_send_clipboard", { sessionId, text });
 }
 
 export async function vncDisconnect(sessionId: string): Promise<void> {

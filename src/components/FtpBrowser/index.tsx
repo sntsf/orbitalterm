@@ -5,12 +5,16 @@ import {
   ChevronLeft, Pencil, Trash2, WifiOff, Loader,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   ftpConnect, ftpListDir, ftpUpload, ftpDownload, ftpMkdir,
   ftpRename, ftpDelete,
 } from "../../lib/commands";
 import type { FtpEntry } from "../../lib/commands";
+import { friendlyFsError } from "../../lib/transferErrors";
+import { resolveUploadOverwrites } from "../../lib/overwrite";
+import { useTransferStore } from "../../store/useTransferStore";
 
 interface FtpBrowserProps {
   sessionId: string | null;
@@ -27,6 +31,11 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
   const [pathInput, setPathInput] = useState("/");
   const [editingPath, setEditingPath] = useState(false);
   const [entries, setEntries] = useState<FtpEntry[]>([]);
+  // Live mirrors so the single OS drag-drop listener reads the current path /
+  // entries instead of values captured at registration (prevents uploads going
+  // to both the current folder and the connection's initial path).
+  const currentPathRef = useRef("/");
+  const entriesRef = useRef<FtpEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [disconnected, setDisconnected] = useState(false);
@@ -34,9 +43,12 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
 
   const [transferFile, setTransferFile] = useState<string | null>(null);
   const [progress, setProgress] = useState<FtpProgress>({ transferred: 0, total: 0 });
+  const [dragging, setDragging] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastClickedRef = useRef<string | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const [newFolderMode, setNewFolderMode] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
@@ -67,7 +79,7 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
       setDisconnected(true);
       setTimeout(() => onDisconnect?.(), 1500);
     } else {
-      setError(String(err));
+      setError(friendlyFsError(err));
     }
   };
 
@@ -79,7 +91,9 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
     try {
       const result = await ftpListDir(sid, path);
       setEntries(result);
+      entriesRef.current = result;
       setCurrentPath(path);
+      currentPathRef.current = path;
       setPathInput(path);
       setSelected(new Set());
     } catch (err) {
@@ -93,20 +107,42 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
 
   const doUpload = useCallback(async (localPaths: string[]) => {
     if (!sessionId) return;
-    for (const localPath of localPaths) {
+    const dir = currentPathRef.current;
+    const toUpload = resolveUploadOverwrites(localPaths, new Set(entriesRef.current.map((e) => e.name)));
+    if (toUpload.length === 0) return;
+    useTransferStore.getState().enqueue(toUpload.map((localPath) => {
       const fileName = localPath.split(/[\\/]/).pop() ?? "file";
-      flushSync(() => { setTransferFile(`↑ ${fileName}`); setProgress({ transferred: 0, total: 0 }); });
-      const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
-      try {
-        await ftpUpload(sessionId, localPath, remotePath);
-      } catch (err) {
-        handleError(err);
-        break;
+      const remotePath = dir === "/" ? `/${fileName}` : `${dir}/${fileName}`;
+      return {
+        label: fileName, dir: "up" as const,
+        run: () => ftpUpload(sessionId, localPath, remotePath),
+        onComplete: () => loadDir(sessionId, currentPathRef.current),
+      };
+    }));
+  }, [sessionId, loadDir]);
+
+  // Drag files from the OS onto the panel to upload them to the current folder.
+  useEffect(() => {
+    if (!sessionId) return;
+    let unlisten: (() => void) | null = null;
+    getCurrentWebviewWindow().onDragDropEvent((event) => {
+      const p = event.payload;
+      if (p.type === "leave") { setDragging(false); return; }
+      const rect = containerRef.current?.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const inside = rect
+        ? p.position.x / dpr >= rect.left && p.position.x / dpr <= rect.right
+          && p.position.y / dpr >= rect.top && p.position.y / dpr <= rect.bottom
+        : false;
+      if (p.type === "enter" || p.type === "over") {
+        setDragging(inside);
+      } else if (p.type === "drop") {
+        setDragging(false);
+        if (inside && p.paths?.length) doUpload(p.paths);
       }
-    }
-    setTransferFile(null);
-    loadDir(sessionId, currentPath);
-  }, [sessionId, currentPath, loadDir]); // eslint-disable-line react-hooks/exhaustive-deps
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [sessionId, doUpload]);
 
   const doDownload = useCallback(async (remoteEntries: FtpEntry[], localPath: string) => {
     if (!sessionId) return;
@@ -161,6 +197,34 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
     if (p !== currentPath) navigateTo(p);
   };
 
+  // ── keyboard navigation of the file list ─────────────────────────────────────
+  // FTP is a flat listing (no inline tree), so → / Enter on a folder navigates
+  // into it and ← / Backspace goes up a directory.
+  const cursorEntry = () => entries.find((e) => e.path === lastClickedRef.current);
+  const moveCursor = (delta: 1 | -1) => {
+    if (entries.length === 0) return;
+    const idx = entries.findIndex((e) => e.path === lastClickedRef.current);
+    let next = idx < 0 ? (delta > 0 ? 0 : entries.length - 1) : idx + delta;
+    next = Math.max(0, Math.min(entries.length - 1, next));
+    const entry = entries[next];
+    lastClickedRef.current = entry.path;
+    setSelected(new Set([entry.path]));
+    const rows = listRef.current?.querySelectorAll<HTMLElement>("[data-ftp-path]");
+    if (rows) Array.from(rows).find((el) => el.dataset.ftpPath === entry.path)?.scrollIntoView({ block: "nearest" });
+  };
+  const handleListKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); moveCursor(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveCursor(-1); }
+    else if (e.key === "ArrowRight" || e.key === "Enter") {
+      const en = cursorEntry();
+      if (!en) return;
+      e.preventDefault();
+      if (en.is_dir) navigateTo(en.path); else if (e.key === "Enter") handleDownloadEntry(en);
+    } else if (e.key === "ArrowLeft" || e.key === "Backspace") {
+      e.preventDefault(); navigateUp();
+    }
+  };
+
   // ── connect ────────────────────────────────────────────────────────────────
 
   const handleConnect = async () => {
@@ -168,7 +232,7 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
     setError(null);
     setDisconnected(false);
     try { onConnect(await ftpConnect(connectionId)); }
-    catch (err) { setError(String(err)); }
+    catch (err) { setError(friendlyFsError(err)); }
     finally { setConnecting(false); }
   };
 
@@ -298,8 +362,10 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
 
   return (
     <div
-      className="flex flex-col h-full bg-[var(--color-bg-surface)] select-none"
+      ref={containerRef}
+      className={`flex flex-col h-full bg-[var(--color-bg-surface)] select-none ${dragging ? "ring-2 ring-inset ring-[var(--color-accent)]" : ""}`}
       onClick={() => setCtxMenu(null)}
+      onKeyDown={(e) => { if (e.key === "F5") { e.preventDefault(); if (sessionId) loadDir(sessionId, currentPathRef.current); } }}
       onContextMenu={(e) => { e.preventDefault(); openCtxMenu(e); }}
     >
       {/* Path bar */}
@@ -350,7 +416,7 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
       )}
 
       {/* File list */}
-      <div className="flex-1 overflow-y-auto min-h-0">
+      <div ref={listRef} tabIndex={0} onKeyDown={handleListKeyDown} className="flex-1 overflow-y-auto min-h-0 outline-none">
         {loading ? (
           <div className="flex items-center justify-center h-full text-[var(--color-text-muted)]">
             <RefreshCw size={16} className="animate-spin" />
@@ -390,9 +456,9 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
               {entries.map((entry) => {
                 const isSelected = selected.has(entry.path);
                 return (
-                  <tr key={entry.path}
+                  <tr key={entry.path} data-ftp-path={entry.path}
                     className={`cursor-pointer ${isSelected ? "bg-[var(--color-accent)]/15" : "hover:bg-[var(--color-bg-hover)]"}`}
-                    onClick={(e) => toggleSelect(e, entry)}
+                    onClick={(e) => { listRef.current?.focus(); toggleSelect(e, entry); }}
                     onContextMenu={(e) => { e.stopPropagation(); openCtxMenu(e, entry); }}
                     onDoubleClick={() => { entry.is_dir ? navigateTo(entry.path) : handleDownloadEntry(entry); }}
                   >

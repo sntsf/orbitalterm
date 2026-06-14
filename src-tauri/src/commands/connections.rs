@@ -8,6 +8,10 @@ use crate::db;
 pub struct Group {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub color: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -39,6 +43,15 @@ pub struct Connection {
     pub rdp_security: String,
     #[serde(default = "default_rdp_color_depth")]
     pub rdp_color_depth: i64,
+    // SSH port-forwarding tunnels, one per line: "L <listenPort> <host> <port>".
+    #[serde(default)]
+    pub tunnels: String,
+    #[serde(default)]
+    pub rdp_redirect_drives: bool,
+    #[serde(default)]
+    pub rdp_gateway: String,
+    #[serde(default)]
+    pub proxy_jump: String,
 }
 
 fn default_rdp_security() -> String { "negotiate".to_string() }
@@ -72,6 +85,14 @@ pub struct NewConnection {
     pub rdp_security: String,
     #[serde(default = "default_rdp_color_depth")]
     pub rdp_color_depth: i64,
+    #[serde(default)]
+    pub tunnels: String,
+    #[serde(default)]
+    pub rdp_redirect_drives: bool,
+    #[serde(default)]
+    pub rdp_gateway: String,
+    #[serde(default)]
+    pub proxy_jump: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,6 +119,10 @@ pub struct Folder {
     pub expanded: bool,
     pub group_id: String,
     pub sort_order: i64,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub color: String,
 }
 
 fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
@@ -124,12 +149,17 @@ fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
         custom_hosts: row.get::<_, String>(19).unwrap_or_default(),
         rdp_security: row.get::<_, String>(20).unwrap_or_else(|_| "negotiate".to_string()),
         rdp_color_depth: row.get::<_, i64>(21).unwrap_or(32),
+        tunnels: row.get::<_, String>(22).unwrap_or_default(),
+        rdp_redirect_drives: row.get::<_, i64>(23).unwrap_or(0) != 0,
+        rdp_gateway: row.get::<_, String>(24).unwrap_or_default(),
+        proxy_jump: row.get::<_, String>(25).unwrap_or_default(),
     })
 }
 
 const SELECT_COLS: &str = "id, name, type, host, port, username, auth_type, key_path,
                            folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
-                           sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth";
+                           sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels,
+                           rdp_redirect_drives, rdp_gateway, proxy_jump";
 
 #[tauri::command]
 pub fn get_connections() -> Result<Vec<Connection>, String> {
@@ -186,12 +216,13 @@ pub fn save_connection(conn: NewConnection) -> Result<Connection, String> {
         ).unwrap_or(0)
     };
     db.execute(
-        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels, rdp_redirect_drives, rdp_gateway, proxy_jump)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
         params![id, conn.name, conn.conn_type, conn.host, conn.port,
                 conn.username, conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
                 conn.description, conn.domain, conn.rdp_admin as i64, sort_order, group_id,
-                conn.icon, conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth],
+                conn.icon, conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.tunnels,
+                conn.rdp_redirect_drives as i64, conn.rdp_gateway, conn.proxy_jump],
     )
     .map_err(|e| e.to_string())?;
 
@@ -210,11 +241,12 @@ pub fn update_connection(conn: Connection) -> Result<Connection, String> {
         "UPDATE connections SET name=?1,type=?2,host=?3,port=?4,username=?5,
          auth_type=?6,key_path=?7,folder_id=?8,notes=?9,description=?10,domain=?11,
          rdp_admin=?12,icon=?13,url=?14,custom_hosts=?15,rdp_security=?16,rdp_color_depth=?17,
-         updated_at=datetime('now') WHERE id=?18",
+         tunnels=?18,rdp_redirect_drives=?19,rdp_gateway=?20,proxy_jump=?21,updated_at=datetime('now') WHERE id=?22",
         params![conn.name, conn.conn_type, conn.host, conn.port, conn.username,
                 conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
                 conn.description, conn.domain, conn.rdp_admin as i64, conn.icon,
-                conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.id],
+                conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.tunnels,
+                conn.rdp_redirect_drives as i64, conn.rdp_gateway, conn.proxy_jump, conn.id],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
@@ -317,7 +349,7 @@ pub fn move_folder_to_group(folder_id: String, target_group_id: String) -> Resul
 pub fn get_folders() -> Result<Vec<Folder>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, name, parent_id, group_id, sort_order FROM folders ORDER BY sort_order ASC, name COLLATE NOCASE")
+        .prepare("SELECT id, name, parent_id, group_id, sort_order, description, color FROM folders ORDER BY sort_order ASC, name COLLATE NOCASE")
         .map_err(|e| e.to_string())?;
 
     let rows = stmt.query_map([], |row| {
@@ -328,6 +360,8 @@ pub fn get_folders() -> Result<Vec<Folder>, String> {
             expanded: true,
             group_id: row.get::<_, String>(3).unwrap_or_default(),
             sort_order: row.get(4).unwrap_or(0),
+            description: row.get::<_, String>(5).unwrap_or_default(),
+            color: row.get::<_, String>(6).unwrap_or_default(),
         })
     })
     .map_err(|e| e.to_string())?
@@ -380,7 +414,21 @@ pub fn save_folder(name: String, parent_id: Option<String>, group_id: Option<Str
         params![id, name, parent_id, resolved_group_id, sort_order],
     )
     .map_err(|e| e.to_string())?;
-    Ok(Folder { id, name, parent_id, expanded: true, group_id: resolved_group_id, sort_order })
+    Ok(Folder {
+        id, name, parent_id, expanded: true, group_id: resolved_group_id, sort_order,
+        description: String::new(), color: String::new(),
+    })
+}
+
+#[tauri::command]
+pub fn update_folder(id: String, name: String, description: String, color: String) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    db.execute(
+        "UPDATE folders SET name = ?1, description = ?2, color = ?3 WHERE id = ?4",
+        params![name, description, color, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -397,10 +445,15 @@ pub fn delete_folder(id: String) -> Result<(), String> {
 pub fn get_groups() -> Result<Vec<Group>, String> {
     let conn = db::open().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, name FROM groups ORDER BY rowid DESC")
+        .prepare("SELECT id, name, description, color FROM groups ORDER BY rowid DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| {
-        Ok(Group { id: row.get(0)?, name: row.get(1)? })
+        Ok(Group {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get::<_, String>(2).unwrap_or_default(),
+            color: row.get::<_, String>(3).unwrap_or_default(),
+        })
     })
     .map_err(|e| e.to_string())?
     .collect::<Result<Vec<_>, _>>()
@@ -417,7 +470,7 @@ pub fn save_group(name: String) -> Result<Group, String> {
         params![id, name],
     )
     .map_err(|e| e.to_string())?;
-    Ok(Group { id, name })
+    Ok(Group { id, name, description: String::new(), color: String::new() })
 }
 
 #[tauri::command]
@@ -426,6 +479,17 @@ pub fn rename_group(id: String, name: String) -> Result<(), String> {
     db.execute(
         "UPDATE groups SET name = ?1 WHERE id = ?2",
         params![name, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_group(id: String, name: String, description: String, color: String) -> Result<(), String> {
+    let db = db::open().map_err(|e| e.to_string())?;
+    db.execute(
+        "UPDATE groups SET name = ?1, description = ?2, color = ?3 WHERE id = ?4",
+        params![name, description, color, id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -511,8 +575,12 @@ pub fn import_connections(json: String) -> Result<usize, String> {
             let new_id = Uuid::new_v4().to_string();
             let name = g["name"].as_str().unwrap_or("Imported Group");
             let _ = db.execute(
-                "INSERT OR IGNORE INTO groups (id, name) VALUES (?1, ?2)",
-                params![new_id, name],
+                "INSERT OR IGNORE INTO groups (id, name, description, color) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    new_id, name,
+                    g["description"].as_str().unwrap_or(""),
+                    g["color"].as_str().unwrap_or(""),
+                ],
             );
             group_id_map.insert(old_id, new_id);
         }
@@ -528,13 +596,15 @@ pub fn import_connections(json: String) -> Result<usize, String> {
                 group_id_map.get(&old_group_id).cloned().unwrap_or_else(|| default_group_id.clone())
             };
             let _ = db.execute(
-                "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR IGNORE INTO folders (id, name, parent_id, group_id, sort_order, description, color) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     f["id"].as_str().unwrap_or(""),
                     f["name"].as_str().unwrap_or("Imported Folder"),
                     f["parent_id"].as_str(),
                     resolved_group_id,
                     f["sort_order"].as_i64().unwrap_or(0),
+                    f["description"].as_str().unwrap_or(""),
+                    f["color"].as_str().unwrap_or(""),
                 ],
             );
         }
@@ -551,8 +621,8 @@ pub fn import_connections(json: String) -> Result<usize, String> {
         };
         let ok = db.execute(
             "INSERT OR IGNORE INTO connections
-             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id,sort_order,icon,url,custom_hosts)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id,sort_order,icon,url,custom_hosts,tunnels,rdp_redirect_drives,rdp_gateway,proxy_jump)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
             params![
                 id,
                 item["name"].as_str().unwrap_or("Imported"),
@@ -571,6 +641,10 @@ pub fn import_connections(json: String) -> Result<usize, String> {
                 item["icon"].as_str().unwrap_or(""),
                 item["url"].as_str().unwrap_or(""),
                 item["custom_hosts"].as_str().unwrap_or(""),
+                item["tunnels"].as_str().unwrap_or(""),
+                item["rdp_redirect_drives"].as_bool().unwrap_or(false) as i64,
+                item["rdp_gateway"].as_str().unwrap_or(""),
+                item["proxy_jump"].as_str().unwrap_or(""),
             ],
         ).is_ok();
 
