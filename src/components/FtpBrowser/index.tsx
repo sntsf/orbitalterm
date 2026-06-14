@@ -365,6 +365,7 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
       ref={containerRef}
       className={`flex flex-col h-full bg-[var(--color-bg-surface)] select-none ${dragging ? "ring-2 ring-inset ring-[var(--color-accent)]" : ""}`}
       onClick={() => setCtxMenu(null)}
+      onKeyDown={(e) => { if (e.key === "F5") { e.preventDefault(); if (sessionId) loadDir(sessionId, currentPathRef.current); } }}
       onContextMenu={(e) => { e.preventDefault(); openCtxMenu(e); }}
     >
       {/* Path bar */}

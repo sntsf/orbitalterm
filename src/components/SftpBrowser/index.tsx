@@ -554,6 +554,7 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       onClick={() => setCtxMenu(null)}
+      onKeyDown={(e) => { if (e.key === "F5") { e.preventDefault(); if (sessionId) loadDir(sessionId, currentPathRef.current); } }}
       onContextMenu={(e) => { e.preventDefault(); openCtxMenu(e); }}
     >
       {/* Path bar */}

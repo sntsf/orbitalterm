@@ -275,6 +275,7 @@ function FilePanel({
   return (
     <div
       className="flex flex-col h-full bg-[var(--color-bg-surface)] min-w-0 relative"
+      onKeyDown={(e) => { if (e.key === "F5") { e.preventDefault(); onRefresh(); } }}
       onContextMenu={(e) => { e.preventDefault(); onCtxMenu(e); }}
     >
       {/* Drag-over overlay */}
