@@ -125,6 +125,24 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
       return true;
     });
 
+    // Wire keyboard/resize/selection up-front (NOT inside the async connect
+    // flow) so typing always reaches the session once connected — independent
+    // of where the connect routine happens to be.
+    term.onData((data) => {
+      if (sessionIdRef.current) {
+        sendInput(sessionIdRef.current, data).catch(console.error);
+      }
+    });
+    term.onResize(({ cols, rows }) => {
+      if (sessionIdRef.current) {
+        resizePty(sessionIdRef.current, cols, rows).catch(console.error);
+      }
+    });
+    term.onSelectionChange(() => {
+      const sel = term.getSelection();
+      if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+    });
+
     const cleanups: Array<() => void> = [];
 
     const init = async () => {
@@ -245,26 +263,6 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         setTimeout(() => closeTab(tab.id), 1500);
       });
       cleanups.push(unlistenClosed);
-
-      // Copy-on-select (like PuTTY): selecting text copies it automatically
-      term.onSelectionChange(() => {
-        const sel = term.getSelection();
-        if (sel) navigator.clipboard.writeText(sel).catch(() => {});
-      });
-
-      // Forward keystrokes to SSH
-      term.onData((data) => {
-        if (sessionIdRef.current) {
-          sendInput(sessionIdRef.current, data).catch(console.error);
-        }
-      });
-
-      // Sync terminal size with PTY on resize
-      term.onResize(({ cols, rows }) => {
-        if (sessionIdRef.current) {
-          resizePty(sessionIdRef.current, cols, rows).catch(console.error);
-        }
-      });
 
       // Initial size sync
       await resizePty(sessionId, term.cols, term.rows);
