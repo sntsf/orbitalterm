@@ -639,6 +639,7 @@ export function Sidebar() {
       folder_id: conn.folder_id, notes: conn.notes, description: conn.description,
       domain: conn.domain, group_id: conn.group_id,
       icon: conn.icon, url: conn.url ?? "", custom_hosts: conn.custom_hosts ?? "",
+      tunnels: conn.tunnels ?? "",
     });
     await copyPassword(conn.id, created.id).catch(() => {});
 

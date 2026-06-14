@@ -113,6 +113,7 @@ function ConnectionProperties() {
   const [icon, setIcon] = useState<string>("");
   const [url, setUrl] = useState("");
   const [customHosts, setCustomHosts] = useState("");
+  const [tunnels, setTunnels] = useState("");
   const [connectError, setConnectError] = useState("");
   const [focusedField, setFocusedField] = useState<FieldKey | null>(null);
 
@@ -141,6 +142,7 @@ function ConnectionProperties() {
         icon,
         url: url.trim(),
         custom_hosts: customHosts,
+        tunnels,
       });
       setConnections(await getConnections());
     } catch (err) {
@@ -167,6 +169,7 @@ function ConnectionProperties() {
     setIcon(existing.icon || DEFAULT_CONN_ICON[existing.type]);
     setUrl(existing.url ?? "");
     setCustomHosts(existing.custom_hosts ?? "");
+    setTunnels(existing.tunnels ?? "");
     setPassword("");
     setConnectError("");
     if (existing.auth_type === "password") {
@@ -183,7 +186,7 @@ function ConnectionProperties() {
     const timer = setTimeout(() => { doSaveRef.current?.(); }, 600);
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts]);
+  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts, tunnels]);
 
   const handleTypeChange = (newType: ConnectionType) => {
     setType(newType);
@@ -404,6 +407,21 @@ function ConnectionProperties() {
           <Row label={t("propNotes")}>
             <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="…"
               onFocus={focus("notes")} onBlur={blur} className={inp + " resize-none"} />
+          </Row>
+        )}
+
+        {(type === "ssh" || type === "sftp") && (
+          <Row label={lang === "es" ? "Túneles" : "Tunnels"}>
+            <textarea
+              value={tunnels}
+              onChange={(e) => setTunnels(e.target.value)}
+              rows={2}
+              spellCheck={false}
+              placeholder={lang === "es"
+                ? "Uno por línea:\nL 8080 db.interna 5432"
+                : "One per line:\nL 8080 db.internal 5432"}
+              className={inp + " resize-none font-mono text-[11px]"}
+            />
           </Row>
         )}
 

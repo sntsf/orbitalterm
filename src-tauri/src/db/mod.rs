@@ -226,5 +226,11 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE schema_version SET version=7", [])?;
     }
 
+    if ver < 8 {
+        // SSH port-forwarding tunnels (one spec per line).
+        conn.execute("ALTER TABLE connections ADD COLUMN tunnels TEXT NOT NULL DEFAULT ''", []).ok();
+        conn.execute("UPDATE schema_version SET version=8", [])?;
+    }
+
     Ok(())
 }

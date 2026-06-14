@@ -29,6 +29,9 @@ export interface Connection {
   icon: string;
   url: string;
   custom_hosts: string;
+  rdp_security?: string;
+  rdp_color_depth?: number;
+  tunnels: string;
 }
 
 export interface Folder {

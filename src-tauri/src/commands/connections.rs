@@ -43,6 +43,9 @@ pub struct Connection {
     pub rdp_security: String,
     #[serde(default = "default_rdp_color_depth")]
     pub rdp_color_depth: i64,
+    // SSH port-forwarding tunnels, one per line: "L <listenPort> <host> <port>".
+    #[serde(default)]
+    pub tunnels: String,
 }
 
 fn default_rdp_security() -> String { "negotiate".to_string() }
@@ -76,6 +79,8 @@ pub struct NewConnection {
     pub rdp_security: String,
     #[serde(default = "default_rdp_color_depth")]
     pub rdp_color_depth: i64,
+    #[serde(default)]
+    pub tunnels: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -132,12 +137,13 @@ fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
         custom_hosts: row.get::<_, String>(19).unwrap_or_default(),
         rdp_security: row.get::<_, String>(20).unwrap_or_else(|_| "negotiate".to_string()),
         rdp_color_depth: row.get::<_, i64>(21).unwrap_or(32),
+        tunnels: row.get::<_, String>(22).unwrap_or_default(),
     })
 }
 
 const SELECT_COLS: &str = "id, name, type, host, port, username, auth_type, key_path,
                            folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
-                           sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth";
+                           sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels";
 
 #[tauri::command]
 pub fn get_connections() -> Result<Vec<Connection>, String> {
@@ -194,12 +200,12 @@ pub fn save_connection(conn: NewConnection) -> Result<Connection, String> {
         ).unwrap_or(0)
     };
     db.execute(
-        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
         params![id, conn.name, conn.conn_type, conn.host, conn.port,
                 conn.username, conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
                 conn.description, conn.domain, conn.rdp_admin as i64, sort_order, group_id,
-                conn.icon, conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth],
+                conn.icon, conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.tunnels],
     )
     .map_err(|e| e.to_string())?;
 
@@ -218,11 +224,11 @@ pub fn update_connection(conn: Connection) -> Result<Connection, String> {
         "UPDATE connections SET name=?1,type=?2,host=?3,port=?4,username=?5,
          auth_type=?6,key_path=?7,folder_id=?8,notes=?9,description=?10,domain=?11,
          rdp_admin=?12,icon=?13,url=?14,custom_hosts=?15,rdp_security=?16,rdp_color_depth=?17,
-         updated_at=datetime('now') WHERE id=?18",
+         tunnels=?18,updated_at=datetime('now') WHERE id=?19",
         params![conn.name, conn.conn_type, conn.host, conn.port, conn.username,
                 conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
                 conn.description, conn.domain, conn.rdp_admin as i64, conn.icon,
-                conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.id],
+                conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.tunnels, conn.id],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
@@ -597,8 +603,8 @@ pub fn import_connections(json: String) -> Result<usize, String> {
         };
         let ok = db.execute(
             "INSERT OR IGNORE INTO connections
-             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id,sort_order,icon,url,custom_hosts)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+             (id,name,type,host,port,username,auth_type,key_path,folder_id,notes,description,domain,group_id,sort_order,icon,url,custom_hosts,tunnels)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             params![
                 id,
                 item["name"].as_str().unwrap_or("Imported"),
@@ -617,6 +623,7 @@ pub fn import_connections(json: String) -> Result<usize, String> {
                 item["icon"].as_str().unwrap_or(""),
                 item["url"].as_str().unwrap_or(""),
                 item["custom_hosts"].as_str().unwrap_or(""),
+                item["tunnels"].as_str().unwrap_or(""),
             ],
         ).is_ok();
 

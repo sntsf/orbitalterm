@@ -18,6 +18,16 @@ pub enum SshCmd {
 pub struct SshSession {
     pub tx: UnboundedSender<SshCmd>,
     pub handle: Arc<Handle<SshHandler>>,
+    // Background port-forwarding listener tasks; aborted when the session ends.
+    pub tunnel_tasks: Vec<tokio::task::AbortHandle>,
+}
+
+impl Drop for SshSession {
+    fn drop(&mut self) {
+        for t in &self.tunnel_tasks {
+            t.abort();
+        }
+    }
 }
 
 // SAFETY: russh's Handle and the mpsc sender are async/tokio types; access is

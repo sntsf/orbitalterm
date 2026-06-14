@@ -22,7 +22,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
     db.query_row(
         "SELECT id, name, type, host, port, username, auth_type, key_path,
                 folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
-                sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth
+                sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -49,6 +49,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 custom_hosts: row.get::<_, String>(19).unwrap_or_default(),
                 rdp_security: row.get::<_, String>(20).unwrap_or_else(|_| "negotiate".to_string()),
                 rdp_color_depth: row.get::<_, i64>(21).unwrap_or(32),
+                tunnels: row.get::<_, String>(22).unwrap_or_default(),
             })
         },
     )
@@ -124,6 +125,59 @@ pub async fn has_password(connection_id: String) -> Result<bool, String> {
 /// and call `connect_ssh` again with them. Returned when a username is missing
 /// or password auth has no password available.
 pub const NEED_CREDENTIALS: &str = "NEED_CREDENTIALS";
+
+/// Parse the per-connection tunnel spec. One tunnel per line:
+///   "L <listenPort> <destHost> <destPort>"   (local forward, -L)
+/// Lines that are empty, comments (#) or malformed are ignored.
+fn parse_tunnels(spec: &str) -> Vec<(char, u16, String, u16)> {
+    spec.lines()
+        .filter_map(|line| {
+            let l = line.trim();
+            if l.is_empty() || l.starts_with('#') {
+                return None;
+            }
+            let p: Vec<&str> = l.split_whitespace().collect();
+            if p.len() != 4 {
+                return None;
+            }
+            let kind = p[0].chars().next()?.to_ascii_uppercase();
+            Some((kind, p[1].parse().ok()?, p[2].to_string(), p[3].parse().ok()?))
+        })
+        .collect()
+}
+
+/// Local port forward (-L): listen on 127.0.0.1:listen_port and tunnel each
+/// accepted connection to dest_host:dest_port through the SSH session.
+async fn local_forward(
+    handle: Arc<russh::client::Handle<SshHandler>>,
+    listen_port: u16,
+    dest_host: String,
+    dest_port: u16,
+) {
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", listen_port)).await {
+        Ok(l) => l,
+        Err(e) => { eprintln!("[ssh] tunnel -L {listen_port}: bind failed: {e}"); return; }
+    };
+    loop {
+        let (mut socket, peer) = match listener.accept().await {
+            Ok(x) => x,
+            Err(_) => break,
+        };
+        let h = Arc::clone(&handle);
+        let dhost = dest_host.clone();
+        tokio::spawn(async move {
+            let channel = match h
+                .channel_open_direct_tcpip(dhost, dest_port as u32, peer.ip().to_string(), peer.port() as u32)
+                .await
+            {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let mut stream = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+        });
+    }
+}
 
 #[tauri::command]
 pub async fn connect_ssh(
@@ -251,7 +305,17 @@ pub async fn connect_ssh(
         let _ = app2.emit(&format!("ssh-closed-{sid2}"), ());
     });
 
-    sessions.lock().unwrap().insert(session_id.clone(), SshSession { tx, handle });
+    // Set up port-forwarding tunnels (background tasks; aborted on disconnect).
+    let mut tunnel_tasks = Vec::new();
+    for (kind, listen_port, dest_host, dest_port) in parse_tunnels(&connection.tunnels) {
+        if kind == 'L' {
+            let task = tokio::spawn(local_forward(Arc::clone(&handle), listen_port, dest_host, dest_port));
+            tunnel_tasks.push(task.abort_handle());
+        }
+        // -R / -D are handled in a later wave.
+    }
+
+    sessions.lock().unwrap().insert(session_id.clone(), SshSession { tx, handle, tunnel_tasks });
     Ok(session_id)
 }
 

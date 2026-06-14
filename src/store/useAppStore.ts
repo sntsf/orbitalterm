@@ -101,6 +101,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         icon: DEFAULT_CONN_ICON[type] ?? DEFAULT_CONN_ICON["rdp"],
         url: "",
         custom_hosts: "",
+        tunnels: "",
       });
       const connections = await dbGetConnections();
       set({ connections, selectedConnectionId: created.id, selectedFolderId: null, selectedGroupId: null, isCreatingNew: false });
