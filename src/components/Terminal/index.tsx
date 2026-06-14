@@ -26,6 +26,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const termRef = useRef<XTerm | null>(null);
 
   // In-terminal search (Ctrl+F)
   const [showSearch, setShowSearch] = useState(false);
@@ -102,6 +103,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
       scrollback: 5000,
       allowProposedApi: true,
     });
+    termRef.current = term;
 
     const fitAddon = new FitAddon();
     fitAddonRef.current = fitAddon;
@@ -266,6 +268,10 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
 
       // Initial size sync
       await resizePty(sessionId, term.cols, term.rows);
+
+      // Focus the terminal so the user can type immediately (the credential
+      // prompt / SFTP panel may have taken focus during connect).
+      setTimeout(() => term.focus(), 80);
     };
 
     init();
@@ -346,7 +352,8 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
               className="px-1 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">✕</button>
           </div>
         )}
-        <div ref={containerRef} className="w-full h-full" style={{ padding: "4px" }} />
+        <div ref={containerRef} className="w-full h-full" style={{ padding: "4px" }}
+          onMouseDown={() => termRef.current?.focus()} />
         {credPrompt && (
           <CredentialPrompt
             needUser={credPrompt.needUser}
