@@ -306,7 +306,7 @@ function ConnectionProperties() {
       </div>
 
       {/* Fields */}
-      <div className="flex-1 overflow-y-auto px-3 py-1.5 space-y-1.5 min-h-0">
+      <div className="flex-1 overflow-y-auto px-3 py-1 space-y-1 min-h-0">
         <Row label={t("propType")}>
           <select
             value={type}
@@ -568,14 +568,14 @@ function ProgressRing({ pct, indeterminate }: { pct: number; indeterminate?: boo
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="grid grid-cols-[76px_1fr] items-start gap-1">
-      <span className="text-[11px] text-[var(--color-text-muted)] pt-1 truncate">{label}</span>
+      <span className="text-[11px] text-[var(--color-text-muted)] pt-0.5 truncate">{label}</span>
       <div>{children}</div>
     </div>
   );
 }
 
 const inp =
-  "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-px text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";
+  "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-px text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";
 
 // ── Folder / Group properties ──────────────────────────────────────────────────
 
@@ -674,7 +674,7 @@ function ItemEditor({
         </span>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-3 py-1.5 space-y-1.5 min-h-0">
+      <div className="flex-1 overflow-y-auto px-3 py-1 space-y-1 min-h-0">
         <Row label={t("propName")}>
           <input value={name} onChange={(e) => setName(e.target.value)} className={inp} />
         </Row>
