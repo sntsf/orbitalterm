@@ -55,6 +55,11 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
   const [pathInput, setPathInput] = useState("/");
   const [editingPath, setEditingPath] = useState(false);
   const [entries, setEntries] = useState<SftpEntry[]>([]);
+  // Live mirrors so the (single) OS drag-drop listener reads the current path /
+  // entries instead of values captured when it was first registered — otherwise
+  // a dropped file uploads both here and at the connection's initial path.
+  const currentPathRef = useRef("/");
+  const entriesRef = useRef<SftpEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [disconnected, setDisconnected] = useState(false);
@@ -137,7 +142,9 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
     try {
       const result = await sftpListDir(sid, path);
       setEntries(result);
+      entriesRef.current = result;
       setCurrentPath(path);
+      currentPathRef.current = path;
       setPathInput(path);
       setSelected(new Set());
       setExpandedDirs(new Set());
@@ -205,18 +212,21 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
 
   const doUpload = useCallback(async (localPaths: string[]) => {
     if (!sessionId) return;
-    const toUpload = resolveUploadOverwrites(localPaths, new Set(entries.map((e) => e.name)));
+    // Read the CURRENT path/entries from refs so a single, stable drag-drop
+    // listener always targets the folder the user is viewing.
+    const dir = currentPathRef.current;
+    const toUpload = resolveUploadOverwrites(localPaths, new Set(entriesRef.current.map((e) => e.name)));
     if (toUpload.length === 0) return;
     useTransferStore.getState().enqueue(toUpload.map((localPath) => {
       const fileName = localPath.split(/[\\/]/).pop() ?? "file";
-      const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
+      const remotePath = dir === "/" ? `/${fileName}` : `${dir}/${fileName}`;
       return {
         label: fileName, dir: "up" as const,
         run: () => sftpUpload(sessionId, localPath, remotePath),
-        onComplete: () => loadDir(sessionId, currentPath),
+        onComplete: () => loadDir(sessionId, currentPathRef.current),
       };
     }));
-  }, [sessionId, currentPath, loadDir, entries]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionId, loadDir]);
 
   const doDownload = useCallback(async (remoteEntries: SftpEntry[], destDir: string) => {
     if (!sessionId) return;
@@ -277,7 +287,7 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
     setDisconnected(false);
     const home = username ? `/home/${username}` : "/";
     sftpListDir(sessionId, home)
-      .then((r) => { setEntries(r); setCurrentPath(home); setPathInput(home); })
+      .then((r) => { setEntries(r); entriesRef.current = r; setCurrentPath(home); currentPathRef.current = home; setPathInput(home); })
       .catch(() => loadDir(sessionId, "/"));
   }, [sessionId, username, loadDir]);
 

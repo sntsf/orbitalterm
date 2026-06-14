@@ -615,6 +615,10 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   const [remoteSelected, setRemoteSelected] = useState<Set<string>>(new Set());
   const remoteLastClick = useRef<string | null>(null);
   const remoteFlatRowsRef = useRef<AnyEntry[]>([]);
+  // Live mirrors so the (single) OS drag-drop listener always reads the current
+  // remote path / entries instead of a value captured at registration time.
+  const remotePathRef = useRef(remotePath);
+  const remoteEntriesRef = useRef<SftpEntry[]>([]);
   // OS file drag-drop onto the remote panel (upload from the local PC).
   const remotePanelRef = useRef<HTMLDivElement>(null);
   const [osDragOverRemote, setOsDragOverRemote] = useState(false);
@@ -697,7 +701,9 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
     try {
       const result = await sftpListDir(sid, p);
       setRemoteEntries(result);
+      remoteEntriesRef.current = result;
       setRemotePath(p);
+      remotePathRef.current = p;
       setRemoteSelected(new Set());
       remoteLastClick.current = null;
     } catch (err) {
@@ -714,18 +720,21 @@ export function SftpDualPane({ tab }: { tab: Tab }) {
   const doUploadLocalPaths = useCallback(async (paths: string[]) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    const toUpload = resolveUploadOverwrites(paths, new Set(remoteEntries.map((e) => e.name)));
+    // Read the CURRENT path/entries from refs — the listener is registered once
+    // and must not act on a path captured when it was first attached.
+    const dir = remotePathRef.current;
+    const toUpload = resolveUploadOverwrites(paths, new Set(remoteEntriesRef.current.map((e) => e.name)));
     if (toUpload.length === 0) return;
     useTransferStore.getState().enqueue(toUpload.map((localPath) => {
       const fileName = localPath.split(/[\\/]/).pop() ?? "file";
-      const dest = remotePath === "/" ? `/${fileName}` : `${remotePath}/${fileName}`;
+      const dest = dir === "/" ? `/${fileName}` : `${dir}/${fileName}`;
       return {
         label: fileName, dir: "up" as const,
         run: () => sftpUpload(sid, localPath, dest),
-        onComplete: () => loadRemote(sid, remotePath),
+        onComplete: () => loadRemote(sid, remotePathRef.current),
       };
     }));
-  }, [remotePath, loadRemote, remoteEntries]);
+  }, [loadRemote]);
 
   // Drag files from the OS onto the REMOTE panel to upload them there.
   useEffect(() => {

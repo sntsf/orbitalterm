@@ -31,6 +31,11 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
   const [pathInput, setPathInput] = useState("/");
   const [editingPath, setEditingPath] = useState(false);
   const [entries, setEntries] = useState<FtpEntry[]>([]);
+  // Live mirrors so the single OS drag-drop listener reads the current path /
+  // entries instead of values captured at registration (prevents uploads going
+  // to both the current folder and the connection's initial path).
+  const currentPathRef = useRef("/");
+  const entriesRef = useRef<FtpEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [disconnected, setDisconnected] = useState(false);
@@ -86,7 +91,9 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
     try {
       const result = await ftpListDir(sid, path);
       setEntries(result);
+      entriesRef.current = result;
       setCurrentPath(path);
+      currentPathRef.current = path;
       setPathInput(path);
       setSelected(new Set());
     } catch (err) {
@@ -100,18 +107,19 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
 
   const doUpload = useCallback(async (localPaths: string[]) => {
     if (!sessionId) return;
-    const toUpload = resolveUploadOverwrites(localPaths, new Set(entries.map((e) => e.name)));
+    const dir = currentPathRef.current;
+    const toUpload = resolveUploadOverwrites(localPaths, new Set(entriesRef.current.map((e) => e.name)));
     if (toUpload.length === 0) return;
     useTransferStore.getState().enqueue(toUpload.map((localPath) => {
       const fileName = localPath.split(/[\\/]/).pop() ?? "file";
-      const remotePath = currentPath === "/" ? `/${fileName}` : `${currentPath}/${fileName}`;
+      const remotePath = dir === "/" ? `/${fileName}` : `${dir}/${fileName}`;
       return {
         label: fileName, dir: "up" as const,
         run: () => ftpUpload(sessionId, localPath, remotePath),
-        onComplete: () => loadDir(sessionId, currentPath),
+        onComplete: () => loadDir(sessionId, currentPathRef.current),
       };
     }));
-  }, [sessionId, currentPath, loadDir, entries]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionId, loadDir]);
 
   // Drag files from the OS onto the panel to upload them to the current folder.
   useEffect(() => {
