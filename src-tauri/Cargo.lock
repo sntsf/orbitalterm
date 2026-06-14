@@ -2884,6 +2884,7 @@ dependencies = [
  "des",
  "dirs 5.0.1",
  "image",
+ "native-tls",
  "pbkdf2 0.12.2",
  "pkg-config",
  "portable-pty",
@@ -4485,6 +4486,7 @@ dependencies = [
  "futures-lite",
  "lazy-regex",
  "log",
+ "native-tls",
  "thiserror 2.0.18",
 ]
 

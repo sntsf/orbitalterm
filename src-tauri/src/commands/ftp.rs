@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::io::Cursor;
-use suppaftp::{FtpStream, types::FileType};
+use suppaftp::{NativeTlsFtpStream, NativeTlsConnector, types::FileType};
 use tauri::{Emitter, State};
 use uuid::Uuid;
 
@@ -106,25 +106,44 @@ pub async fn ftp_connect(
 ) -> Result<String, String> {
     let connection = load_connection(&connection_id)?;
     let addr = format!("{}:{}", connection.host, connection.port);
-
-    let mut stream = FtpStream::connect(&addr)
-        .map_err(|e| format!("FTP connect failed: {e}"))?;
-
+    let domain = connection.host.clone();
     let password = crate::commands::sessions::get_saved_password_pub(&connection_id)
         .unwrap_or_default();
+
+    // Build a lenient TLS connector (accepts self-signed certs, like the SSH
+    // accept-any-host-key posture) so internal FTPS servers just work.
+    let tls = native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .build()
+        .map_err(|e| format!("TLS init failed: {e}"))?;
+    let connector = NativeTlsConnector::from(tls);
+
+    // Port 990 → implicit FTPS. Otherwise try explicit FTPS (AUTH TLS) and fall
+    // back to plain FTP if the server doesn't support it. NativeTlsFtpStream is
+    // plain until upgraded, so the same type covers both cases.
+    let mut stream = if connection.port == 990 {
+        NativeTlsFtpStream::connect_secure_implicit(&addr, connector, &domain)
+            .map_err(|e| format!("FTPS connect failed: {e}"))?
+    } else {
+        let plain = NativeTlsFtpStream::connect(&addr)
+            .map_err(|e| format!("FTP connect failed: {e}"))?;
+        match plain.into_secure(connector, &domain) {
+            Ok(sec) => sec,
+            Err(_) => NativeTlsFtpStream::connect(&addr)
+                .map_err(|e| format!("FTP connect failed: {e}"))?,
+        }
+    };
+
     stream
         .login(&connection.username, &password)
         .map_err(|e| format!("FTP login failed: {e}"))?;
-
     stream
         .transfer_type(FileType::Binary)
         .map_err(|e| format!("FTP binary mode failed: {e}"))?;
 
     let session_id = Uuid::new_v4().to_string();
-    ftp_sessions
-        .lock()
-        .unwrap()
-        .insert(session_id.clone(), FtpConn { stream });
+    ftp_sessions.lock().unwrap().insert(session_id.clone(), FtpConn { stream });
 
     Ok(session_id)
 }
@@ -175,8 +194,7 @@ pub async fn ftp_upload(
     let mut map = ftp_sessions.lock().unwrap();
     let conn = map.get_mut(&session_id).ok_or("FTP session not found")?;
 
-    conn.stream
-        .put_file(&remote_path, &mut Cursor::new(data))
+    conn.stream.put_file(&remote_path, &mut Cursor::new(data))
         .map_err(|e| format!("FTP upload failed: {e}"))?;
 
     app.emit("ftp-upload-progress", FtpProgress { transferred: total, total }).ok();
@@ -198,8 +216,7 @@ pub async fn ftp_download(
     let total = conn.stream.size(&remote_path).unwrap_or(0) as u64;
     app.emit("ftp-download-progress", FtpProgress { transferred: 0, total }).ok();
 
-    let buf = conn.stream
-        .retr_as_buffer(&remote_path)
+    let buf = conn.stream.retr_as_buffer(&remote_path)
         .map_err(|e| format!("FTP download failed: {e}"))?;
 
     let data = buf.into_inner();
