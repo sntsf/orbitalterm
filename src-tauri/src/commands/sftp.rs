@@ -13,6 +13,7 @@ pub struct SftpEntry {
     pub is_dir: bool,
     pub size: u64,
     pub modified: i64,
+    pub mode: u32,
 }
 
 #[derive(Serialize, Clone)]
@@ -190,12 +191,13 @@ pub async fn sftp_list_dir(
             let is_dir = meta.is_dir();
             let size = meta.size.unwrap_or(0);
             let modified = meta.mtime.map(|t| t as i64).unwrap_or(0);
+            let mode = meta.permissions.unwrap_or(0) & 0o7777;
             let entry_path = if path.ends_with('/') {
                 format!("{}{}", path, name)
             } else {
                 format!("{}/{}", path, name)
             };
-            SftpEntry { name, path: entry_path, is_dir, size, modified }
+            SftpEntry { name, path: entry_path, is_dir, size, modified, mode }
         })
         .collect();
 
@@ -333,6 +335,24 @@ pub async fn sftp_rename(
         .rename(&old_path, &new_path)
         .await
         .map_err(|e| format!("rename error: {e}"))
+}
+
+#[tauri::command]
+pub async fn sftp_chmod(
+    sftp_sessions: State<'_, SftpSessionMap>,
+    session_id: String,
+    path: String,
+    mode: u32,
+) -> Result<(), String> {
+    let conn = get_conn!(sftp_sessions, session_id);
+    let attrs = russh_sftp::protocol::FileAttributes {
+        permissions: Some(mode & 0o7777),
+        ..Default::default()
+    };
+    conn.sftp
+        .set_metadata(path, attrs)
+        .await
+        .map_err(|e| format!("chmod error: {e}"))
 }
 
 #[tauri::command]

@@ -189,6 +189,15 @@ fn send_pointer_event(s: &mut TcpStream, buttons: u8, x: u16, y: u16) -> Result<
     write_all(s, &msg)
 }
 
+// ClientCutText (type 6): send the local clipboard to the server (Latin-1).
+fn send_cut_text(s: &mut TcpStream, text: &str) -> Result<(), String> {
+    let bytes: Vec<u8> = text.chars().map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }).collect();
+    let mut msg = vec![6u8, 0, 0, 0];
+    msg.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    msg.extend_from_slice(&bytes);
+    write_all(s, &msg)
+}
+
 // Encode framebuffer (RGBA layout) to JPEG base64
 fn encode_frame(fb: &[u8], width: u32, height: u32) -> Option<String> {
     let expected = (width * height * 4) as usize;
@@ -255,6 +264,9 @@ fn session_thread(
                 }
                 Ok(VncMsg::PointerEvent { buttons, x, y }) => {
                     send_pointer_event(&mut write_s, buttons, x, y).ok();
+                }
+                Ok(VncMsg::CutText { text }) => {
+                    send_cut_text(&mut write_s, &text).ok();
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return,
@@ -373,7 +385,7 @@ fn session_thread(
             }
             // Bell — ignore
             2 => {}
-            // ServerCutText — skip
+            // ServerCutText — forward the remote clipboard to the frontend
             3 => {
                 let mut skip = [0u8; 3];
                 if read_s.read_exact(&mut skip).is_err() { break; }
@@ -382,6 +394,9 @@ fn session_thread(
                 let len = u32::from_be_bytes(lbuf) as usize;
                 let mut text = vec![0u8; len];
                 if read_s.read_exact(&mut text).is_err() { break; }
+                // RFB cut text is Latin-1; lossy UTF-8 is fine for typical text.
+                let s = String::from_utf8_lossy(&text).to_string();
+                app.emit(&format!("vnc-clipboard-{session_id}"), s).ok();
             }
             _ => break, // Unknown — bail
         }
@@ -466,6 +481,17 @@ pub async fn vnc_pointer_event(
         .tx
         .send(VncMsg::PointerEvent { buttons, x, y })
         .map_err(|_| "VNC thread gone".to_string())
+}
+
+#[tauri::command]
+pub async fn vnc_send_clipboard(
+    vnc_sessions: State<'_, VncSessionMap>,
+    session_id: String,
+    text: String,
+) -> Result<(), String> {
+    let map = vnc_sessions.lock().unwrap();
+    let session = map.get(&session_id).ok_or("VNC session not found")?;
+    session.tx.send(VncMsg::CutText { text }).map_err(|_| "VNC thread gone".to_string())
 }
 
 #[tauri::command]

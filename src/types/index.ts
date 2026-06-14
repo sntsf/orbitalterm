@@ -58,4 +58,5 @@ export interface SftpEntry {
   is_dir: boolean;
   size: number;
   modified: number;
+  mode: number;
 }

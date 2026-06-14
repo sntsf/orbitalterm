@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Monitor, Loader, Eye, EyeOff, Maximize2, Minimize2 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
-import { vncConnect, vncDisconnect, vncKeyEvent, vncPointerEvent } from "../../lib/commands";
+import { vncConnect, vncDisconnect, vncKeyEvent, vncPointerEvent, vncSendClipboard } from "../../lib/commands";
 import { useAppStore } from "../../store/useAppStore";
 import { useNotifStore } from "../../store/useNotifStore";
 import { useT } from "../../store/useI18nStore";
@@ -150,6 +150,10 @@ export function VncPane({ tab }: VncPaneProps) {
     listen(`vnc-disconnected-${sid}`, () => {
       closeTab(tab.id);
     }).then((fn) => cleanups.push(fn));
+    // Remote clipboard → local OS clipboard
+    listen<string>(`vnc-clipboard-${sid}`, (e) => {
+      navigator.clipboard.writeText(e.payload).catch(() => {});
+    }).then((fn) => cleanups.push(fn));
 
     return () => cleanups.forEach((fn) => fn());
   }, [status, drawFrame, tab.id, setTabStatus]);
@@ -219,6 +223,15 @@ export function VncPane({ tab }: VncPaneProps) {
     e.preventDefault();
   };
 
+  // Push the local OS clipboard to the server when the viewer gains focus, so
+  // pasting inside the remote desktop works.
+  const handleFocus = () => {
+    if (viewOnly || !sessionIdRef.current) return;
+    navigator.clipboard.readText().then((txt) => {
+      if (txt && sessionIdRef.current) vncSendClipboard(sessionIdRef.current, txt).catch(() => {});
+    }).catch(() => {});
+  };
+
   // ── Connecting spinner ─────────────────────────────────────────────────────
 
   if (status === "connecting") {
@@ -248,6 +261,7 @@ export function VncPane({ tab }: VncPaneProps) {
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onKeyUp={handleKeyUp}
+      onFocus={handleFocus}
     >
       {/* Toolbar */}
       <div className="absolute top-1 right-1 z-10 flex items-center gap-1">

@@ -298,6 +298,10 @@ export async function sftpRename(
   return invoke("sftp_rename", { sessionId, oldPath, newPath });
 }
 
+export async function sftpChmod(sessionId: string, path: string, mode: number): Promise<void> {
+  return invoke("sftp_chmod", { sessionId, path, mode });
+}
+
 export async function sftpCreateFile(sessionId: string, path: string): Promise<void> {
   return invoke("sftp_create_file", { sessionId, path });
 }
@@ -433,6 +437,10 @@ export async function vncPointerEvent(
   y: number,
 ): Promise<void> {
   return invoke("vnc_pointer_event", { sessionId, buttons, x, y });
+}
+
+export async function vncSendClipboard(sessionId: string, text: string): Promise<void> {
+  return invoke("vnc_send_clipboard", { sessionId, text });
 }
 
 export async function vncDisconnect(sessionId: string): Promise<void> {

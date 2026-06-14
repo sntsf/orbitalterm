@@ -2,14 +2,14 @@ import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { flushSync } from "react-dom";
 import {
   Folder, FolderOpen, File, Upload, Download, FolderPlus, FilePlus, RefreshCw,
-  HardDrive, ChevronLeft, Pencil, Trash2, WifiOff, ChevronRight,
+  HardDrive, ChevronLeft, Pencil, Trash2, WifiOff, ChevronRight, Lock,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   sftpConnect, sftpConnectFromSsh, sftpListDir, sftpUpload, sftpDownload, sftpMkdir,
-  sftpCreateFile, sftpRename, sftpDelete,
+  sftpCreateFile, sftpRename, sftpDelete, sftpChmod,
 } from "../../lib/commands";
 import { friendlyFsError } from "../../lib/transferErrors";
 import { resolveUploadOverwrites } from "../../lib/overwrite";
@@ -422,6 +422,18 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
     catch (err) { handleError(err); }
   };
 
+  const handleChmod = (entry: SftpEntry) => {
+    if (!sessionId) return;
+    const current = (entry.mode & 0o777).toString(8).padStart(3, "0");
+    const input = window.prompt(`Permisos de "${entry.name}" (octal, ej. 755):`, current);
+    if (input == null) return;
+    const mode = parseInt(input.trim(), 8);
+    if (Number.isNaN(mode)) { setError("Permisos inválidos (usa octal, ej. 644)."); return; }
+    sftpChmod(sessionId, entry.path, mode)
+      .then(() => loadDir(sessionId, currentPath))
+      .catch((err) => handleError(err));
+  };
+
   // ── selection ──────────────────────────────────────────────────────────────
 
   const toggleSelect = (e: React.MouseEvent, entry: SftpEntry) => {
@@ -730,6 +742,8 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
               )}
               <CtxItem icon={<Pencil size={12} />} label="Renombrar"
                 onClick={() => { setRenamingEntry(ctxMenu.entry!); setRenameValue(ctxMenu.entry!.name); setCtxMenu(null); }} />
+              <CtxItem icon={<Lock size={12} />} label="Permisos…"
+                onClick={() => { handleChmod(ctxMenu.entry!); setCtxMenu(null); }} />
               <div className="my-0.5 border-t border-[var(--color-border)]" />
               <CtxItem icon={<Trash2 size={12} />} label="Eliminar" danger
                 onClick={() => { handleDelete(ctxMenu.entry!); setCtxMenu(null); }} />

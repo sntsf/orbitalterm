@@ -27,10 +27,10 @@ use commands::sessions::{
     save_password, send_input, show_rdp_tab_menu,
 };
 use commands::sftp::{
-    sftp_connect, sftp_connect_from_ssh, sftp_create_file, sftp_delete, sftp_disconnect,
+    sftp_chmod, sftp_connect, sftp_connect_from_ssh, sftp_create_file, sftp_delete, sftp_disconnect,
     sftp_download, sftp_list_dir, sftp_mkdir, sftp_rename, sftp_upload,
 };
-use commands::vnc::{vnc_connect, vnc_disconnect, vnc_key_event, vnc_pointer_event};
+use commands::vnc::{vnc_connect, vnc_disconnect, vnc_key_event, vnc_pointer_event, vnc_send_clipboard};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
@@ -224,6 +224,7 @@ pub fn run() {
             sftp_mkdir,
             sftp_create_file,
             sftp_rename,
+            sftp_chmod,
             sftp_delete,
             sftp_disconnect,
             // FTP
@@ -240,6 +241,7 @@ pub fn run() {
             vnc_connect,
             vnc_key_event,
             vnc_pointer_event,
+            vnc_send_clipboard,
             vnc_disconnect,
             // Browser
             browser_open,
