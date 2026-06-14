@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { flushSync } from "react-dom";
 import {
   Folder, FolderOpen, File, Upload, Download, FolderPlus, FilePlus, RefreshCw,
-  HardDrive, ChevronLeft, Pencil, Trash2, WifiOff, ChevronRight, Lock,
+  HardDrive, ChevronLeft, Pencil, Trash2, WifiOff, ChevronRight, Lock, Eye, EyeOff,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -83,6 +83,8 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
   const [newFolderName, setNewFolderName] = useState("");
   const [newFileMode, setNewFileMode] = useState(false);
   const [newFileName, setNewFileName] = useState("");
+  // Hidden (dot-) files are filtered out by default, like a file manager.
+  const [showHidden, setShowHidden] = useState(false);
   const [renamingEntry, setRenamingEntry] = useState<SftpEntry | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
@@ -174,7 +176,8 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
   // ── flatten tree ───────────────────────────────────────────────────────────
 
   const flattenTree = useCallback((items: SftpEntry[], depth: number, continuations: boolean[]): FlatRow[] => {
-    const sorted = [...items].sort((a, b) => {
+    const visible = showHidden ? items : items.filter((e) => !e.name.startsWith("."));
+    const sorted = [...visible].sort((a, b) => {
       if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
@@ -191,7 +194,7 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
       }
     }
     return result;
-  }, [expandedDirs, loadingDirs, dirChildren]);
+  }, [expandedDirs, loadingDirs, dirChildren, showHidden]);
 
   const flatRows = useMemo(() => flattenTree(entries, 0, []), [entries, flattenTree]);
 
@@ -565,17 +568,22 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
       </div>
 
       {/* Action toolbar */}
-      <div className="flex items-center gap-0.5 px-1.5 py-1 border-b border-[var(--color-border)] shrink-0">
+      <div className="flex items-center gap-0.5 px-1.5 py-1 border-b border-[var(--color-border)] shrink-0 flex-wrap">
         <TBtn icon={<Upload size={11} />} label="Upload" onClick={handleUpload} />
-        {selectedFiles.length > 0 && (
-          <TBtn
-            icon={<Download size={11} />}
-            label={selectedFiles.length === 1 ? "Download" : `Download (${selectedFiles.length})`}
-            onClick={handleDownloadSelected}
-          />
-        )}
+        <TBtn
+          icon={<Download size={11} />}
+          label={selectedFiles.length > 1 ? `Download (${selectedFiles.length})` : "Download"}
+          onClick={handleDownloadSelected}
+          disabled={selectedFiles.length === 0}
+        />
         <TBtn icon={<FolderPlus size={11} />} label="Carpeta" onClick={() => setNewFolderMode(true)} />
         <TBtn icon={<FilePlus size={11} />} label="Archivo" onClick={() => setNewFileMode(true)} />
+        <TBtn
+          icon={showHidden ? <EyeOff size={11} /> : <Eye size={11} />}
+          label={showHidden ? "Ocultar" : "Ver ocultos"}
+          onClick={() => setShowHidden((v) => !v)}
+          active={showHidden}
+        />
       </div>
 
       {/* Error banner */}
@@ -758,10 +766,16 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
   );
 }
 
-function TBtn({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+function TBtn({ icon, label, onClick, active = false, disabled = false }: { icon: React.ReactNode; label: string; onClick: () => void; active?: boolean; disabled?: boolean }) {
   return (
-    <button onClick={onClick}
-      className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors">
+    <button onClick={onClick} disabled={disabled}
+      className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] transition-colors ${
+        disabled
+          ? "text-[var(--color-text-muted)] opacity-40 cursor-default"
+          : active
+            ? "bg-[var(--color-accent)] text-white"
+            : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]"
+      }`}>
       {icon}{label}
     </button>
   );

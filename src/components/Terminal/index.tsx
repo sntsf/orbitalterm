@@ -34,6 +34,7 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const { setTabStatus, setTabSessionId, getConnectionById, closeTab } = useAppStore();
   const { fontSize, theme } = usePrefsStore();
+  const paneLang = useI18nStore((s) => s.lang);
 
   // SFTP panel state
   const [showSftp, setShowSftp] = useState(false);
@@ -316,18 +317,23 @@ export function TerminalPane({ tab }: TerminalPaneProps) {
         className="flex flex-col overflow-hidden"
         style={{ width: showSftp ? `${100 - sftpWidth}%` : "100%" }}
       >
-        {/* Toggle button */}
+        {/* Toggle button — labelled so it's easy to find */}
         <div className="absolute top-1 right-1 z-10">
           <button
             onClick={toggleSftp}
-            title={showSftp ? "Hide SFTP panel" : "Show SFTP panel"}
-            className={`p-1 rounded transition-colors ${
+            title={showSftp
+              ? (paneLang === "es" ? "Ocultar vista de ficheros" : "Hide file view")
+              : (paneLang === "es" ? "Mostrar vista de ficheros" : "Show file view")}
+            className={`flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-medium shadow-sm transition-colors ${
               showSftp
                 ? "bg-[var(--color-accent)] text-white"
-                : "bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+                : "bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]"
             }`}
           >
-            <HardDrive size={13} />
+            <HardDrive size={14} />
+            <span>{showSftp
+              ? (paneLang === "es" ? "Ocultar vista de ficheros" : "Hide file view")
+              : (paneLang === "es" ? "Vista de ficheros" : "File view")}</span>
           </button>
         </div>
         {showSearch && (
