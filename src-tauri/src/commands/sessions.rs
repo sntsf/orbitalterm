@@ -23,7 +23,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
         "SELECT id, name, type, host, port, username, auth_type, key_path,
                 folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
                 sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels,
-                rdp_redirect_drives, rdp_gateway
+                rdp_redirect_drives, rdp_gateway, proxy_jump
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -53,6 +53,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 tunnels: row.get::<_, String>(22).unwrap_or_default(),
                 rdp_redirect_drives: row.get::<_, i64>(23).unwrap_or(0) != 0,
                 rdp_gateway: row.get::<_, String>(24).unwrap_or_default(),
+                proxy_jump: row.get::<_, String>(25).unwrap_or_default(),
             })
         },
     )
@@ -255,6 +256,60 @@ async fn socks5_serve(
     Ok(())
 }
 
+/// Parse a ProxyJump spec "[user@]host[:port]".
+fn parse_jump(spec: &str, default_user: &str) -> (String, String, u16) {
+    let s = spec.trim();
+    let (user, rest) = match s.split_once('@') {
+        Some((u, r)) => (u.to_string(), r),
+        None => (default_user.to_string(), s),
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(22)),
+        None => (rest.to_string(), 22u16),
+    };
+    (user, host, port)
+}
+
+/// Authenticate a russh session with a connection's credentials. Used for the
+/// bastion in ProxyJump (the target uses the richer inline flow with prompts).
+async fn ssh_authenticate(
+    sh: &mut russh::client::Handle<SshHandler>,
+    username: &str,
+    connection: &Connection,
+    password: Option<String>,
+) -> Result<(), String> {
+    match connection.auth_type.as_str() {
+        "key" => {
+            if connection.key_path.is_empty() { return Err("Bastion key path is empty".to_string()); }
+            let key = russh_keys::load_secret_key(std::path::Path::new(&connection.key_path), None)
+                .map_err(|e| format!("Bastion key load failed: {e}"))?;
+            let ok = sh.authenticate_publickey(username, Arc::new(key)).await
+                .map_err(|e| format!("Bastion key auth failed: {e}"))?;
+            if !ok { return Err("Bastion key rejected".to_string()); }
+        }
+        "agent" => {
+            let mut agent = russh_keys::agent::client::AgentClient::connect_env().await
+                .map_err(|e| format!("Bastion agent unavailable: {e}"))?;
+            let identities = agent.request_identities().await
+                .map_err(|e| format!("Bastion agent identities failed: {e}"))?;
+            let mut ok = false;
+            for key in identities {
+                let (a, r) = sh.authenticate_future(username, key, agent).await;
+                agent = a;
+                if let Ok(true) = r { ok = true; break; }
+            }
+            if !ok { return Err("Bastion agent rejected".to_string()); }
+        }
+        _ => {
+            let Some(pw) = password else { return Err("Bastion password required".to_string()); };
+            let ok = sh.authenticate_password(username, pw).await
+                .map_err(|e| format!("Bastion password auth failed: {e}"))?;
+            if !ok { return Err("Bastion password rejected".to_string()); }
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn connect_ssh(
     app: AppHandle,
@@ -292,9 +347,35 @@ pub async fn connect_ssh(
         port: connection.port as u16,
         forwards,
     };
-    let mut sh = russh::client::connect(config, addr, handler)
-        .await
-        .map_err(|e| format!("SSH connect failed: {e}"))?;
+
+    // Connect directly, or via a bastion (ProxyJump) when configured. The jump
+    // session is kept alive in SshSession for the lifetime of this connection.
+    let (mut sh, jump_handle) = if connection.proxy_jump.trim().is_empty() {
+        let sh = russh::client::connect(config, addr, handler)
+            .await
+            .map_err(|e| format!("SSH connect failed: {e}"))?;
+        (sh, None)
+    } else {
+        let (juser, jhost, jport) = parse_jump(&connection.proxy_jump, &username);
+        let jconfig = Arc::new(russh::client::Config {
+            keepalive_interval: Some(std::time::Duration::from_secs(30)),
+            ..Default::default()
+        });
+        let jhandler = SshHandler { host: jhost.clone(), port: jport, ..Default::default() };
+        let mut jump = russh::client::connect(jconfig, (jhost.as_str(), jport), jhandler)
+            .await
+            .map_err(|e| format!("Bastion connect failed: {e}"))?;
+        let jpw = password.clone().or_else(|| get_saved_password(&connection_id));
+        ssh_authenticate(&mut jump, &juser, &connection, jpw).await?;
+        let channel = jump
+            .channel_open_direct_tcpip(connection.host.clone(), connection.port as u32, "127.0.0.1", 0)
+            .await
+            .map_err(|e| format!("Bastion → target channel failed: {e}"))?;
+        let sh = russh::client::connect_stream(config, channel.into_stream(), handler)
+            .await
+            .map_err(|e| format!("SSH connect via bastion failed: {e}"))?;
+        (sh, Some(Arc::new(jump)))
+    };
 
     // One russh session authenticates ONCE; the terminal shell and any SFTP
     // browser then share it (MobaXterm-style single session).
@@ -422,7 +503,7 @@ pub async fn connect_ssh(
         }
     }
 
-    sessions.lock().unwrap().insert(session_id.clone(), SshSession { tx, handle, tunnel_tasks });
+    sessions.lock().unwrap().insert(session_id.clone(), SshSession { tx, handle, tunnel_tasks, _jump: jump_handle });
     Ok(session_id)
 }
 

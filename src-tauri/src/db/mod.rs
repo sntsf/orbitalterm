@@ -239,5 +239,11 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE schema_version SET version=9", [])?;
     }
 
+    if ver < 10 {
+        // SSH ProxyJump / bastion host ("[user@]host[:port]").
+        conn.execute("ALTER TABLE connections ADD COLUMN proxy_jump TEXT NOT NULL DEFAULT ''", []).ok();
+        conn.execute("UPDATE schema_version SET version=10", [])?;
+    }
+
     Ok(())
 }

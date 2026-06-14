@@ -34,6 +34,7 @@ export interface Connection {
   tunnels: string;
   rdp_redirect_drives: boolean;
   rdp_gateway: string;
+  proxy_jump: string;
 }
 
 export interface Folder {

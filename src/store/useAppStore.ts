@@ -104,6 +104,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         tunnels: "",
         rdp_redirect_drives: false,
         rdp_gateway: "",
+        proxy_jump: "",
       });
       const connections = await dbGetConnections();
       set({ connections, selectedConnectionId: created.id, selectedFolderId: null, selectedGroupId: null, isCreatingNew: false });

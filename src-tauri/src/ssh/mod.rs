@@ -20,6 +20,9 @@ pub struct SshSession {
     pub handle: Arc<Handle<SshHandler>>,
     // Background port-forwarding listener tasks; aborted when the session ends.
     pub tunnel_tasks: Vec<tokio::task::AbortHandle>,
+    // When connecting via a bastion (ProxyJump), the jump session must stay
+    // alive for the lifetime of this session (the channel rides on it).
+    pub _jump: Option<Arc<Handle<SshHandler>>>,
 }
 
 impl Drop for SshSession {

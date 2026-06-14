@@ -114,6 +114,7 @@ function ConnectionProperties() {
   const [url, setUrl] = useState("");
   const [customHosts, setCustomHosts] = useState("");
   const [tunnels, setTunnels] = useState("");
+  const [proxyJump, setProxyJump] = useState("");
   const [rdpRedirectDrives, setRdpRedirectDrives] = useState(false);
   const [rdpGateway, setRdpGateway] = useState("");
   const [connectError, setConnectError] = useState("");
@@ -145,6 +146,7 @@ function ConnectionProperties() {
         url: url.trim(),
         custom_hosts: customHosts,
         tunnels,
+        proxy_jump: proxyJump.trim(),
         rdp_redirect_drives: rdpRedirectDrives,
         rdp_gateway: rdpGateway.trim(),
       });
@@ -174,6 +176,7 @@ function ConnectionProperties() {
     setUrl(existing.url ?? "");
     setCustomHosts(existing.custom_hosts ?? "");
     setTunnels(existing.tunnels ?? "");
+    setProxyJump(existing.proxy_jump ?? "");
     setRdpRedirectDrives(existing.rdp_redirect_drives ?? false);
     setRdpGateway(existing.rdp_gateway ?? "");
     setPassword("");
@@ -192,7 +195,7 @@ function ConnectionProperties() {
     const timer = setTimeout(() => { doSaveRef.current?.(); }, 600);
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts, tunnels, rdpRedirectDrives, rdpGateway]);
+  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts, tunnels, proxyJump, rdpRedirectDrives, rdpGateway]);
 
   const handleTypeChange = (newType: ConnectionType) => {
     setType(newType);
@@ -430,6 +433,14 @@ function ConnectionProperties() {
           <Row label={t("propNotes")}>
             <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="…"
               onFocus={focus("notes")} onBlur={blur} className={inp + " resize-none"} />
+          </Row>
+        )}
+
+        {(type === "ssh" || type === "sftp") && (
+          <Row label={lang === "es" ? "Bastión" : "Jump host"}>
+            <input value={proxyJump} onChange={(e) => setProxyJump(e.target.value)}
+              placeholder="[usuario@]host[:puerto]"
+              className={inp} />
           </Row>
         )}
 
