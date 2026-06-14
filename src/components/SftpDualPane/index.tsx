@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
-  ChevronLeft, ChevronRight, ChevronDown, RefreshCw, FolderPlus, Pencil, Trash2,
+  ChevronLeft, ChevronRight, RefreshCw, FolderPlus, Pencil, Trash2,
   ArrowRight, ArrowLeft, Loader, WifiOff, HardDrive, Home, Eye, EyeOff,
-  File, Folder, Scissors, ClipboardPaste,
+  File, Folder, Scissors, ClipboardPaste, SquarePlus, SquareMinus,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -211,9 +211,13 @@ function FilePanel({
     onFlatRowsChange?.(flatRows.map((r) => r.entry));
   }, [flatRows]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Expand/collapse a folder inline
-  const handleToggleExpand = async (e: React.MouseEvent, entry: AnyEntry) => {
-    e.stopPropagation();
+  // Focusable list + keyboard cursor (↑/↓/→/←, Enter, Backspace).
+  const listRef = useRef<HTMLDivElement>(null);
+  const cursorRef = useRef<string | null>(null);
+
+  // Expand/collapse a folder inline (event optional — keyboard nav passes null).
+  const handleToggleExpand = async (e: React.MouseEvent | null, entry: AnyEntry) => {
+    e?.stopPropagation();
     if (!entry.is_dir) return;
     if (expandedDirs.has(entry.path)) {
       setExpandedDirs((prev) => { const n = new Set(prev); n.delete(entry.path); return n; });
@@ -228,6 +232,35 @@ function FilePanel({
         }
       }
       setExpandedDirs((prev) => new Set(prev).add(entry.path));
+    }
+  };
+
+  const cursorEntry = () => flatRows.find((r) => r.entry.path === cursorRef.current)?.entry;
+  const moveCursor = (delta: 1 | -1) => {
+    if (flatRows.length === 0) return;
+    const idx = flatRows.findIndex((r) => r.entry.path === cursorRef.current);
+    let next = idx < 0 ? (delta > 0 ? 0 : flatRows.length - 1) : idx + delta;
+    next = Math.max(0, Math.min(flatRows.length - 1, next));
+    const entry = flatRows[next].entry;
+    cursorRef.current = entry.path;
+    onSelect({ shiftKey: false, ctrlKey: false, metaKey: false } as React.MouseEvent, entry);
+    const rows = listRef.current?.querySelectorAll<HTMLElement>("[data-row-path]");
+    if (rows) Array.from(rows).find((el) => el.dataset.rowPath === entry.path)?.scrollIntoView({ block: "nearest" });
+  };
+  const handleListKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); moveCursor(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveCursor(-1); }
+    else if (e.key === "ArrowRight") {
+      const en = cursorEntry();
+      if (en?.is_dir && !expandedDirs.has(en.path)) { e.preventDefault(); handleToggleExpand(null, en); }
+    } else if (e.key === "ArrowLeft") {
+      const en = cursorEntry();
+      if (en?.is_dir && expandedDirs.has(en.path)) { e.preventDefault(); handleToggleExpand(null, en); }
+    } else if (e.key === "Backspace") {
+      e.preventDefault(); onUp();
+    } else if (e.key === "Enter") {
+      const en = cursorEntry();
+      if (en?.is_dir) { e.preventDefault(); onNavigate(en.path); }
     }
   };
 
@@ -355,7 +388,10 @@ function FilePanel({
 
       {/* File list */}
       <div
-        className="flex-1 overflow-y-auto min-h-0 text-xs"
+        ref={listRef}
+        tabIndex={0}
+        onKeyDown={handleListKeyDown}
+        className="flex-1 overflow-y-auto min-h-0 text-xs outline-none"
         onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; onPanelDragOver(e); }}
         onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) onDragLeave(); }}
         onDrop={(e) => { e.preventDefault(); e.stopPropagation(); onDropOnPanel(null); }}
@@ -411,6 +447,7 @@ function FilePanel({
                 return (
                   <tr
                     key={entry.path}
+                    data-row-path={entry.path}
                     draggable
                     className={`cursor-pointer border-b border-[var(--color-border)]/30 ${
                       isFolderDragTarget
@@ -419,7 +456,7 @@ function FilePanel({
                           ? "bg-[var(--color-accent)]/20"
                           : "hover:bg-[var(--color-bg-hover)]"
                     } ${isCut ? "opacity-40" : ""}`}
-                    onClick={(e) => onSelect(e, entry)}
+                    onClick={(e) => { cursorRef.current = entry.path; listRef.current?.focus(); onSelect(e, entry); }}
                     onDoubleClick={() => { if (entry.is_dir) onNavigate(entry.path); }}
                     onContextMenu={(e) => { e.stopPropagation(); onCtxMenu(e, entry); }}
                     onDragStart={(e) => {
@@ -454,8 +491,8 @@ function FilePanel({
                             {isLoading
                               ? <Loader size={9} className="animate-spin" />
                               : isExpanded
-                                ? <ChevronDown size={9} />
-                                : <ChevronRight size={9} />}
+                                ? <SquareMinus size={11} />
+                                : <SquarePlus size={11} />}
                           </button>
                         ) : (
                           <span className="w-[14px] shrink-0" />

@@ -291,41 +291,68 @@ pub async fn sftp_download(
     local_path: String,
 ) -> Result<(), String> {
     let conn = get_conn!(sftp_sessions, session_id);
+    download_path(&app, &conn.sftp, &remote_path, Path::new(&local_path)).await
+}
 
-    let stat = conn
-        .sftp
-        .metadata(&remote_path)
-        .await
-        .map_err(|e| format!("Failed to stat remote file: {e}"))?;
-    let total = stat.size.unwrap_or(0);
-
-    let mut remote_file = conn
-        .sftp
-        .open(&remote_path)
-        .await
-        .map_err(|e| format!("Failed to open remote file: {e}"))?;
-
-    use tokio::io::AsyncReadExt;
-    let chunk_size = 32 * 1024usize;
-    let mut data = Vec::with_capacity(total as usize);
-    let mut buf = vec![0u8; chunk_size];
-    let mut transferred = 0u64;
-    loop {
-        let n = remote_file
-            .read(&mut buf)
+/// Download a remote file, or a directory recursively (creating local dirs).
+/// Boxed because it recurses across an await boundary.
+fn download_path<'a>(
+    app: &'a tauri::AppHandle,
+    sftp: &'a russh_sftp::client::SftpSession,
+    remote_path: &'a str,
+    local_path: &'a Path,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        let stat = sftp
+            .metadata(remote_path)
             .await
-            .map_err(|e| format!("Read error: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        data.extend_from_slice(&buf[..n]);
-        transferred += n as u64;
-        app.emit("sftp-download-progress", SftpProgress { transferred, total }).ok();
-    }
+            .map_err(|e| format!("Failed to stat remote path: {e}"))?;
 
-    std::fs::write(&local_path, &data)
-        .map_err(|e| format!("Failed to write local file: {e}"))?;
-    Ok(())
+        if stat.is_dir() {
+            std::fs::create_dir_all(local_path)
+                .map_err(|e| format!("Failed to create local directory: {e}"))?;
+            let read_dir = sftp
+                .read_dir(remote_path)
+                .await
+                .map_err(|e| format!("readdir error: {e}"))?;
+            let base = remote_path.trim_end_matches('/');
+            for entry in read_dir {
+                let name = entry.file_name();
+                let child_remote = format!("{base}/{name}");
+                let child_local = local_path.join(&name);
+                download_path(app, sftp, &child_remote, &child_local).await?;
+            }
+            return Ok(());
+        }
+
+        let total = stat.size.unwrap_or(0);
+        let mut remote_file = sftp
+            .open(remote_path)
+            .await
+            .map_err(|e| format!("Failed to open remote file: {e}"))?;
+
+        use tokio::io::AsyncReadExt;
+        let chunk_size = 32 * 1024usize;
+        let mut data = Vec::with_capacity(total as usize);
+        let mut buf = vec![0u8; chunk_size];
+        let mut transferred = 0u64;
+        loop {
+            let n = remote_file
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("Read error: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            data.extend_from_slice(&buf[..n]);
+            transferred += n as u64;
+            app.emit("sftp-download-progress", SftpProgress { transferred, total }).ok();
+        }
+
+        std::fs::write(local_path, &data)
+            .map_err(|e| format!("Failed to write local file: {e}"))?;
+        Ok(())
+    })
 }
 
 #[tauri::command]

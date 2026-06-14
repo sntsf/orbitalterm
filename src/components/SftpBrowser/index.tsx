@@ -3,6 +3,7 @@ import { flushSync } from "react-dom";
 import {
   Folder, FolderOpen, File, Upload, Download, FolderPlus, FilePlus, RefreshCw,
   HardDrive, ChevronLeft, Pencil, Trash2, WifiOff, ChevronRight, Lock, Eye, EyeOff,
+  SquarePlus, SquareMinus,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -72,6 +73,8 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
   // Multi-select
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastClickedRef = useRef<string | null>(null);
+  // Focusable file list, for keyboard navigation (↑/↓/→/←, Enter, Backspace).
+  const listRef = useRef<HTMLDivElement>(null);
 
   // Path autocomplete
   const [pathSuggestions, setPathSuggestions] = useState<string[]>([]);
@@ -322,6 +325,39 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
     if (p !== currentPath) navigateTo(p);
   };
 
+  // ── keyboard navigation of the file list ─────────────────────────────────────
+  const cursorEntry = () => flatRows.find((r) => r.entry.path === lastClickedRef.current)?.entry;
+  const moveCursor = (delta: 1 | -1) => {
+    if (flatRows.length === 0) return;
+    const curIdx = flatRows.findIndex((r) => r.entry.path === lastClickedRef.current);
+    let nextIdx = curIdx < 0 ? (delta > 0 ? 0 : flatRows.length - 1) : curIdx + delta;
+    nextIdx = Math.max(0, Math.min(flatRows.length - 1, nextIdx));
+    const entry = flatRows[nextIdx].entry;
+    lastClickedRef.current = entry.path;
+    setSelected(new Set([entry.path]));
+    const rows = listRef.current?.querySelectorAll<HTMLElement>("[data-sftp-path]");
+    if (rows) Array.from(rows).find((el) => el.dataset.sftpPath === entry.path)?.scrollIntoView({ block: "nearest" });
+  };
+  const handleListKeyDown = (e: React.KeyboardEvent) => {
+    // Right=expand, Left=collapse, ↑/↓=move, Enter=open/download, Backspace=go up.
+    if (e.key === "ArrowDown") { e.preventDefault(); moveCursor(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveCursor(-1); }
+    else if (e.key === "ArrowRight") {
+      const entry = cursorEntry();
+      if (entry?.is_dir && !expandedDirs.has(entry.path)) { e.preventDefault(); toggleExpand(entry); }
+    } else if (e.key === "ArrowLeft") {
+      const entry = cursorEntry();
+      if (entry?.is_dir && expandedDirs.has(entry.path)) { e.preventDefault(); toggleExpand(entry); }
+    } else if (e.key === "Backspace") {
+      e.preventDefault(); navigateUp();
+    } else if (e.key === "Enter") {
+      const entry = cursorEntry();
+      if (!entry) return;
+      e.preventDefault();
+      if (entry.is_dir) navigateTo(entry.path); else handleDownloadEntry(entry);
+    }
+  };
+
   // ── connect ────────────────────────────────────────────────────────────────
 
   const handleConnect = async () => {
@@ -362,7 +398,14 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
   // ── download ───────────────────────────────────────────────────────────────
 
   const handleDownloadEntry = async (entry: SftpEntry) => {
-    if (!sessionId || entry.is_dir) return;
+    if (!sessionId) return;
+    // Folders are downloaded recursively into a chosen destination directory.
+    if (entry.is_dir) {
+      const destDir = await openDialog({ directory: true, multiple: false }).catch(() => null) as string | null;
+      if (!destDir) return;
+      await doDownload([entry], destDir);
+      return;
+    }
     const localPath = await saveDialog({ defaultPath: entry.name }).catch(() => null);
     if (!localPath) return;
     flushSync(() => { setTransferFile(`↓ ${entry.name}`); setProgress({ transferred: 0, total: 0 }); });
@@ -373,7 +416,7 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
 
   const handleDownloadSelected = async () => {
     if (!sessionId) return;
-    const toDownload = flatRows.map((r) => r.entry).filter((e) => selected.has(e.path) && !e.is_dir);
+    const toDownload = flatRows.map((r) => r.entry).filter((e) => selected.has(e.path));
     if (toDownload.length === 0) return;
     if (toDownload.length === 1) {
       await handleDownloadEntry(toDownload[0]);
@@ -459,7 +502,7 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
 
   const openCtxMenu = (e: React.MouseEvent, entry?: SftpEntry) => {
     e.preventDefault();
-    if (entry && !entry.is_dir && !selected.has(entry.path)) {
+    if (entry && !selected.has(entry.path)) {
       setSelected(new Set([entry.path]));
     }
     setCtxMenu({ x: e.clientX, y: e.clientY, entry });
@@ -467,7 +510,8 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
 
   // ── derived values ─────────────────────────────────────────────────────────
 
-  const selectedFiles = flatRows.map((r) => r.entry).filter((e) => selected.has(e.path) && !e.is_dir);
+  // Downloadable selection includes folders (downloaded recursively).
+  const selectedFiles = flatRows.map((r) => r.entry).filter((e) => selected.has(e.path));
   const pct = progress.total > 0 ? Math.round(progress.transferred * 100 / progress.total) : 0;
 
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); };
@@ -595,7 +639,7 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
       )}
 
       {/* File list */}
-      <div className="flex-1 overflow-y-auto min-h-0">
+      <div ref={listRef} tabIndex={0} onKeyDown={handleListKeyDown} className="flex-1 overflow-y-auto min-h-0 outline-none">
         {loading ? (
           <div className="flex items-center justify-center h-full text-[var(--color-text-muted)]">
             <RefreshCw size={16} className="animate-spin" />
@@ -647,9 +691,9 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
               {flatRows.map(({ entry, isExpanded, isLoading, isLast, continuations, depth }) => {
                 const isSelected = selected.has(entry.path);
                 return (
-                  <tr key={entry.path}
+                  <tr key={entry.path} data-sftp-path={entry.path}
                     className={`cursor-pointer ${isSelected ? "bg-[var(--color-accent)]/15" : "hover:bg-[var(--color-bg-hover)]"}`}
-                    onClick={(e) => toggleSelect(e, entry)}
+                    onClick={(e) => { listRef.current?.focus(); toggleSelect(e, entry); }}
                     onContextMenu={(e) => { e.stopPropagation(); openCtxMenu(e, entry); }}
                     onDoubleClick={() => { entry.is_dir ? navigateTo(entry.path) : handleDownloadEntry(entry); }}
                   >
@@ -665,8 +709,8 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
                             {isLoading
                               ? <RefreshCw size={10} className="animate-spin" />
                               : isExpanded
-                                ? <ChevronRight size={10} className="rotate-90 transition-transform" />
-                                : <ChevronRight size={10} className="transition-transform" />
+                                ? <SquareMinus size={11} className="transition-transform" />
+                                : <SquarePlus size={11} className="transition-transform" />
                             }
                           </button>
                         ) : (
@@ -741,6 +785,9 @@ export function SftpBrowser({ sessionId, sshSessionId, connectionId, username, o
                 <>
                   <CtxItem icon={<FolderOpen size={12} />} label="Abrir (navegar)"
                     onClick={() => { navigateTo(ctxMenu.entry!.path); setCtxMenu(null); }} />
+                  <CtxItem icon={<Download size={12} />}
+                    label={selectedFiles.length > 1 ? `Descargar ${selectedFiles.length} elementos` : "Descargar carpeta"}
+                    onClick={() => { selectedFiles.length > 1 ? handleDownloadSelected() : handleDownloadEntry(ctxMenu.entry!); setCtxMenu(null); }} />
                   <CtxItem icon={ctxMenu.entry && expandedDirs.has(ctxMenu.entry.path) ? <ChevronRight size={12} className="rotate-90" /> : <ChevronRight size={12} />}
                     label={ctxMenu.entry && expandedDirs.has(ctxMenu.entry.path) ? "Contraer" : "Expandir"}
                     onClick={() => { toggleExpand(ctxMenu.entry!); setCtxMenu(null); }} />

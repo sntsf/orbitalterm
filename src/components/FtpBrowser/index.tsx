@@ -43,6 +43,7 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastClickedRef = useRef<string | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const [newFolderMode, setNewFolderMode] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
@@ -186,6 +187,34 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
     setEditingPath(false);
     const p = pathInput.trim() || "/";
     if (p !== currentPath) navigateTo(p);
+  };
+
+  // ── keyboard navigation of the file list ─────────────────────────────────────
+  // FTP is a flat listing (no inline tree), so → / Enter on a folder navigates
+  // into it and ← / Backspace goes up a directory.
+  const cursorEntry = () => entries.find((e) => e.path === lastClickedRef.current);
+  const moveCursor = (delta: 1 | -1) => {
+    if (entries.length === 0) return;
+    const idx = entries.findIndex((e) => e.path === lastClickedRef.current);
+    let next = idx < 0 ? (delta > 0 ? 0 : entries.length - 1) : idx + delta;
+    next = Math.max(0, Math.min(entries.length - 1, next));
+    const entry = entries[next];
+    lastClickedRef.current = entry.path;
+    setSelected(new Set([entry.path]));
+    const rows = listRef.current?.querySelectorAll<HTMLElement>("[data-ftp-path]");
+    if (rows) Array.from(rows).find((el) => el.dataset.ftpPath === entry.path)?.scrollIntoView({ block: "nearest" });
+  };
+  const handleListKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); moveCursor(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveCursor(-1); }
+    else if (e.key === "ArrowRight" || e.key === "Enter") {
+      const en = cursorEntry();
+      if (!en) return;
+      e.preventDefault();
+      if (en.is_dir) navigateTo(en.path); else if (e.key === "Enter") handleDownloadEntry(en);
+    } else if (e.key === "ArrowLeft" || e.key === "Backspace") {
+      e.preventDefault(); navigateUp();
+    }
   };
 
   // ── connect ────────────────────────────────────────────────────────────────
@@ -378,7 +407,7 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
       )}
 
       {/* File list */}
-      <div className="flex-1 overflow-y-auto min-h-0">
+      <div ref={listRef} tabIndex={0} onKeyDown={handleListKeyDown} className="flex-1 overflow-y-auto min-h-0 outline-none">
         {loading ? (
           <div className="flex items-center justify-center h-full text-[var(--color-text-muted)]">
             <RefreshCw size={16} className="animate-spin" />
@@ -418,9 +447,9 @@ export function FtpBrowser({ sessionId, connectionId, onConnect, onDisconnect }:
               {entries.map((entry) => {
                 const isSelected = selected.has(entry.path);
                 return (
-                  <tr key={entry.path}
+                  <tr key={entry.path} data-ftp-path={entry.path}
                     className={`cursor-pointer ${isSelected ? "bg-[var(--color-accent)]/15" : "hover:bg-[var(--color-bg-hover)]"}`}
-                    onClick={(e) => toggleSelect(e, entry)}
+                    onClick={(e) => { listRef.current?.focus(); toggleSelect(e, entry); }}
                     onContextMenu={(e) => { e.stopPropagation(); openCtxMenu(e, entry); }}
                     onDoubleClick={() => { entry.is_dir ? navigateTo(entry.path) : handleDownloadEntry(entry); }}
                   >
