@@ -100,6 +100,12 @@ src-tauri/target/release/bundle/
 
 ## Instalación en Linux
 
+> **¿Qué archivo descargar?** En cada release hay dos familias de paquetes Linux:
+> - **Sin sufijo** (`OrbitalTerm_<v>_amd64.deb`, etc.) → compilados contra **FreeRDP 3**. Para **Ubuntu 25.04 / 26.04** y derivados modernos (usan `libfreerdp3-3` / `libwinpr3-3`).
+> - **Con sufijo `_ubuntu24.04`** → compilados contra **FreeRDP 2**. Para **Ubuntu 24.04** y anteriores (usan `libfreerdp2-2` / `libwinpr2-2`).
+>
+> Instalar el paquete equivocado hará que la app no arranque porque le faltará la versión de FreeRDP correspondiente.
+
 ### Opción 1 — AppImage (sin instalar, recomendada)
 
 No requiere instalación ni dependencias adicionales. Funciona en cualquier distribución Linux x86_64.

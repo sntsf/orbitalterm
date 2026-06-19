@@ -43,19 +43,12 @@ jobs:
             }
             return release.id.toString();
 
-  build-tauri:
+  # ---------------------------------------------------------------------------
+  # Windows
+  # ---------------------------------------------------------------------------
+  build-windows:
     needs: create-release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: ubuntu-24.04
-            args: ''
-          - platform: windows-latest
-            args: ''
-
-    runs-on: ${{ matrix.platform }}
-
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -87,30 +80,13 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
-      - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-24.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            freerdp2-dev \
-            libwinpr2-dev \
-            libssl-dev \
-            pkg-config
-
       - name: Install Windows dependencies
-        if: matrix.platform == 'windows-latest'
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
           choco install strawberryperl -y
           refreshenv
 
-      - name: Build OrbitalRdpHost.exe (Windows only)
-        if: matrix.platform == 'windows-latest'
+      - name: Build OrbitalRdpHost.exe
         shell: cmd
         run: |
           set "CSC="
@@ -138,8 +114,7 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
-      - name: Write Windows bundle config (Windows only)
-        if: matrix.platform == 'windows-latest'
+      - name: Write Windows bundle config
         shell: bash
         run: |
           echo '{"bundle":{"resources":{"OrbitalRdpHost.exe":"OrbitalRdpHost.exe"}}}' \
@@ -151,4 +126,174 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: ${{ matrix.args }}
+
+  # ---------------------------------------------------------------------------
+  # Linux — FreeRDP 3 (Ubuntu 25.04 "plucky", 26.04 "resolute" and newer)
+  #
+  # Built inside an ubuntu:26.04 container because the GitHub-hosted ubuntu
+  # runners (24.04) only ship FreeRDP 2 in their repos. build.rs probes
+  # freerdp3 first, so it links against FreeRDP 3 here, and the .deb depends
+  # (already set to libfreerdp3-3 in tauri.conf.json) match the binary.
+  #
+  # These artifacts keep the DEFAULT names (no suffix), e.g.
+  #   OrbitalTerm_<v>_amd64.deb / .AppImage / .rpm
+  # ---------------------------------------------------------------------------
+  build-linux-freerdp3:
+    needs: create-release
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    steps:
+      # The base image is minimal: install everything the build (and the
+      # JS-based GitHub Actions that follow) need before checking out.
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git curl wget file ca-certificates xz-utils unzip \
+            build-essential pkg-config libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev \
+            librsvg2-dev patchelf \
+            freerdp3-dev libwinpr3-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Sync version with the tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Building OrbitalTerm $VERSION (tag $GITHUB_REF_NAME)"
+          node -e "for (const f of ['src-tauri/tauri.conf.json','package.json']) { const j=require('./'+f); j.version=process.argv[1]; require('fs').writeFileSync(f, JSON.stringify(j, null, 2) + '\n'); }" "$VERSION"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build (FreeRDP 3)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+
+  # ---------------------------------------------------------------------------
+  # Linux — FreeRDP 2 (Ubuntu 24.04 and older)
+  #
+  # The GitHub-hosted ubuntu-24.04 runner only has FreeRDP 2, so build.rs links
+  # against it. The .deb depends must therefore be rewritten to the FreeRDP 2
+  # runtime packages (the default config targets FreeRDP 3).
+  #
+  # tauri-action runs WITHOUT releaseId (build only); we rename the artifacts
+  # with an "_ubuntu24.04" suffix and upload them ourselves so they don't
+  # collide with the FreeRDP 3 artifacts on the same release.
+  # ---------------------------------------------------------------------------
+  build-linux-freerdp2:
+    needs: create-release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Sync version with the tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Building OrbitalTerm $VERSION (tag $GITHUB_REF_NAME)"
+          node -e "for (const f of ['src-tauri/tauri.conf.json','package.json']) { const j=require('./'+f); j.version=process.argv[1]; require('fs').writeFileSync(f, JSON.stringify(j, null, 2) + '\n'); }" "$VERSION"
+
+      # This build links FreeRDP 2, so the .deb must depend on the FreeRDP 2
+      # runtime libraries instead of the FreeRDP 3 ones in the default config.
+      - name: Point .deb dependencies at FreeRDP 2
+        shell: bash
+        run: |
+          node -e "const f='src-tauri/tauri.conf.json'; const j=require('./'+f); j.bundle.linux.deb.depends=['libwebkit2gtk-4.1-0','libgtk-3-0','libfreerdp-client2-2','libfreerdp2-2','libwinpr2-2']; require('fs').writeFileSync(f, JSON.stringify(j, null, 2) + '\n');"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Linux dependencies (FreeRDP 2)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            freerdp2-dev \
+            libwinpr2-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build (FreeRDP 2, no upload)
+        uses: tauri-apps/tauri-action@v0
+        # No releaseId → tauri-action only builds; we upload renamed assets below.
+
+      - name: Add "_ubuntu24.04" suffix to the artifacts
+        shell: bash
+        run: |
+          cd src-tauri/target/release/bundle
+          shopt -s nullglob
+          for f in deb/*.deb rpm/*.rpm appimage/*.AppImage; do
+            ext="${f##*.}"
+            dir="$(dirname "$f")"
+            base="$(basename "$f" ".$ext")"
+            mv "$f" "$dir/${base}_ubuntu24.04.${ext}"
+            echo "Renamed -> $dir/${base}_ubuntu24.04.${ext}"
+          done
+
+      - name: Upload FreeRDP 2 assets to the release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const release_id = ${{ needs.create-release.outputs.release_id }};
+            const { owner, repo } = context.repo;
+            const base = 'src-tauri/target/release/bundle';
+            for (const d of ['deb', 'rpm', 'appimage']) {
+              const full = path.join(base, d);
+              if (!fs.existsSync(full)) continue;
+              for (const name of fs.readdirSync(full)) {
+                if (!/\.(deb|rpm|AppImage)$/.test(name)) continue;
+                const file = path.join(full, name);
+                console.log('Uploading', name);
+                await github.rest.repos.uploadReleaseAsset({
+                  owner, repo, release_id, name,
+                  data: fs.readFileSync(file),
+                });
+              }
+            }
