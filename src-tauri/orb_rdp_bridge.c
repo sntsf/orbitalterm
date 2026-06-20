@@ -231,6 +231,7 @@ static UINT orb_cliprdr_monitor_ready(CliprdrClientContext *cliprdr,
 {
     (void)ev;
     OrbContext *ctx = (OrbContext *)cliprdr->custom;
+    fprintf(stderr, "[orb-clip] monitor_ready\n");
 
     /* Announce capabilities */
     CLIPRDR_GENERAL_CAPABILITY_SET genCap = { 0 };
@@ -275,6 +276,8 @@ static UINT orb_cliprdr_format_list(CliprdrClientContext *cliprdr,
     for (UINT32 i = 0; i < list->numFormats; i++) {
         if (list->formats[i].formatId == CF_UNICODETEXT) { has_text = TRUE; break; }
     }
+    fprintf(stderr, "[orb-clip] server format list: numFormats=%u has_text=%d\n",
+            list->numFormats, has_text);
     if (has_text) {
         CLIPRDR_FORMAT_DATA_REQUEST req = { 0 };
         req.requestedFormatId = CF_UNICODETEXT;
@@ -337,6 +340,8 @@ static UINT orb_cliprdr_format_data_request(CliprdrClientContext *cliprdr,
                                               const CLIPRDR_FORMAT_DATA_REQUEST *req)
 {
     OrbContext *ctx = (OrbContext *)cliprdr->custom;
+    fprintf(stderr, "[orb-clip] server requested our clipboard (format=%u)\n",
+            req->requestedFormatId);
 
     if (req->requestedFormatId != CF_UNICODETEXT) {
         CLIPRDR_FORMAT_DATA_RESPONSE resp = { 0 };
@@ -432,6 +437,7 @@ static UINT orb_cliprdr_format_data_response(
 
     const BYTE *data = response->requestedFormatData;
     UINT32      len  = CLIP_HDR(*response).dataLen; /* bytes */
+    fprintf(stderr, "[orb-clip] received remote clipboard data: %u bytes\n", len);
     if (!data || len < 2 || !ctx->on_clipboard)
         return CHANNEL_RC_OK;
 
@@ -468,6 +474,7 @@ static void orb_channel_connected(rdpContext *context,
         ctx->disp = (DispClientContext *)e->pInterface;
         ctx->disp->DisplayControlCaps = orb_disp_caps;
     } else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
+        fprintf(stderr, "[orb-clip] cliprdr channel CONNECTED\n");
         ctx->cliprdr = (CliprdrClientContext *)e->pInterface;
         ctx->cliprdr->custom                  = ctx;
         ctx->cliprdr->MonitorReady             = orb_cliprdr_monitor_ready;
@@ -661,6 +668,7 @@ static void *orb_event_loop(void *arg)
          * the new format list here. */
         if (ctx->clipboard_dirty && ctx->cliprdr) {
             ctx->clipboard_dirty = 0;
+            fprintf(stderr, "[orb-clip] advertising CF_UNICODETEXT to server\n");
             CLIPRDR_FORMAT entry = { CF_UNICODETEXT, NULL };
             CLIPRDR_FORMAT_LIST fmt = { 0 };
             fmt.numFormats = 1;
@@ -869,6 +877,8 @@ void orb_set_clipboard(OrbRdpSession *session, const char *text)
      * on the event-loop thread (see orb_event_loop) — calling ClientFormatList
      * directly from this (Tauri command) thread races the FreeRDP I/O and
      * silently fails to advertise to the server. */
+    fprintf(stderr, "[orb-clip] orb_set_clipboard: %zu bytes (cliprdr=%p)\n",
+            strlen(text), (void *)ctx->cliprdr);
     pthread_mutex_lock(&ctx->clipboard_mutex);
     free(ctx->pending_clipboard);
     ctx->pending_clipboard = strdup(text);
