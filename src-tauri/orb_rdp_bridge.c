@@ -24,6 +24,13 @@
 /* DISP channel for dynamic resize */
 #include <freerdp/client/disp.h>
 
+/* RDPGFX (Graphics Pipeline) — modern codecs (RemoteFX Progressive, H.264).
+ * gdi_graphics_pipeline_init bridges decoded GFX surfaces into the GDI
+ * primary buffer so our EndPaint/dirty-rect path keeps working unchanged. */
+#include <freerdp/client/rdpgfx.h>
+#include <freerdp/channels/rdpgfx.h>
+#include <freerdp/gdi/gfx.h>
+
 /* Clipboard channel */
 #include <freerdp/client/cliprdr.h>
 #include <freerdp/channels/cliprdr.h>
@@ -69,6 +76,7 @@ typedef struct {
 
     DispClientContext    *disp;
     CliprdrClientContext *cliprdr;
+    RdpgfxClientContext  *gfx;
 } OrbContext;
 
 /* -------------------------------------------------------------------------
@@ -315,7 +323,12 @@ static void orb_channel_connected(rdpContext *context,
 {
     OrbContext *ctx = (OrbContext *)context;
 
-    if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
+    if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0) {
+        /* Bridge the Graphics Pipeline into the GDI so decoded GFX surfaces
+         * land in primary_buffer and flow through our normal EndPaint path. */
+        ctx->gfx = (RdpgfxClientContext *)e->pInterface;
+        gdi_graphics_pipeline_init(context->gdi, ctx->gfx);
+    } else if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
         ctx->disp = (DispClientContext *)e->pInterface;
         ctx->disp->DisplayControlCaps = orb_disp_caps;
     } else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
@@ -332,7 +345,12 @@ static void orb_channel_disconnected(rdpContext *context,
 {
     OrbContext *ctx = (OrbContext *)context;
 
-    if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0)
+    if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0) {
+        if (ctx->gfx) {
+            gdi_graphics_pipeline_uninit(context->gdi, ctx->gfx);
+            ctx->gfx = NULL;
+        }
+    } else if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0)
         ctx->disp = NULL;
     else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0)
         ctx->cliprdr = NULL;
@@ -360,6 +378,17 @@ static BOOL orb_pre_connect(freerdp *instance)
     freerdp_settings_set_bool(settings,   FreeRDP_SupportGraphicsPipeline, TRUE);
     freerdp_settings_set_bool(settings,   FreeRDP_RemoteFxCodec,           TRUE);
     freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth,              32);
+
+    /* Graphics Pipeline codecs. Progressive (RFX) is pure-software in FreeRDP
+     * and always available — a big step up from legacy bitmap updates for
+     * scrolling/redraw. H.264/AVC444 give the smoothest video but are only
+     * negotiated when both the server AND this FreeRDP build support them
+     * (FreeRDP silently falls back to progressive otherwise), so enabling them
+     * is safe. These take effect only because the RDPGFX channel is now wired
+     * to the GDI in orb_channel_connected(). */
+    freerdp_settings_set_bool(settings, FreeRDP_GfxProgressive, TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_GfxH264,        TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444,      TRUE);
 
     /* Let FreeRDP measure RTT/bandwidth and adapt update aggressiveness to the
      * link.  On a LAN this keeps latency low; on slower links it avoids
