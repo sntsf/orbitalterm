@@ -804,14 +804,24 @@ pub async fn rdp_set_clipboard(
 /// Read the user's real Linux clipboard (Wayland-native, falls back to X11).
 #[cfg(target_os = "linux")]
 fn read_linux_clipboard() -> Option<String> {
-    let out = std::process::Command::new("wl-paste")
-        .args(["--no-newline", "--type", "text/plain"])
-        .stderr(std::process::Stdio::null())
-        .output();
-    if let Ok(o) = out {
-        if o.status.success() {
-            if let Ok(s) = String::from_utf8(o.stdout) {
-                if !s.is_empty() { return Some(s); }
+    // Try, in order: explicit utf-8 text, plain text, then whatever wl-paste
+    // offers by default. Restricting to "text/plain" alone misses apps that
+    // only advertise "text/plain;charset=utf-8", which returned nothing.
+    let attempts: [&[&str]; 3] = [
+        &["--no-newline", "--type", "text/plain;charset=utf-8"],
+        &["--no-newline", "--type", "text/plain"],
+        &["--no-newline"],
+    ];
+    for args in attempts {
+        if let Ok(o) = std::process::Command::new("wl-paste")
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            if o.status.success() {
+                if let Ok(s) = String::from_utf8(o.stdout) {
+                    if !s.is_empty() { return Some(s); }
+                }
             }
         }
     }
