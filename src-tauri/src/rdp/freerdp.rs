@@ -148,6 +148,9 @@ pub type OrbFrameFn = unsafe extern "C" fn(
 );
 pub type OrbErrorFn =
     unsafe extern "C" fn(user_ctx: *mut std::ffi::c_void, msg: *const std::ffi::c_char);
+/// Callback fired when the REMOTE clipboard changes; `text` is UTF-8.
+pub type OrbClipboardFn =
+    unsafe extern "C" fn(user_ctx: *mut std::ffi::c_void, text: *const std::ffi::c_char);
 
 extern "C" {
     fn orb_session_new(
@@ -163,6 +166,7 @@ extern "C" {
         color_depth: u16,
         on_frame: OrbFrameFn,
         on_error: OrbErrorFn,
+        on_clipboard: OrbClipboardFn,
         user_ctx: *mut std::ffi::c_void,
     ) -> *mut OrbRdpSession;
 
@@ -305,6 +309,23 @@ unsafe extern "C" fn on_frame(
     }
 }
 
+/// Fired when the remote clipboard changes. Forwards the text to the frontend,
+/// which writes it into this machine's clipboard (remote → local sync).
+unsafe extern "C" fn on_clipboard(
+    user_ctx: *mut std::ffi::c_void,
+    text: *const std::ffi::c_char,
+) {
+    if text.is_null() {
+        return;
+    }
+    let state = &*(user_ctx as *const FrameState);
+    let s = std::ffi::CStr::from_ptr(text).to_string_lossy().into_owned();
+    state
+        .app
+        .emit(&format!("rdp-clipboard-{}", state.session_id), s)
+        .ok();
+}
+
 unsafe extern "C" fn on_error(
     user_ctx: *mut std::ffi::c_void,
     msg: *const std::ffi::c_char,
@@ -424,6 +445,7 @@ pub fn launch(
             depth,
             on_frame,
             on_error,
+            on_clipboard,
             user_ctx,
         )
     };

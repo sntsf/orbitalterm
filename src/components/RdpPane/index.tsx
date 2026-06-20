@@ -9,7 +9,6 @@ import {
   rdpKeyInput,
   rdpResizeSession,
   rdpRefreshSession,
-  rdpGetLinuxClipboard,
   rdpSetClipboard,
   rdpWindowsReposition,
   rdpWindowsVisibility,
@@ -20,7 +19,7 @@ import { useNotifStore, NOTIF_H_EXPANDED } from "../../store/useNotifStore";
 import { useT, useI18nStore } from "../../store/useI18nStore";
 import { friendlyConnError } from "../../lib/connErrors";
 import { skipDisconnectSessions } from "../../lib/sessionTransfer";
-import { clipboardWrite } from "../../lib/clipboard";
+import { clipboardRead, clipboardWrite } from "../../lib/clipboard";
 import type { Tab } from "../../types";
 
 function parseMissingClient(msg: string): { pkg: string; rest: string } | null {
@@ -210,6 +209,11 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
         bmp.close();
       });
     }).then((fn) => unlistens.push(fn));
+    // Remote → local: the server told us its clipboard changed; mirror it into
+    // this machine's clipboard so the user can paste it in local apps.
+    listen<string>(`rdp-clipboard-${sessionId}`, (event) => {
+      if (event.payload) clipboardWrite(event.payload).catch(() => {});
+    }).then((fn) => unlistens.push(fn));
     listen<string>(`rdp-error-${sessionId}`, (event) => {
       onSessionError(event.payload);
     }).then((fn) => unlistens.push(fn));
@@ -311,8 +315,9 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
     // Mirror this machine's clipboard into the remote session. The only way to
     // copy locally is to interact with another window (which blurs the canvas),
     // so re-syncing on focus means whatever the user just copied is advertised
-    // to the server and a Ctrl+V inside the remote desktop pastes it.
-    rdpGetLinuxClipboard()
+    // to the server and a Ctrl+V inside the remote desktop pastes it. We read
+    // via Tauri's clipboard plugin (cross-platform, no wl-paste/xclip needed).
+    clipboardRead()
       .then((text) => {
         if (text) rdpSetClipboard(sessionId, text).catch(() => {});
       })

@@ -61,9 +61,10 @@
 typedef struct {
     rdpContext base; /* freerdp casts context pointers — keep this first */
 
-    orb_frame_fn  on_frame;
-    orb_error_fn  on_error;
-    void         *user_ctx;
+    orb_frame_fn     on_frame;
+    orb_error_fn     on_error;
+    orb_clipboard_fn on_clipboard;
+    void            *user_ctx;
 
     char          *pending_clipboard;
     pthread_mutex_t clipboard_mutex;
@@ -259,11 +260,23 @@ static UINT orb_cliprdr_monitor_ready(CliprdrClientContext *cliprdr,
 static UINT orb_cliprdr_format_list(CliprdrClientContext *cliprdr,
                                      const CLIPRDR_FORMAT_LIST *list)
 {
-    (void)list;
     /* Acknowledge remote format advertisement */
     CLIPRDR_FORMAT_LIST_RESPONSE resp = { 0 };
     CLIP_HDR(resp).msgFlags = CB_RESPONSE_OK;
     cliprdr->ClientFormatListResponse(cliprdr, &resp);
+
+    /* Remote → local: if the server is offering Unicode text, request it now so
+     * we can mirror it into this machine's clipboard (the data arrives in
+     * orb_cliprdr_format_data_response). */
+    BOOL has_text = FALSE;
+    for (UINT32 i = 0; i < list->numFormats; i++) {
+        if (list->formats[i].formatId == CF_UNICODETEXT) { has_text = TRUE; break; }
+    }
+    if (has_text) {
+        CLIPRDR_FORMAT_DATA_REQUEST req = { 0 };
+        req.requestedFormatId = CF_UNICODETEXT;
+        cliprdr->ClientFormatDataRequest(cliprdr, &req);
+    }
     return CHANNEL_RC_OK;
 }
 
@@ -360,6 +373,79 @@ static UINT orb_cliprdr_format_data_request(CliprdrClientContext *cliprdr,
     return CHANNEL_RC_OK;
 }
 
+/* Minimal UTF-16LE → UTF-8 converter.  `units` is the number of WCHARs (a
+ * trailing NUL, if present, should not be counted by the caller).  Returns a
+ * malloc'd, NUL-terminated UTF-8 string; caller frees. */
+static char *orb_utf16_to_utf8(const WCHAR *w, size_t units)
+{
+    /* Each UTF-16 unit yields at most 3 UTF-8 bytes (BMP); a surrogate pair
+     * (2 units) yields 4 bytes, so 3 bytes/unit is a safe upper bound. */
+    char *out = (char *)malloc(units * 3 + 1);
+    if (!out) return NULL;
+
+    size_t o = 0;
+    for (size_t i = 0; i < units; i++) {
+        unsigned int cp = (unsigned int)(uint16_t)w[i];
+
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < units) {
+            unsigned int lo = (unsigned int)(uint16_t)w[i + 1];
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                i++;
+            }
+        }
+
+        if (cp < 0x80) {
+            out[o++] = (char)cp;
+        } else if (cp < 0x800) {
+            out[o++] = (char)(0xC0 | (cp >> 6));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out[o++] = (char)(0xE0 | (cp >> 12));
+            out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        } else {
+            out[o++] = (char)(0xF0 | (cp >> 18));
+            out[o++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+            out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        }
+    }
+    out[o] = 0;
+    return out;
+}
+
+/* Remote → local: the server sent us the clipboard text we requested in
+ * orb_cliprdr_format_list.  Decode it and hand it to Rust, which writes it to
+ * this machine's clipboard. */
+static UINT orb_cliprdr_format_data_response(
+    CliprdrClientContext *cliprdr,
+    const CLIPRDR_FORMAT_DATA_RESPONSE *response)
+{
+    OrbContext *ctx = (OrbContext *)cliprdr->custom;
+
+    if ((CLIP_HDR(*response).msgFlags & CB_RESPONSE_OK) == 0)
+        return CHANNEL_RC_OK;
+
+    const BYTE *data = response->requestedFormatData;
+    UINT32      len  = CLIP_HDR(*response).dataLen; /* bytes */
+    if (!data || len < 2 || !ctx->on_clipboard)
+        return CHANNEL_RC_OK;
+
+    size_t units = len / 2;
+    /* Drop a trailing NUL unit if present so we don't emit a stray \0. */
+    const WCHAR *w = (const WCHAR *)data;
+    if (units > 0 && w[units - 1] == 0)
+        units--;
+
+    char *utf8 = orb_utf16_to_utf8(w, units);
+    if (utf8) {
+        ctx->on_clipboard(ctx->user_ctx, utf8);
+        free(utf8);
+    }
+    return CHANNEL_RC_OK;
+}
+
 /* -------------------------------------------------------------------------
  * Channel lifecycle – wired up via PubSub in PreConnect
  * The handler signature changed in FreeRDP 3: first arg is rdpContext*.
@@ -381,9 +467,10 @@ static void orb_channel_connected(rdpContext *context,
     } else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
         ctx->cliprdr = (CliprdrClientContext *)e->pInterface;
         ctx->cliprdr->custom                  = ctx;
-        ctx->cliprdr->MonitorReady            = orb_cliprdr_monitor_ready;
-        ctx->cliprdr->ServerFormatList        = orb_cliprdr_format_list;
-        ctx->cliprdr->ServerFormatDataRequest = orb_cliprdr_format_data_request;
+        ctx->cliprdr->MonitorReady             = orb_cliprdr_monitor_ready;
+        ctx->cliprdr->ServerFormatList         = orb_cliprdr_format_list;
+        ctx->cliprdr->ServerFormatDataRequest  = orb_cliprdr_format_data_request;
+        ctx->cliprdr->ServerFormatDataResponse = orb_cliprdr_format_data_response;
     }
 }
 
@@ -587,6 +674,7 @@ OrbRdpSession *orb_session_new(const char   *host,
                                 uint16_t      color_depth,
                                 orb_frame_fn  on_frame,
                                 orb_error_fn  on_error,
+                                orb_clipboard_fn on_clipboard,
                                 void         *user_ctx)
 {
     /* Silence expected-but-harmless warnings that appear on every connection:
@@ -615,10 +703,11 @@ OrbRdpSession *orb_session_new(const char   *host,
     OrbContext  *ctx      = (OrbContext *)instance->context;
     rdpSettings *settings = orb_settings(ctx);
 
-    ctx->on_frame  = on_frame;
-    ctx->on_error  = on_error;
-    ctx->user_ctx  = user_ctx;
-    ctx->session   = sess;
+    ctx->on_frame     = on_frame;
+    ctx->on_error     = on_error;
+    ctx->on_clipboard = on_clipboard;
+    ctx->user_ctx     = user_ctx;
+    ctx->session      = sess;
     pthread_mutex_init(&ctx->clipboard_mutex, NULL);
 
     freerdp_settings_set_string(settings, FreeRDP_ServerHostname, host);
