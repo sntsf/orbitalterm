@@ -309,21 +309,50 @@ unsafe extern "C" fn on_frame(
     }
 }
 
-/// Fired when the remote clipboard changes. Forwards the text to the frontend,
-/// which writes it into this machine's clipboard (remote → local sync).
+/// Fired when the remote clipboard changes. Writes the text into this machine's
+/// clipboard (remote → local sync). Uses wl-copy (Wayland) with an xclip (X11)
+/// fallback, because arboard/the Tauri clipboard plugin does not work on GNOME
+/// Wayland.
 unsafe extern "C" fn on_clipboard(
-    user_ctx: *mut std::ffi::c_void,
+    _user_ctx: *mut std::ffi::c_void,
     text: *const std::ffi::c_char,
 ) {
     if text.is_null() {
         return;
     }
-    let state = &*(user_ctx as *const FrameState);
     let s = std::ffi::CStr::from_ptr(text).to_string_lossy().into_owned();
-    state
-        .app
-        .emit(&format!("rdp-clipboard-{}", state.session_id), s)
-        .ok();
+    write_local_clipboard(&s);
+}
+
+/// Write `text` to the OS clipboard via native CLI tools. wl-copy serves the
+/// Wayland selection (it daemonizes itself); xclip covers X11 sessions.
+fn write_local_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let spawn = |cmd: &str, args: &[&str]| -> bool {
+        let child = Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(mut child) = child {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+                // Drop stdin (close the pipe) so the tool sees EOF and stores it.
+            }
+            let _ = child.wait();
+            true
+        } else {
+            false
+        }
+    };
+
+    if spawn("wl-copy", &[]) {
+        return;
+    }
+    spawn("xclip", &["-selection", "clipboard"]);
 }
 
 unsafe extern "C" fn on_error(

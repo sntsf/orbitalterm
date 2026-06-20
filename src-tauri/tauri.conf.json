@@ -37,7 +37,8 @@
           "libgtk-3-0",
           "libfreerdp-client3-3",
           "libfreerdp3-3",
-          "libwinpr3-3"
+          "libwinpr3-3",
+          "wl-clipboard"
         ]
       }
     },
