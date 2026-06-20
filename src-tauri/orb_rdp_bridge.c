@@ -794,6 +794,19 @@ OrbRdpSession *orb_session_new(const char   *host,
     freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, TRUE);
     freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard,     TRUE);
 
+    /* Disable device redirection. We don't use it, and leaving it on made
+     * freerdp_client_load_addins try to load the rdpdr channel, which isn't
+     * installed; that failure aborted the whole addin load BEFORE cliprdr,
+     * leaving the clipboard channel unconnected. xfreerdp3 +clipboard works
+     * precisely because it loads no rdpdr. */
+    freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection,     FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_RedirectDrives,        FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_RedirectHomeDrive,     FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_RedirectSmartCards,    FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_RedirectPrinters,      FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_RedirectSerialPorts,   FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_RedirectParallelPorts, FALSE);
+
     sess->instance = instance;
     sess->alive    = 1;
 
