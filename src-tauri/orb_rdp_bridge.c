@@ -167,6 +167,38 @@ static BOOL orb_end_paint(rdpContext *context)
 }
 
 /* -------------------------------------------------------------------------
+ * DesktopResize – fired when the server applies a new resolution (e.g. after
+ * we send a monitor layout via orb_resize).  Without this hook FreeRDP never
+ * resizes its framebuffer, so the canvas stays black until the next
+ * server-initiated EndPaint happens to arrive — exactly the "goes black, then
+ * recovers after a while" symptom seen when maximizing the window.
+ * ------------------------------------------------------------------------- */
+
+static BOOL orb_desktop_resize(rdpContext *context)
+{
+    OrbContext  *ctx      = (OrbContext *)context;
+    rdpGdi      *gdi      = context->gdi;
+    rdpSettings *settings = context->settings;
+
+    UINT32 w = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+    UINT32 h = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+
+    if (!gdi_resize(gdi, w, h))
+        return FALSE;
+
+    /* The framebuffer was just reallocated at the new size — push a full frame
+     * immediately so the canvas repaints now instead of showing black until
+     * the server's next EndPaint. */
+    if (gdi->primary_buffer && ctx->on_frame) {
+        ctx->on_frame(ctx->user_ctx, gdi->primary_buffer,
+                      0, 0, (uint32_t)gdi->width, (uint32_t)gdi->height,
+                      (uint32_t)gdi->stride);
+        clock_gettime(CLOCK_MONOTONIC, &ctx->last_frame_ts);
+    }
+    return TRUE;
+}
+
+/* -------------------------------------------------------------------------
  * DISP channel
  * ------------------------------------------------------------------------- */
 
@@ -374,7 +406,8 @@ static BOOL orb_post_connect(freerdp *instance)
     if (!gdi_init(instance, PIXEL_FORMAT_BGRX32))
         return FALSE;
 
-    instance->context->update->EndPaint = orb_end_paint;
+    instance->context->update->EndPaint     = orb_end_paint;
+    instance->context->update->DesktopResize = orb_desktop_resize;
     return TRUE;
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Monitor, RefreshCw, AlertCircle, CheckCircle, PackageOpen } from "lucide-react";
 import {
@@ -144,6 +144,32 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
   // frame (~60 Hz), which is plenty for smooth cursor tracking.
   const pendingMoveRef = useRef<[number, number] | null>(null);
   const moveRafRef = useRef<number | null>(null);
+
+  // Resize without the black flash. Changing a canvas's backing-store size
+  // clears it to transparent (black against the container), and a fresh frame
+  // at the new resolution only arrives after the server reconfigures. To bridge
+  // that gap we snapshot the current pixels and redraw them stretched into the
+  // resized canvas as a placeholder until real frames repaint over them.
+  // The canvas has no width/height JSX attributes so React never clears it —
+  // we own the backing-store size here.
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (canvas.width === width && canvas.height === height) return;
+    const ctx = canvas.getContext("2d");
+    let snapshot: HTMLCanvasElement | null = null;
+    if (ctx && canvas.width > 0 && canvas.height > 0) {
+      snapshot = document.createElement("canvas");
+      snapshot.width = canvas.width;
+      snapshot.height = canvas.height;
+      snapshot.getContext("2d")?.drawImage(canvas, 0, 0);
+    }
+    canvas.width = width;
+    canvas.height = height;
+    if (ctx && snapshot) {
+      ctx.drawImage(snapshot, 0, 0, snapshot.width, snapshot.height, 0, 0, width, height);
+    }
+  }, [width, height]);
 
   // Dynamic resize: when the container changes size, resize the RDP session
   useEffect(() => {
@@ -293,8 +319,6 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
     >
       <canvas
         ref={canvasRef}
-        width={width}
-        height={height}
         tabIndex={0}
         style={{ position: "absolute", inset: 0, width: "100%", height: "100%", cursor: "crosshair", outline: "none", display: "block" }}
         onMouseMove={onMouseMove}
