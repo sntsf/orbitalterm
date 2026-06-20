@@ -68,6 +68,9 @@ typedef struct {
 
     char          *pending_clipboard;
     pthread_mutex_t clipboard_mutex;
+    /* Set by orb_set_clipboard (any thread); consumed by the event-loop thread,
+     * which is the only thread allowed to write to the cliprdr channel. */
+    volatile int   clipboard_dirty;
 
     volatile int   stop_requested;
 
@@ -651,6 +654,19 @@ static void *orb_event_loop(void *arg)
                 orb_end_paint(instance->context);
             }
         }
+
+        /* Local → remote clipboard: orb_set_clipboard (called from the Tauri
+         * command thread) only stores the text and raises this flag.  The
+         * actual cliprdr channel write MUST happen on this thread, so advertise
+         * the new format list here. */
+        if (ctx->clipboard_dirty && ctx->cliprdr) {
+            ctx->clipboard_dirty = 0;
+            CLIPRDR_FORMAT entry = { CF_UNICODETEXT, NULL };
+            CLIPRDR_FORMAT_LIST fmt = { 0 };
+            fmt.numFormats = 1;
+            fmt.formats    = &entry;
+            ctx->cliprdr->ClientFormatList(ctx->cliprdr, &fmt);
+        }
     }
 
     freerdp_disconnect(instance);
@@ -849,16 +865,13 @@ void orb_set_clipboard(OrbRdpSession *session, const char *text)
     if (!session || !text) return;
     OrbContext *ctx = (OrbContext *)session->instance->context;
 
+    /* Only store the text and raise a flag. The cliprdr channel write happens
+     * on the event-loop thread (see orb_event_loop) — calling ClientFormatList
+     * directly from this (Tauri command) thread races the FreeRDP I/O and
+     * silently fails to advertise to the server. */
     pthread_mutex_lock(&ctx->clipboard_mutex);
     free(ctx->pending_clipboard);
     ctx->pending_clipboard = strdup(text);
+    ctx->clipboard_dirty   = 1;
     pthread_mutex_unlock(&ctx->clipboard_mutex);
-
-    if (ctx->cliprdr && session->alive) {
-        CLIPRDR_FORMAT entry = { CF_UNICODETEXT, NULL };
-        CLIPRDR_FORMAT_LIST fmt = { 0 };
-        fmt.numFormats = 1;
-        fmt.formats    = &entry;
-        ctx->cliprdr->ClientFormatList(ctx->cliprdr, &fmt);
-    }
 }
