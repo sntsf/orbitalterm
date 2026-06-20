@@ -509,20 +509,20 @@ static BOOL orb_pre_connect(freerdp *instance)
     OrbContext   *ctx      = (OrbContext *)instance->context;
     rdpSettings  *settings = orb_settings(ctx);
 
-    /* Explicitly register the clipboard static channel. Relying on
-     * RedirectClipboard alone to make freerdp_client_load_addins pull in
-     * cliprdr proved unreliable (the channel never connected), so add it by
-     * name here before loading addins. */
-    if (freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard)) {
-        const char *cliprdr_argv[] = { "cliprdr" };
-        freerdp_client_add_static_channel(settings, 1, cliprdr_argv);
-    }
-
-    /* Load channel plugins (cliprdr, disp, …) based on settings flags */
+    /* Load channel plugins (disp, gfx, …) based on settings flags */
     freerdp_client_load_addins(instance->context->channels, settings);
 
-    fprintf(stderr, "[orb-clip] pre_connect: RedirectClipboard=%d\n",
-            freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard));
+    /* Load the clipboard static channel addin directly and report the result.
+     * Auto-deriving it from RedirectClipboard left cliprdr unconnected. A
+     * false/negative rc here means the cliprdr-client module could not be
+     * loaded (e.g. the FreeRDP client channel plugins are not installed). */
+    {
+        int rc = freerdp_client_load_static_channel_addin(
+            instance->context->channels, settings, "cliprdr", settings);
+        fprintf(stderr,
+                "[orb-clip] pre_connect: RedirectClipboard=%d, load cliprdr addin rc=%d\n",
+                freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard), rc);
+    }
 
     /* Security: allow NLA, TLS, classic RDP; ignore cert errors */
     freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity,       TRUE);
