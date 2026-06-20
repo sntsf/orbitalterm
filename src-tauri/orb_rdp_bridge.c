@@ -329,6 +329,27 @@ static BOOL orb_pre_connect(freerdp *instance)
     freerdp_settings_set_bool(settings,   FreeRDP_RemoteFxCodec,           TRUE);
     freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth,              32);
 
+    /* Let FreeRDP measure RTT/bandwidth and adapt update aggressiveness to the
+     * link.  On a LAN this keeps latency low; on slower links it avoids
+     * flooding the channel with updates the client can't keep up with. */
+    freerdp_settings_set_bool(settings, FreeRDP_NetworkAutoDetect, TRUE);
+
+    /* Performance flags — ask the server NOT to send the expensive desktop
+     * eye-candy that constantly repaints large regions.  Disabling wallpaper,
+     * full-window drag, menu animations and desktop composition is by far the
+     * biggest win for perceived fluidity: it slashes the number and size of
+     * dirty-rect updates we have to encode and ship to the canvas.
+     *
+     * Themes are intentionally left ON (not disabled) so the desktop still
+     * looks modern; they cost very little compared to the items above. */
+    freerdp_settings_set_bool(settings, FreeRDP_DisableWallpaper,        TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_DisableFullWindowDrag,   TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_DisableMenuAnims,        TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_AllowDesktopComposition, FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_AllowFontSmoothing,      TRUE);
+    /* Build the PERF_* bitmask the server reads from the booleans set above. */
+    freerdp_performance_flags_make(settings);
+
     /* No audio */
     freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_AudioCapture,  FALSE);

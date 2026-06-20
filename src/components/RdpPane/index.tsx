@@ -138,6 +138,12 @@ interface EmbeddedViewerProps {
 function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: EmbeddedViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Mouse-move coalescing: raw mousemove fires far faster than the session can
+  // usefully consume, and one Tauri IPC call per event floods the channel and
+  // adds latency. Keep only the latest position and flush it once per animation
+  // frame (~60 Hz), which is plenty for smooth cursor tracking.
+  const pendingMoveRef = useRef<[number, number] | null>(null);
+  const moveRafRef = useRef<number | null>(null);
 
   // Dynamic resize: when the container changes size, resize the RDP session
   useEffect(() => {
@@ -207,18 +213,43 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
   const PTR_WHEEL  = 0x0200;
   const PTR_WHEEL_NEG = 0x0100;
 
+  // Drop any queued move; button/wheel events carry their own coordinates, so a
+  // stale move arriving after them would just fight the click position.
+  function cancelPendingMove() {
+    if (moveRafRef.current != null) {
+      cancelAnimationFrame(moveRafRef.current);
+      moveRafRef.current = null;
+    }
+    pendingMoveRef.current = null;
+  }
+
+  function flushMove() {
+    moveRafRef.current = null;
+    const p = pendingMoveRef.current;
+    if (!p) return;
+    pendingMoveRef.current = null;
+    rdpMouseInput(sessionId, PTR_MOVE, p[0], p[1]).catch(() => {});
+  }
+
+  // Cancel a pending move frame on unmount so it can't fire after teardown.
+  useEffect(() => () => cancelPendingMove(), []);
+
   function onMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
-    const [x, y] = remoteCoords(e);
-    rdpMouseInput(sessionId, PTR_MOVE, x, y).catch(() => {});
+    pendingMoveRef.current = remoteCoords(e);
+    if (moveRafRef.current == null) {
+      moveRafRef.current = requestAnimationFrame(flushMove);
+    }
   }
 
   function onMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
+    cancelPendingMove();
     const [x, y] = remoteCoords(e);
     const btn = e.button === 0 ? PTR_BTN1 : e.button === 1 ? PTR_BTN3 : PTR_BTN2;
     rdpMouseInput(sessionId, btn | PTR_DOWN, x, y).catch(() => {});
   }
 
   function onMouseUp(e: React.MouseEvent<HTMLCanvasElement>) {
+    cancelPendingMove();
     const [x, y] = remoteCoords(e);
     const btn = e.button === 0 ? PTR_BTN1 : e.button === 1 ? PTR_BTN3 : PTR_BTN2;
     rdpMouseInput(sessionId, btn, x, y).catch(() => {});

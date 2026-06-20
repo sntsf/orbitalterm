@@ -270,14 +270,21 @@ unsafe extern "C" fn on_frame(
     let raw = std::slice::from_raw_parts(data.add(row_offset), row_bytes);
 
     // Convert BGRX → RGB for the expanded dirty sub-image.
-    let mut rgb = Vec::with_capacity((ew * eh * 3) as usize);
+    // Pre-allocate the exact output size and write through fixed-size chunk
+    // slices: this lets the compiler elide bounds checks and avoids the
+    // per-pixel growth/check overhead of `Vec::push`, roughly halving the
+    // per-frame conversion cost on the FreeRDP thread.
+    let src_row_bytes = ew as usize * 4;
+    let dst_row_bytes = ew as usize * 3;
+    let mut rgb = vec![0u8; eh as usize * dst_row_bytes];
     for row in 0..eh as usize {
         let row_start = row * stride as usize + ex as usize * 4;
-        let row_slice = &raw[row_start..row_start + ew as usize * 4];
-        for chunk in row_slice.chunks_exact(4) {
-            rgb.push(chunk[2]); // R  (BGRX: B=0, G=1, R=2, X=3)
-            rgb.push(chunk[1]); // G
-            rgb.push(chunk[0]); // B
+        let src = &raw[row_start..row_start + src_row_bytes];
+        let dst = &mut rgb[row * dst_row_bytes..row * dst_row_bytes + dst_row_bytes];
+        for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(3)) {
+            d[0] = s[2]; // R  (BGRX: B=0, G=1, R=2, X=3)
+            d[1] = s[1]; // G
+            d[2] = s[0]; // B
         }
     }
 
