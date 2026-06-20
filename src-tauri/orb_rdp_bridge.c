@@ -504,26 +504,35 @@ static void orb_channel_disconnected(rdpContext *context,
  * PreConnect
  * ------------------------------------------------------------------------- */
 
-static BOOL orb_pre_connect(freerdp *instance)
+/* LoadChannels – FreeRDP 3 moved channel loading here from PreConnect. This is
+ * the correct place to register channel addins; doing it in PreConnect leaves
+ * static channels (like cliprdr) unconnected. */
+static BOOL orb_load_channels(freerdp *instance)
 {
-    OrbContext   *ctx      = (OrbContext *)instance->context;
-    rdpSettings  *settings = orb_settings(ctx);
+    rdpContext  *context  = instance->context;
+    rdpSettings *settings = context->settings;
 
-    /* Register the clipboard static channel explicitly, then load addins.
-     * NOTE: this only connects if the cliprdr-client FreeRDP module is present
-     * on the system (package freerdp3-x11 / the FreeRDP client channel
-     * plugins). disp/gfx are built into the library; cliprdr and rdpdr are
-     * loadable .so modules. */
+    /* cliprdr is a STATIC virtual channel; register it before loading addins. */
     if (freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard)) {
         const char *cliprdr_argv[] = { "cliprdr" };
         freerdp_client_add_static_channel(settings, 1, cliprdr_argv);
     }
 
-    /* Load channel plugins (cliprdr, disp, …) based on settings flags */
-    freerdp_client_load_addins(instance->context->channels, settings);
+    BOOL ok = freerdp_client_load_addins(context->channels, settings);
+    fprintf(stderr, "[orb-clip] load_channels: RedirectClipboard=%d load_addins=%d\n",
+            freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard), ok);
+    return ok;
+}
 
-    fprintf(stderr, "[orb-clip] pre_connect: RedirectClipboard=%d\n",
-            freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard));
+static BOOL orb_pre_connect(freerdp *instance)
+{
+    OrbContext   *ctx      = (OrbContext *)instance->context;
+    rdpSettings  *settings = orb_settings(ctx);
+
+    /* NOTE: channel addins are loaded in orb_load_channels (the LoadChannels
+     * callback), NOT here. FreeRDP 3 moved channel loading out of PreConnect;
+     * loading static channels (cliprdr) here is too late and they never
+     * connect. */
 
     /* Security: allow NLA, TLS, classic RDP; ignore cert errors */
     freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity,       TRUE);
@@ -727,6 +736,7 @@ OrbRdpSession *orb_session_new(const char   *host,
     if (!instance) { free(sess); return NULL; }
 
     instance->ContextSize    = sizeof(OrbContext);
+    instance->LoadChannels   = orb_load_channels;
     instance->PreConnect     = orb_pre_connect;
     instance->PostConnect    = orb_post_connect;
     instance->PostDisconnect = orb_post_disconnect;
