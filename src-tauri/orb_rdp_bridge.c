@@ -521,7 +521,9 @@ static BOOL orb_load_channels(freerdp *instance)
     BOOL ok = freerdp_client_load_addins(context->channels, settings);
     fprintf(stderr, "[orb-clip] load_channels: RedirectClipboard=%d load_addins=%d\n",
             freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard), ok);
-    return ok;
+    /* Always succeed: an optional channel failing to load (e.g. rdpdr, which is
+     * not installed) must NOT abort the whole connection / graphics setup. */
+    return TRUE;
 }
 
 static BOOL orb_pre_connect(freerdp *instance)
@@ -540,21 +542,17 @@ static BOOL orb_pre_connect(freerdp *instance)
     freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity,       TRUE);
     freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
 
-    /* Video pipeline */
-    freerdp_settings_set_bool(settings,   FreeRDP_SupportGraphicsPipeline, TRUE);
+    /* Video pipeline.
+     *
+     * GFX (Graphics Pipeline) is intentionally DISABLED: once channels load at
+     * the correct FreeRDP 3 time (LoadChannels), the server starts sending GFX
+     * surface commands, but our GFX→GDI bridge does not forward those frames to
+     * the canvas yet, which produced a black screen. Falling back to the legacy
+     * RemoteFX path renders correctly through EndPaint. (Re-enabling GFX is a
+     * separate task: it needs the GFX output path wired to on_frame.) */
+    freerdp_settings_set_bool(settings,   FreeRDP_SupportGraphicsPipeline, FALSE);
     freerdp_settings_set_bool(settings,   FreeRDP_RemoteFxCodec,           TRUE);
     freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth,              32);
-
-    /* Graphics Pipeline codecs. Progressive (RFX) is pure-software in FreeRDP
-     * and always available — a big step up from legacy bitmap updates for
-     * scrolling/redraw. H.264/AVC444 give the smoothest video but are only
-     * negotiated when both the server AND this FreeRDP build support them
-     * (FreeRDP silently falls back to progressive otherwise), so enabling them
-     * is safe. These take effect only because the RDPGFX channel is now wired
-     * to the GDI in orb_channel_connected(). */
-    freerdp_settings_set_bool(settings, FreeRDP_GfxProgressive, TRUE);
-    freerdp_settings_set_bool(settings, FreeRDP_GfxH264,        TRUE);
-    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444,      TRUE);
 
     /* Let FreeRDP measure RTT/bandwidth and adapt update aggressiveness to the
      * link.  On a LAN this keeps latency low; on slower links it avoids
