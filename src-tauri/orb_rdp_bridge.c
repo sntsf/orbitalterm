@@ -267,6 +267,56 @@ static UINT orb_cliprdr_format_list(CliprdrClientContext *cliprdr,
     return CHANNEL_RC_OK;
 }
 
+/* Minimal, correct UTF-8 → UTF-16LE converter.  Returns a malloc'd,
+ * NUL-terminated WCHAR buffer and writes the unit count (excluding NUL) to
+ * *out_units.  Handles 1–4 byte sequences and emits surrogate pairs for code
+ * points above the BMP; malformed bytes become U+FFFD.  Replaces the previous
+ * byte-cast fast-path, which corrupted any non-ASCII text (accents, ñ, …). */
+static WCHAR *orb_utf8_to_utf16(const char *s, size_t *out_units)
+{
+    size_t len = strlen(s);
+    /* ASCII is the worst case at 1 unit/byte; multi-byte sequences only ever
+     * produce fewer units than bytes, so len+1 units is always enough. */
+    WCHAR *out = (WCHAR *)calloc(len + 1, sizeof(WCHAR));
+    if (!out) { if (out_units) *out_units = 0; return NULL; }
+
+    size_t o = 0;
+    const unsigned char *p   = (const unsigned char *)s;
+    const unsigned char *end = p + len;
+    while (p < end) {
+        unsigned int  cp;
+        unsigned char c     = *p;
+        size_t        avail = (size_t)(end - p);
+
+        if (c < 0x80) {
+            cp = c; p += 1;
+        } else if ((c >> 5) == 0x6 && avail >= 2 && (p[1] & 0xC0) == 0x80) {
+            cp = ((c & 0x1Fu) << 6) | (p[1] & 0x3Fu); p += 2;
+        } else if ((c >> 4) == 0xE && avail >= 3 &&
+                   (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+            cp = ((c & 0x0Fu) << 12) | ((p[1] & 0x3Fu) << 6) | (p[2] & 0x3Fu); p += 3;
+        } else if ((c >> 3) == 0x1E && avail >= 4 &&
+                   (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 &&
+                   (p[3] & 0xC0) == 0x80) {
+            cp = ((c & 0x07u) << 18) | ((p[1] & 0x3Fu) << 12) |
+                 ((p[2] & 0x3Fu) << 6) | (p[3] & 0x3Fu); p += 4;
+        } else {
+            cp = 0xFFFD; p += 1;
+        }
+
+        if (cp <= 0xFFFF) {
+            out[o++] = (WCHAR)cp;
+        } else {
+            cp -= 0x10000;
+            out[o++] = (WCHAR)(0xD800 + (cp >> 10));
+            out[o++] = (WCHAR)(0xDC00 + (cp & 0x3FF));
+        }
+    }
+    out[o] = 0;
+    if (out_units) *out_units = o;
+    return out;
+}
+
 static UINT orb_cliprdr_format_data_request(CliprdrClientContext *cliprdr,
                                               const CLIPRDR_FORMAT_DATA_REQUEST *req)
 {
@@ -290,23 +340,20 @@ static UINT orb_cliprdr_format_data_request(CliprdrClientContext *cliprdr,
         return CHANNEL_RC_OK;
     }
 
-    /* Convert UTF-8 → UTF-16LE (ASCII fast-path, good enough for typical text) */
-    size_t len_utf8 = strlen(text);
-    size_t buf_bytes = (len_utf8 + 1) * 2; /* +1 for NUL, *2 for UTF-16 */
-    BYTE *utf16 = (BYTE *)calloc(1, buf_bytes);
+    /* Convert UTF-8 → UTF-16LE (full Unicode: accents, ñ, emoji, …). */
+    size_t units = 0;
+    WCHAR *utf16 = orb_utf8_to_utf16(text, &units);
     if (utf16) {
-        const unsigned char *src = (const unsigned char *)text;
-        WCHAR *dst = (WCHAR *)utf16;
-        size_t n = 0;
-        while (*src && n < len_utf8) { *dst++ = (WCHAR)*src++; n++; }
-        *dst = 0; /* NUL-terminate */
-
         CLIPRDR_FORMAT_DATA_RESPONSE resp = { 0 };
         CLIP_HDR(resp).msgFlags    = CB_RESPONSE_OK;
-        CLIP_HDR(resp).dataLen     = (UINT32)((n + 1) * 2);
-        resp.requestedFormatData = utf16;
+        CLIP_HDR(resp).dataLen     = (UINT32)((units + 1) * 2); /* +1 for NUL */
+        resp.requestedFormatData = (BYTE *)utf16;
         cliprdr->ClientFormatDataResponse(cliprdr, &resp);
         free(utf16);
+    } else {
+        CLIPRDR_FORMAT_DATA_RESPONSE resp = { 0 };
+        CLIP_HDR(resp).msgFlags = CB_RESPONSE_FAIL;
+        cliprdr->ClientFormatDataResponse(cliprdr, &resp);
     }
 
     free(text);

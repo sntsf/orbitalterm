@@ -9,6 +9,8 @@ import {
   rdpKeyInput,
   rdpResizeSession,
   rdpRefreshSession,
+  rdpGetLinuxClipboard,
+  rdpSetClipboard,
   rdpWindowsReposition,
   rdpWindowsVisibility,
   rdpWindowsReparent,
@@ -306,6 +308,15 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
     // Request a full-screen repaint from Windows whenever the canvas is
     // focused (e.g. after switching tabs or clicking back into the session).
     rdpRefreshSession(sessionId).catch(() => {});
+    // Mirror this machine's clipboard into the remote session. The only way to
+    // copy locally is to interact with another window (which blurs the canvas),
+    // so re-syncing on focus means whatever the user just copied is advertised
+    // to the server and a Ctrl+V inside the remote desktop pastes it.
+    rdpGetLinuxClipboard()
+      .then((text) => {
+        if (text) rdpSetClipboard(sessionId, text).catch(() => {});
+      })
+      .catch(() => {});
   }
 
   function onContextMenu(e: React.MouseEvent<HTMLCanvasElement>) {
