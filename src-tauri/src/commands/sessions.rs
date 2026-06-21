@@ -776,9 +776,7 @@ pub async fn disconnect_rdp(
 pub async fn rdp_get_linux_clipboard() -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
-        let s = read_linux_clipboard().unwrap_or_default();
-        eprintln!("[orb-clip] rdp_get_linux_clipboard read {} bytes", s.len());
-        return Ok(s);
+        return Ok(read_linux_clipboard().unwrap_or_default());
     }
     #[allow(unreachable_code)]
     Ok(String::new())

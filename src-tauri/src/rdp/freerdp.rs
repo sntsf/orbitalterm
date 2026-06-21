@@ -321,7 +321,6 @@ unsafe extern "C" fn on_clipboard(
         return;
     }
     let s = std::ffi::CStr::from_ptr(text).to_string_lossy().into_owned();
-    eprintln!("[orb-clip] on_clipboard (remote→local) writing {} bytes", s.len());
     write_local_clipboard(&s);
 }
 
