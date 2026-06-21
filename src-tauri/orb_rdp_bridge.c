@@ -823,11 +823,16 @@ OrbRdpSession *orb_session_new(const char   *host,
     freerdp_settings_set_bool(settings, FreeRDP_RedirectSerialPorts,   FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_RedirectParallelPorts, FALSE);
     if (shared_folder && shared_folder[0]) {
-        if (freerdp_client_add_drive(settings, shared_folder, "OrbitalTerm"))
+        freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, TRUE);
+        freerdp_settings_set_bool(settings, FreeRDP_RedirectDrives,    TRUE);
+        /* Add a "drive" device: params = { type, name, path }. This is what
+         * xfreerdp does for /drive:OrbitalTerm,<path>. */
+        const char *drive_argv[] = { "drive", "OrbitalTerm", shared_folder };
+        if (freerdp_client_add_device_channel(settings, 3, drive_argv))
             fprintf(stderr, "[orb-drive] sharing '%s' as drive 'OrbitalTerm'\n",
                     shared_folder);
         else
-            fprintf(stderr, "[orb-drive] freerdp_client_add_drive FAILED for '%s'\n",
+            fprintf(stderr, "[orb-drive] add_device_channel FAILED for '%s'\n",
                     shared_folder);
     } else {
         freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, FALSE);
