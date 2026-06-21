@@ -245,5 +245,11 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE schema_version SET version=10", [])?;
     }
 
+    if ver < 11 {
+        // RDP: local folder shared into the session as a drive (Linux).
+        conn.execute("ALTER TABLE connections ADD COLUMN rdp_drive_path TEXT NOT NULL DEFAULT ''", []).ok();
+        conn.execute("UPDATE schema_version SET version=11", [])?;
+    }
+
     Ok(())
 }

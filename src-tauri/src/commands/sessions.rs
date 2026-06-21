@@ -23,7 +23,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
         "SELECT id, name, type, host, port, username, auth_type, key_path,
                 folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
                 sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels,
-                rdp_redirect_drives, rdp_gateway, proxy_jump
+                rdp_redirect_drives, rdp_gateway, proxy_jump, rdp_drive_path
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -54,6 +54,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 rdp_redirect_drives: row.get::<_, i64>(23).unwrap_or(0) != 0,
                 rdp_gateway: row.get::<_, String>(24).unwrap_or_default(),
                 proxy_jump: row.get::<_, String>(25).unwrap_or_default(),
+                rdp_drive_path: row.get::<_, String>(26).unwrap_or_default(),
             })
         },
     )
@@ -587,6 +588,20 @@ pub async fn connect_rdp(
         let w = width.unwrap_or(1280).max(640);
         let h = height.unwrap_or(800).max(480);
         let session_id = Uuid::new_v4().to_string();
+        // Folder shared into the session as a drive. Only when the connection
+        // opted in (rdp_redirect_drives); empty custom path → user's Downloads.
+        let shared_folder: Option<String> = if connection.rdp_redirect_drives {
+            let p = connection.rdp_drive_path.trim();
+            if p.is_empty() {
+                dirs::download_dir()
+                    .or_else(dirs::home_dir)
+                    .map(|d| d.to_string_lossy().into_owned())
+            } else {
+                Some(p.to_string())
+            }
+        } else {
+            None
+        };
         let session = crate::rdp::freerdp::launch(
             app,
             &session_id,
@@ -600,6 +615,7 @@ pub async fn connect_rdp(
             connection.rdp_admin || admin_mode.unwrap_or(false),
             &connection.rdp_security,
             connection.rdp_color_depth as u16,
+            shared_folder.as_deref(),
         )?;
         let width = session.width;
         let height = session.height;

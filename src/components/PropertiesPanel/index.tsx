@@ -123,6 +123,7 @@ function ConnectionProperties() {
   const [tunnels, setTunnels] = useState("");
   const [proxyJump, setProxyJump] = useState("");
   const [rdpRedirectDrives, setRdpRedirectDrives] = useState(false);
+  const [rdpDrivePath, setRdpDrivePath] = useState("");
   const [rdpGateway, setRdpGateway] = useState("");
   const [connectError, setConnectError] = useState("");
   const [focusedField, setFocusedField] = useState<FieldKey | null>(null);
@@ -155,6 +156,7 @@ function ConnectionProperties() {
         tunnels,
         proxy_jump: proxyJump.trim(),
         rdp_redirect_drives: rdpRedirectDrives,
+        rdp_drive_path: rdpDrivePath,
         rdp_gateway: rdpGateway.trim(),
       });
       setConnections(await getConnections());
@@ -185,6 +187,7 @@ function ConnectionProperties() {
     setTunnels(existing.tunnels ?? "");
     setProxyJump(existing.proxy_jump ?? "");
     setRdpRedirectDrives(existing.rdp_redirect_drives ?? false);
+    setRdpDrivePath(existing.rdp_drive_path ?? "");
     setRdpGateway(existing.rdp_gateway ?? "");
     setPassword("");
     setConnectError("");
@@ -206,7 +209,7 @@ function ConnectionProperties() {
     const timer = setTimeout(() => { doSaveRef.current?.(); }, 600);
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts, tunnels, proxyJump, rdpRedirectDrives, rdpGateway]);
+  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts, tunnels, proxyJump, rdpRedirectDrives, rdpDrivePath, rdpGateway]);
 
   const handleTypeChange = (newType: ConnectionType) => {
     setType(newType);
@@ -423,13 +426,27 @@ function ConnectionProperties() {
                 placeholder={lang === "es" ? "host del gateway (opcional)" : "gateway host (optional)"}
                 className={inp} />
             </Row>
-            <Row label={lang === "es" ? "Unidades" : "Drives"}>
+            <Row label={lang === "es" ? "Carpeta / Unidades" : "Folder / Drives"}>
               <label className="flex items-center gap-1.5 text-[12px] text-[var(--color-text-primary)] cursor-pointer">
                 <input type="checkbox" checked={rdpRedirectDrives}
                   onChange={(e) => setRdpRedirectDrives(e.target.checked)} />
-                {lang === "es" ? "Redirigir mis discos locales" : "Redirect my local drives"}
+                {lang === "es" ? "Compartir carpeta / discos con el remoto" : "Share a folder / drives with the remote"}
               </label>
             </Row>
+            {rdpRedirectDrives && (
+              <Row label={lang === "es" ? "Carpeta a montar" : "Folder to mount"}>
+                <div className="flex flex-col gap-1">
+                  <input value={rdpDrivePath} onChange={(e) => setRdpDrivePath(e.target.value)}
+                    placeholder={lang === "es" ? "vacío = Descargas" : "empty = Downloads"}
+                    className={inp} />
+                  <span className="text-[10px] text-[var(--color-text-muted)]">
+                    {lang === "es"
+                      ? "Linux: carpeta local compartida como unidad. En Windows se comparten los discos locales. Reinicia la conexión para aplicar."
+                      : "Linux: local folder shared as a drive. On Windows the local disks are shared. Reconnect to apply."}
+                  </span>
+                </div>
+              </Row>
+            )}
           </>
         )}
 

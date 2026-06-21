@@ -35,6 +35,7 @@ export interface Connection {
   rdp_redirect_drives: boolean;
   rdp_gateway: string;
   proxy_jump: string;
+  rdp_drive_path?: string;
 }
 
 export interface Folder {

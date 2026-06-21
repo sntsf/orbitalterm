@@ -52,6 +52,10 @@ pub struct Connection {
     pub rdp_gateway: String,
     #[serde(default)]
     pub proxy_jump: String,
+    /// Local folder shared into the RDP session as a drive (Linux). Empty =
+    /// default to the user's Downloads folder when redirection is enabled.
+    #[serde(default)]
+    pub rdp_drive_path: String,
 }
 
 fn default_rdp_security() -> String { "negotiate".to_string() }
@@ -93,6 +97,8 @@ pub struct NewConnection {
     pub rdp_gateway: String,
     #[serde(default)]
     pub proxy_jump: String,
+    #[serde(default)]
+    pub rdp_drive_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -153,13 +159,14 @@ fn row_to_conn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
         rdp_redirect_drives: row.get::<_, i64>(23).unwrap_or(0) != 0,
         rdp_gateway: row.get::<_, String>(24).unwrap_or_default(),
         proxy_jump: row.get::<_, String>(25).unwrap_or_default(),
+        rdp_drive_path: row.get::<_, String>(26).unwrap_or_default(),
     })
 }
 
 const SELECT_COLS: &str = "id, name, type, host, port, username, auth_type, key_path,
                            folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
                            sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels,
-                           rdp_redirect_drives, rdp_gateway, proxy_jump";
+                           rdp_redirect_drives, rdp_gateway, proxy_jump, rdp_drive_path";
 
 #[tauri::command]
 pub fn get_connections() -> Result<Vec<Connection>, String> {
@@ -216,13 +223,13 @@ pub fn save_connection(conn: NewConnection) -> Result<Connection, String> {
         ).unwrap_or(0)
     };
     db.execute(
-        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels, rdp_redirect_drives, rdp_gateway, proxy_jump)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
+        "INSERT INTO connections (id, name, type, host, port, username, auth_type, key_path, folder_id, notes, description, domain, rdp_admin, sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels, rdp_redirect_drives, rdp_gateway, proxy_jump, rdp_drive_path)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
         params![id, conn.name, conn.conn_type, conn.host, conn.port,
                 conn.username, conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
                 conn.description, conn.domain, conn.rdp_admin as i64, sort_order, group_id,
                 conn.icon, conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.tunnels,
-                conn.rdp_redirect_drives as i64, conn.rdp_gateway, conn.proxy_jump],
+                conn.rdp_redirect_drives as i64, conn.rdp_gateway, conn.proxy_jump, conn.rdp_drive_path],
     )
     .map_err(|e| e.to_string())?;
 
@@ -241,12 +248,12 @@ pub fn update_connection(conn: Connection) -> Result<Connection, String> {
         "UPDATE connections SET name=?1,type=?2,host=?3,port=?4,username=?5,
          auth_type=?6,key_path=?7,folder_id=?8,notes=?9,description=?10,domain=?11,
          rdp_admin=?12,icon=?13,url=?14,custom_hosts=?15,rdp_security=?16,rdp_color_depth=?17,
-         tunnels=?18,rdp_redirect_drives=?19,rdp_gateway=?20,proxy_jump=?21,updated_at=datetime('now') WHERE id=?22",
+         tunnels=?18,rdp_redirect_drives=?19,rdp_gateway=?20,proxy_jump=?21,rdp_drive_path=?22,updated_at=datetime('now') WHERE id=?23",
         params![conn.name, conn.conn_type, conn.host, conn.port, conn.username,
                 conn.auth_type, conn.key_path, conn.folder_id, conn.notes,
                 conn.description, conn.domain, conn.rdp_admin as i64, conn.icon,
                 conn.url, conn.custom_hosts, conn.rdp_security, conn.rdp_color_depth, conn.tunnels,
-                conn.rdp_redirect_drives as i64, conn.rdp_gateway, conn.proxy_jump, conn.id],
+                conn.rdp_redirect_drives as i64, conn.rdp_gateway, conn.proxy_jump, conn.rdp_drive_path, conn.id],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
