@@ -986,7 +986,7 @@ export function Sidebar() {
         {/* Logo row — logo on left, utility icons on right */}
         <div className="flex items-center px-3 py-2 gap-1">
           <img
-            src="/logo_icon.png"
+            src="/logo_animado.svg"
             alt="OrbitalTerm"
             className="h-6 w-auto object-contain select-none"
             draggable={false}
