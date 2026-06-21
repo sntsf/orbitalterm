@@ -136,7 +136,9 @@ pub enum OrbRdpSession {}
 
 /// Callback fired by the C bridge for each dirty-rect paint.
 /// `data` points to the full BGRX32 framebuffer; `(x,y,w,h)` is the dirty
-/// rectangle; `stride` is the full-framebuffer row stride in bytes.
+/// rectangle; `stride` is the full-framebuffer row stride in bytes;
+/// `full_w`/`full_h` are the framebuffer dimensions (used to clamp the rect so
+/// a stale/oversized region can never index past the buffer).
 pub type OrbFrameFn = unsafe extern "C" fn(
     user_ctx: *mut std::ffi::c_void,
     data: *const u8,
@@ -145,6 +147,8 @@ pub type OrbFrameFn = unsafe extern "C" fn(
     w: u32,
     h: u32,
     stride: u32,
+    full_w: u32,
+    full_h: u32,
 );
 pub type OrbErrorFn =
     unsafe extern "C" fn(user_ctx: *mut std::ffi::c_void, msg: *const std::ffi::c_char);
@@ -246,6 +250,8 @@ unsafe extern "C" fn on_frame(
     w: u32,
     h: u32,
     stride: u32,
+    full_w: u32,
+    full_h: u32,
 ) {
     if w == 0 || h == 0 {
         return;
@@ -254,7 +260,7 @@ unsafe extern "C" fn on_frame(
 
     // Union current dirty rect with any previously dropped region so no pixels
     // are permanently lost when the encoder falls behind.
-    let (ex, ey, ew, eh) = {
+    let (mut ex, mut ey, mut ew, mut eh) = {
         let mut ov = state.overflow.lock().unwrap();
         match ov.take() {
             None => (x, y, w, h),
@@ -267,6 +273,24 @@ unsafe extern "C" fn on_frame(
             }
         }
     };
+
+    // Clamp to the current framebuffer bounds. The dirty rect (or an overflow
+    // region accumulated under a previous, larger resolution) can otherwise
+    // extend past the buffer after a resize and cause an out-of-bounds slice.
+    // stride >= full_w*4, so clamping width to full_w keeps every row in range,
+    // and clamping ey+eh to full_h keeps the row slice within the buffer.
+    if ex >= full_w || ey >= full_h {
+        return;
+    }
+    if ew > full_w - ex {
+        ew = full_w - ex;
+    }
+    if eh > full_h - ey {
+        eh = full_h - ey;
+    }
+    if ew == 0 || eh == 0 {
+        return;
+    }
 
     // Slice only the rows we need.
     let row_offset = (ey * stride) as usize;

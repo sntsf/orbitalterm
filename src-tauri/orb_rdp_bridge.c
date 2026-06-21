@@ -174,7 +174,8 @@ static BOOL orb_end_paint(rdpContext *context)
         ctx->user_ctx,
         gdi->primary_buffer,
         dx, dy, dw, dh,
-        (uint32_t)gdi->stride
+        (uint32_t)gdi->stride,
+        (uint32_t)gdi->width, (uint32_t)gdi->height
     );
     return TRUE;
 }
@@ -205,7 +206,8 @@ static BOOL orb_desktop_resize(rdpContext *context)
     if (gdi->primary_buffer && ctx->on_frame) {
         ctx->on_frame(ctx->user_ctx, gdi->primary_buffer,
                       0, 0, (uint32_t)gdi->width, (uint32_t)gdi->height,
-                      (uint32_t)gdi->stride);
+                      (uint32_t)gdi->stride,
+                      (uint32_t)gdi->width, (uint32_t)gdi->height);
         clock_gettime(CLOCK_MONOTONIC, &ctx->last_frame_ts);
     }
     return TRUE;
@@ -907,7 +909,9 @@ void orb_refresh(OrbRdpSession *session)
         0, 0,
         (uint32_t)gdi->width,
         (uint32_t)gdi->height,
-        (uint32_t)gdi->stride
+        (uint32_t)gdi->stride,
+        (uint32_t)gdi->width,
+        (uint32_t)gdi->height
     );
     /* Update rate-limiter so the forced frame doesn't block the next EndPaint. */
     clock_gettime(CLOCK_MONOTONIC, &ctx->last_frame_ts);
