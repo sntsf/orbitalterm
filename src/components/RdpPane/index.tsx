@@ -186,10 +186,13 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
       const w = Math.max(640, Math.floor(entry.contentRect.width));
       const h = Math.max(480, Math.floor(entry.contentRect.height));
       if (timer) clearTimeout(timer);
+      // Debounce so we send ONE resolution change after the drag settles
+      // (each one is a server round-trip). 150ms keeps drags coalesced while
+      // feeling responsive — 400ms felt sluggish.
       timer = setTimeout(() => {
         rdpResizeSession(sessionId, w, h).catch(() => {});
         onResize(w, h);
-      }, 400);
+      }, 150);
     });
     observer.observe(container);
     return () => { observer.disconnect(); if (timer) clearTimeout(timer); };
