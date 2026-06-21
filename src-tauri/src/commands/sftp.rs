@@ -41,8 +41,12 @@ pub async fn sftp_connect(
 ) -> Result<String, String> {
     let connection = load_connection(&connection_id)?;
 
+    // Keep the SFTP session alive the same way SSH does: no inactivity timeout
+    // (the previous Some(30s) dropped idle sessions after 30s), and send a
+    // keepalive every 30s so the server doesn't close an idle connection.
     let config = Arc::new(russh::client::Config {
-        inactivity_timeout: Some(std::time::Duration::from_secs(30)),
+        inactivity_timeout: None,
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
         ..Default::default()
     });
 
