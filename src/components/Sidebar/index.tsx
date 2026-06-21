@@ -408,7 +408,7 @@ export function Sidebar() {
   // During a search every group is treated as open so matches in any database
   // are reachable; otherwise honour the user's per-group toggle (default open).
   const isGroupExpanded = (groupId: string) =>
-    searchQuery ? true : (groupExpanded[groupId] ?? true);
+    searchQuery.trim() ? true : (groupExpanded[groupId] ?? true);
 
   const startCreateFolder = (parentId: string | null = null, groupId: string | null = null) => {
     setNewFolderName("");
@@ -910,7 +910,7 @@ export function Sidebar() {
 
   // Folders the tree should render as open: the ones the user opened, plus the
   // ancestor chain of the focused search match (so it's revealed in place).
-  const effectiveExpanded = searchQuery
+  const effectiveExpanded = searchQuery.trim()
     ? new Set<string>([...expandedFolders, ...searchExpanded])
     : expandedFolders;
 

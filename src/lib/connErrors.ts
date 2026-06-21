@@ -1,6 +1,12 @@
 export function friendlyConnError(raw: string, lang: string, connType?: string): string {
   const r = raw.toLowerCase();
 
+  // ── Account / credential issues (RDP NLA surfaces specific codes) ────────────
+  // Checked FIRST so an expired/disabled account is never mislabeled as a
+  // network/timeout problem.
+  const acct = accountIssue(r, lang);
+  if (acct) return acct;
+
   // ── Special markers ──────────────────────────────────────────────────────────
   if (r === "session_ended" || r.startsWith("session_ended")) {
     return lang === "es"
@@ -257,6 +263,36 @@ export function friendlyConnErrorShort(raw: string, lang: string, connType?: str
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Maps specific account/credential failures (mostly RDP NLA error codes such as
+ * ERRCONNECT_ACCOUNT_DISABLED / _EXPIRED / PASSWORD_EXPIRED / _LOCKED_OUT) to a
+ * clear message. Returns null when the error isn't account-related, so callers
+ * fall through to the generic network/auth handling. es/en; other langs use en.
+ */
+function accountIssue(r: string, lang: string): string | null {
+  const es = lang === "es";
+  if (r.includes("account_disabled"))
+    return es ? "La cuenta de usuario está deshabilitada. Contacta al administrador."
+              : "The user account is disabled. Contact your administrator.";
+  if (r.includes("account_expired"))
+    return es ? "La cuenta de usuario ha caducado. Contacta al administrador."
+              : "The user account has expired. Contact your administrator.";
+  if (r.includes("password_expired") || r.includes("password_must_change"))
+    return es ? "La contraseña ha caducado y debe cambiarse antes de iniciar sesión."
+              : "The password has expired and must be changed before signing in.";
+  if (r.includes("account_locked"))
+    return es ? "La cuenta está bloqueada por demasiados intentos fallidos."
+              : "The account is locked out after too many failed attempts.";
+  if (r.includes("account_restriction"))
+    return es ? "Acceso restringido para esta cuenta (horario de inicio de sesión, estación o directiva)."
+              : "Account restriction (logon hours, workstation, or policy).";
+  if (r.includes("logon_failure") || r.includes("logon failure") || r.includes("wrong_password"))
+    return es ? "Usuario o contraseña incorrectos."
+              : "Incorrect username or password.";
+  return null;
+}
+
 function isUnreachable(r: string) {
   return (
     r.includes("timed out") || r.includes("timeout") || r.includes("connection timed") ||
@@ -274,6 +310,10 @@ function isRefused(r: string) { return r.includes("connection refused"); }
  */
 export function friendlyConnErrorNotif(raw: string, lang: string, connType?: string): string {
   const r = raw.toLowerCase();
+
+  // Account/credential issues take priority over the network/refused messages.
+  const acct = accountIssue(r, lang);
+  if (acct) return acct;
 
   // ── session_ended ─────────────────────────────────────────────────────────────
   if (r === "session_ended" || r.startsWith("session_ended")) {
