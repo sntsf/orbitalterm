@@ -15,6 +15,7 @@
 #include <time.h>
 
 #include <freerdp/freerdp.h>
+#include <freerdp/client.h>
 #include <freerdp/gdi/gdi.h>
 #include <freerdp/client/channels.h>
 #include <freerdp/channels/channels.h>
@@ -704,6 +705,26 @@ static void *orb_event_loop(void *arg)
 }
 
 /* -------------------------------------------------------------------------
+ * Client entry points (FreeRDP client-common context)
+ * ------------------------------------------------------------------------- */
+
+static BOOL orb_client_new(freerdp *instance, rdpContext *context)
+{
+    (void)context;
+    instance->LoadChannels   = orb_load_channels;
+    instance->PreConnect     = orb_pre_connect;
+    instance->PostConnect    = orb_post_connect;
+    instance->PostDisconnect = orb_post_disconnect;
+    return TRUE;
+}
+
+static void orb_client_free(freerdp *instance, rdpContext *context)
+{
+    (void)instance;
+    (void)context;
+}
+
+/* -------------------------------------------------------------------------
  * Public API
  * ------------------------------------------------------------------------- */
 
@@ -731,23 +752,24 @@ OrbRdpSession *orb_session_new(const char   *host,
     OrbRdpSession *sess = (OrbRdpSession *)calloc(1, sizeof(*sess));
     if (!sess) return NULL;
 
-    freerdp *instance = freerdp_new();
-    if (!instance) { free(sess); return NULL; }
+    /* Create the client context the same way xfreerdp3 does. Using the
+     * client-common entry points (instead of a raw freerdp_new + context_new)
+     * gives the proper client channel-loading defaults, which is what lets
+     * cliprdr connect: the raw path spuriously tried to load rdpdr and aborted
+     * channel loading before reaching cliprdr. */
+    RDP_CLIENT_ENTRY_POINTS epd = { 0 };
+    epd.Size        = sizeof(epd);
+    epd.Version     = RDP_CLIENT_INTERFACE_VERSION;
+    epd.ContextSize = sizeof(OrbContext);
+    epd.ClientNew   = orb_client_new;
+    epd.ClientFree  = orb_client_free;
 
-    instance->ContextSize    = sizeof(OrbContext);
-    instance->LoadChannels   = orb_load_channels;
-    instance->PreConnect     = orb_pre_connect;
-    instance->PostConnect    = orb_post_connect;
-    instance->PostDisconnect = orb_post_disconnect;
+    rdpContext *context = freerdp_client_context_new(&epd);
+    if (!context) { free(sess); return NULL; }
 
-    if (!freerdp_context_new(instance)) {
-        freerdp_free(instance);
-        free(sess);
-        return NULL;
-    }
-
-    OrbContext  *ctx      = (OrbContext *)instance->context;
-    rdpSettings *settings = orb_settings(ctx);
+    freerdp      *instance = context->instance;
+    OrbContext   *ctx      = (OrbContext *)context;
+    rdpSettings  *settings = context->settings;
 
     ctx->on_frame     = on_frame;
     ctx->on_error     = on_error;
@@ -815,8 +837,7 @@ OrbRdpSession *orb_session_new(const char   *host,
 
     if (pthread_create(&sess->thread, NULL, orb_event_loop, sess) != 0) {
         pthread_mutex_destroy(&ctx->clipboard_mutex);
-        freerdp_context_free(instance);
-        freerdp_free(instance);
+        freerdp_client_context_free(context);
         free(sess);
         return NULL;
     }
@@ -839,8 +860,7 @@ void orb_session_free(OrbRdpSession *session)
     pthread_mutex_unlock(&ctx->clipboard_mutex);
     pthread_mutex_destroy(&ctx->clipboard_mutex);
 
-    freerdp_context_free(session->instance);
-    freerdp_free(session->instance);
+    freerdp_client_context_free(session->instance->context);
     free(session);
 }
 
