@@ -515,7 +515,9 @@ static BOOL orb_load_channels(freerdp *instance)
         freerdp_client_add_static_channel(settings, 1, cliprdr_argv);
     }
 
-    freerdp_client_load_addins(context->channels, settings);
+    BOOL ok = freerdp_client_load_addins(context->channels, settings);
+    fprintf(stderr, "[orb-drive] load_addins=%d DeviceRedirection=%d\n",
+            ok, freerdp_settings_get_bool(settings, FreeRDP_DeviceRedirection));
     /* Always succeed: an optional channel failing to load (e.g. rdpdr, which is
      * not installed) must NOT abort the whole connection / graphics setup. */
     return TRUE;
@@ -730,6 +732,7 @@ OrbRdpSession *orb_session_new(const char   *host,
                                 bool          console_mode,
                                 int           security_mode,
                                 uint16_t      color_depth,
+                                const char   *shared_folder,
                                 orb_frame_fn  on_frame,
                                 orb_error_fn  on_error,
                                 orb_clipboard_fn on_clipboard,
@@ -811,18 +814,25 @@ OrbRdpSession *orb_session_new(const char   *host,
     freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, TRUE);
     freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard,     TRUE);
 
-    /* Disable device redirection. We don't use it, and leaving it on made
-     * freerdp_client_load_addins try to load the rdpdr channel, which isn't
-     * installed; that failure aborted the whole addin load BEFORE cliprdr,
-     * leaving the clipboard channel unconnected. xfreerdp3 +clipboard works
-     * precisely because it loads no rdpdr. */
-    freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection,     FALSE);
-    freerdp_settings_set_bool(settings, FreeRDP_RedirectDrives,        FALSE);
-    freerdp_settings_set_bool(settings, FreeRDP_RedirectHomeDrive,     FALSE);
+    /* Device redirection: off by default (leaving it on makes load_addins try
+     * to load rdpdr). Only enable it — and add a single shared drive — when the
+     * caller asked to share a folder, so files can be moved between this machine
+     * and the remote desktop (the drive shows up inside the session). */
     freerdp_settings_set_bool(settings, FreeRDP_RedirectSmartCards,    FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_RedirectPrinters,      FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_RedirectSerialPorts,   FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_RedirectParallelPorts, FALSE);
+    if (shared_folder && shared_folder[0]) {
+        if (freerdp_client_add_drive(settings, shared_folder, "OrbitalTerm"))
+            fprintf(stderr, "[orb-drive] sharing '%s' as drive 'OrbitalTerm'\n",
+                    shared_folder);
+        else
+            fprintf(stderr, "[orb-drive] freerdp_client_add_drive FAILED for '%s'\n",
+                    shared_folder);
+    } else {
+        freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, FALSE);
+        freerdp_settings_set_bool(settings, FreeRDP_RedirectDrives,    FALSE);
+    }
 
     sess->instance = instance;
     sess->alive    = 1;

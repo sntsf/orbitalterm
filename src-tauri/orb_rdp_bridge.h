@@ -68,6 +68,7 @@ OrbRdpSession *orb_session_new(const char   *host,
                                 bool          console_mode,
                                 int           security_mode, /* ORB_SEC_* */
                                 uint16_t      color_depth,   /* 8/15/16/24/32 */
+                                const char   *shared_folder, /* local dir to share as a drive; may be NULL */
                                 orb_frame_fn  on_frame,
                                 orb_error_fn  on_error,
                                 orb_clipboard_fn on_clipboard,

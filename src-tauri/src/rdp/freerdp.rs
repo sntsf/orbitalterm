@@ -168,6 +168,7 @@ extern "C" {
         console_mode: bool,
         security_mode: std::ffi::c_int,
         color_depth: u16,
+        shared_folder: *const std::ffi::c_char,
         on_frame: OrbFrameFn,
         on_error: OrbErrorFn,
         on_clipboard: OrbClipboardFn,
@@ -461,6 +462,14 @@ pub fn launch(
     let c_password = CString::new(password).map_err(|e| e.to_string())?;
     let c_domain   = CString::new(domain).map_err(|e| e.to_string())?;
 
+    // Auto-share the user's Downloads folder (falls back to home) into the
+    // session via RDP drive redirection, so files can be moved both ways. Kept
+    // alive until after the FFI call below.
+    let c_shared = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .and_then(|p| CString::new(p.to_string_lossy().into_owned()).ok());
+    let shared_ptr = c_shared.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+
     // Bounded channel: capacity 4 gives the encoder a buffer across ~65ms
     // of encoding time before frames are dropped via try_send.
     let (tx, rx) = mpsc::sync_channel::<FrameMsg>(4);
@@ -496,6 +505,7 @@ pub fn launch(
             console_mode,
             security_mode,
             depth,
+            shared_ptr,
             on_frame,
             on_error,
             on_clipboard,
