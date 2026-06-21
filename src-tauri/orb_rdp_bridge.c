@@ -512,10 +512,13 @@ static BOOL orb_load_channels(freerdp *instance)
     rdpContext  *context  = instance->context;
     rdpSettings *settings = context->settings;
 
-    /* Load addins from settings flags. RedirectClipboard makes load_addins pull
-     * in cliprdr automatically — exactly like xfreerdp3 +clipboard. We do NOT
-     * add cliprdr by hand as well: doing both registered the channel twice,
-     * which stopped it from connecting. */
+    /* Make sure cliprdr is registered up front so it is loaded regardless of
+     * whether another (optional) channel later fails inside load_addins. */
+    if (freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard)) {
+        const char *cliprdr_argv[] = { "cliprdr" };
+        freerdp_client_add_static_channel(settings, 1, cliprdr_argv);
+    }
+
     BOOL ok = freerdp_client_load_addins(context->channels, settings);
     fprintf(stderr, "[orb-clip] load_channels: RedirectClipboard=%d load_addins=%d\n",
             freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard), ok);
