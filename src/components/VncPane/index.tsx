@@ -319,6 +319,8 @@ export function VncPane({ tab }: VncPaneProps) {
         width={vncSize.width}
         height={vncSize.height}
         style={{
+          width: fit ? "100%" : undefined,
+          height: fit ? "100%" : undefined,
           maxWidth: fit ? "100%" : "none",
           maxHeight: fit ? "100%" : "none",
           objectFit: "contain",
