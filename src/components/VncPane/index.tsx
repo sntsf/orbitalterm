@@ -79,6 +79,8 @@ function domKeyToKeysym(e: KeyboardEvent): number {
 
 interface VncFrame {
   data: string;
+  x: number;
+  y: number;
   width: number;
   height: number;
 }
@@ -109,7 +111,8 @@ export function VncPane({ tab }: VncPaneProps) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const img = new Image();
-    img.onload = () => { ctx.drawImage(img, 0, 0); };
+    const { x, y } = payload;
+    img.onload = () => { ctx.drawImage(img, x, y); };
     img.src = `data:image/jpeg;base64,${payload.data}`;
   }, []);
 
