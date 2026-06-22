@@ -501,11 +501,10 @@ pub async fn vnc_connect(
     let mut stream = TcpStream::connect(&addr)
         .map_err(|e| format!("TCP connect failed: {e}"))?;
 
-    let password = if connection.auth_type == "password" {
-        crate::commands::sessions::get_saved_password_pub(&connection_id)
-    } else {
-        None
-    };
+    // VNC only supports password authentication, so always use the saved
+    // password when there is one (gating on auth_type == "password" meant a
+    // VNC connection saved with any other auth_type silently sent no password).
+    let password = crate::commands::sessions::get_saved_password_pub(&connection_id);
 
     let (width, height) = rfb_handshake(&mut stream, password.as_deref())?;
 
