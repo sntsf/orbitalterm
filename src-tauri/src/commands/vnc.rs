@@ -74,6 +74,9 @@ fn rfb_handshake(s: &mut TcpStream, password: Option<&str>) -> Result<(u32, u32)
         return Err(format!("VNC server refused connection: {}", String::from_utf8_lossy(&reason)));
     }
     let sec_types = read_exact(s, num_types as usize)?;
+    eprintln!("[orb-vnc] server_ver={:?} sec_types={:?} password={}",
+              ver_str.trim_end(), sec_types,
+              match password { Some(p) => format!("{} chars", p.len()), None => "none".into() });
 
     // Prefer None (1), then VNC auth (2)
     let chosen = if sec_types.contains(&1) {
@@ -85,6 +88,7 @@ fn rfb_handshake(s: &mut TcpStream, password: Option<&str>) -> Result<(u32, u32)
     };
 
     write_all(s, &[chosen])?;
+    eprintln!("[orb-vnc] chosen security type = {chosen}");
 
     match chosen {
         1 => {
@@ -104,6 +108,7 @@ fn rfb_handshake(s: &mut TcpStream, password: Option<&str>) -> Result<(u32, u32)
             let response = vnc_des_encrypt(&challenge, password.unwrap_or(""));
             write_all(s, &response)?;
             let result = read_u32be(s)?;
+            eprintln!("[orb-vnc] vnc-auth result = {result} (0 = OK)");
             if result != 0 {
                 // Try to read the reason string (3.8+)
                 if let Ok(reason_len) = read_u32be(s) {
