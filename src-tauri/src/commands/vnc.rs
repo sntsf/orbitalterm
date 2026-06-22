@@ -263,11 +263,13 @@ fn session_thread(
     };
 
     // Initial setup
-    if send_set_pixel_format(&mut write_s).is_err() { return; }
-    if send_set_encodings(&mut write_s).is_err() { return; }
+    if send_set_pixel_format(&mut write_s).is_err() { eprintln!("[orb-vnc] set_pixel_format failed"); return; }
+    if send_set_encodings(&mut write_s).is_err() { eprintln!("[orb-vnc] set_encodings failed"); return; }
     if send_fb_update_request(&mut write_s, false, 0, 0, width as u16, height as u16).is_err() {
+        eprintln!("[orb-vnc] initial fb_update_request failed");
         return;
     }
+    eprintln!("[orb-vnc] session thread entering render loop");
 
     // Use a short read timeout so we can interleave client-event processing
     read_s.set_read_timeout(Some(Duration::from_millis(20))).ok();
@@ -316,7 +318,8 @@ fn session_thread(
                 }
                 continue;
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("[orb-vnc] read error -> disconnect: {e}");
                 app.emit(&format!("vnc-disconnected-{session_id}"), ()).ok();
                 return;
             }
@@ -326,7 +329,7 @@ fn session_thread(
             // FramebufferUpdate
             0 => {
                 let mut hdr = [0u8; 3]; // padding + num_rects(2)
-                if read_s.read_exact(&mut hdr).is_err() { break; }
+                if read_s.read_exact(&mut hdr).is_err() { eprintln!("[orb-vnc] fb update header read failed"); break; }
                 let num_rects = u16::from_be_bytes([hdr[1], hdr[2]]);
                 let mut bad = false;
 
@@ -512,6 +515,7 @@ pub async fn vnc_connect(
     let password = crate::commands::sessions::get_saved_password_pub(&connection_id);
 
     let (width, height) = rfb_handshake(&mut stream, password.as_deref())?;
+    eprintln!("[orb-vnc] handshake OK {width}x{height}; starting session thread");
 
     let (tx, rx) = mpsc::sync_channel::<VncMsg>(128);
     let session_id = Uuid::new_v4().to_string();

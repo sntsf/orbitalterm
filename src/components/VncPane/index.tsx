@@ -117,6 +117,11 @@ export function VncPane({ tab }: VncPaneProps) {
     if (!connection) return;
     const gen = ++connectGenRef.current;
     setStatus("connecting");
+    // Yield one event-loop turn so StrictMode's mount→cleanup→mount settles
+    // before we call the backend. The stale first invoke aborts here instead of
+    // opening a second VNC connection to the server.
+    await new Promise<void>((r) => setTimeout(r, 0));
+    if (gen !== connectGenRef.current) return;
     try {
       const result = await vncConnect(connection.id);
       if (gen !== connectGenRef.current) {
