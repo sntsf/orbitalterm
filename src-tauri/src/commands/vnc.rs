@@ -238,8 +238,10 @@ fn encode_region(fb: &[u8], fb_width: u32, x: u32, y: u32, w: u32, h: u32) -> Op
             rgb.push(px[2]);
         }
     }
+    // Higher quality for small regions (crisp text), lower for big ones (speed).
+    let quality = if w * h < 100_000 { 72 } else { 55 };
     let mut jpeg = Vec::new();
-    JpegEncoder::new_with_quality(&mut jpeg, 70)
+    JpegEncoder::new_with_quality(&mut jpeg, quality)
         .write_image(&rgb, w, h, image::ExtendedColorType::Rgb8)
         .ok()?;
     Some(base64::engine::general_purpose::STANDARD.encode(&jpeg))
