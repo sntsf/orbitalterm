@@ -91,6 +91,11 @@ export function VncPane({ tab }: VncPaneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
+  // Generation guard: React 18 StrictMode double-invokes the connect effect,
+  // which otherwise opens TWO simultaneous VNC sessions to the same server —
+  // many servers (e.g. UltraVNC) then drop one and the viewer "connects and
+  // closes". Any in-flight connect whose generation is stale discards its session.
+  const connectGenRef = useRef(0);
 
   const [status, setStatus] = useState<"connecting" | "connected">("connecting");
   const [vncSize, setVncSize] = useState({ width: 1024, height: 768 });
@@ -110,14 +115,22 @@ export function VncPane({ tab }: VncPaneProps) {
 
   const connect = useCallback(async () => {
     if (!connection) return;
+    const gen = ++connectGenRef.current;
     setStatus("connecting");
     try {
       const result = await vncConnect(connection.id);
+      if (gen !== connectGenRef.current) {
+        // Superseded by a newer connect (StrictMode re-invoke / remount).
+        // Discard this session so we don't leak a second VNC connection.
+        vncDisconnect(result.session_id).catch(() => {});
+        return;
+      }
       sessionIdRef.current = result.session_id;
       setVncSize({ width: result.width, height: result.height });
       setStatus("connected");
       setTabStatus(tab.id, "connected");
     } catch (err) {
+      if (gen !== connectGenRef.current) return;
       const raw = String(err);
       useNotifStore.getState().add({
         connName: connection.name,
@@ -133,6 +146,7 @@ export function VncPane({ tab }: VncPaneProps) {
   useEffect(() => {
     connect();
     return () => {
+      connectGenRef.current++;
       if (sessionIdRef.current) {
         vncDisconnect(sessionIdRef.current).catch(console.error);
         sessionIdRef.current = null;
