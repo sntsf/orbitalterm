@@ -102,8 +102,8 @@ export function MasterPasswordDialog() {
           <div className="px-4 py-4 flex flex-col gap-3">
             <p className="text-[12px] text-[var(--color-text-primary)] leading-relaxed">
               {es
-                ? `Para ver las contraseñas de la BD ${bd} primero debes crear una contraseña maestra para esta fuente de datos.`
-                : `To view passwords in DB ${bd} you must first create a master password for this data source.`}
+                ? `Para ver las contraseñas de la BD ${bd} primero debes crear una contraseña maestra para esta fuente de datos. Así evitas que cualquier persona sin autorización pueda verlas.`
+                : `To view passwords in DB ${bd} you must first create a master password for this data source. This prevents anyone without authorization from viewing them.`}
             </p>
             <p className="text-[11px] text-[var(--color-text-muted)] leading-snug">
               {es

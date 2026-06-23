@@ -783,16 +783,20 @@ export function Sidebar() {
       rdp_redirect_drives: conn.rdp_redirect_drives ?? false,
       rdp_gateway: conn.rdp_gateway ?? "",
       proxy_jump: conn.proxy_jump ?? "",
+      rdp_drive_path: conn.rdp_drive_path ?? "",
     });
     await copyPassword(conn.id, created.id).catch(() => {});
 
-    // Place the duplicate directly after the original in the same scope
+    // Place the duplicate directly after the original in the same scope.
     const freshConns = await getConnections();
     const siblings = freshConns
       .filter((c) => c.folder_id === conn.folder_id && c.group_id === conn.group_id)
       .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
-    const origIdx = siblings.findIndex((c) => c.id === conn.id);
+    // Compute the original's index in the list WITHOUT the new duplicate — the
+    // duplicate sorts to the top (lowest sort_order), which would otherwise
+    // offset the index and drop the copy one slot too low.
     const withoutNew = siblings.filter((c) => c.id !== created.id);
+    const origIdx = withoutNew.findIndex((c) => c.id === conn.id);
     const insertAt = origIdx >= 0 ? origIdx + 1 : withoutNew.length;
     withoutNew.splice(insertAt, 0, created);
     await reorderConnections(
