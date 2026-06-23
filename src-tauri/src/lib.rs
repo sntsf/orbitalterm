@@ -22,7 +22,8 @@ use commands::ftp::{
 };
 use commands::sessions::{
     connect_rdp, connect_ssh, copy_password, delete_password, disconnect_rdp, disconnect_ssh,
-    get_password, has_password, rdp_get_linux_clipboard, rdp_key_input, rdp_mouse_input, rdp_refresh_session,
+    get_password, has_password, master_change, master_create, master_status, master_verify,
+    rdp_get_linux_clipboard, rdp_key_input, rdp_mouse_input, rdp_refresh_session,
     rdp_resize_session, rdp_set_clipboard, rdp_status, rdp_windows_reparent,
     rdp_windows_reposition, rdp_windows_set_menu_region, rdp_windows_visibility, resize_pty,
     save_password, send_input, show_rdp_tab_menu,
@@ -218,6 +219,10 @@ pub fn run() {
             // passwords
             save_password,
             get_password,
+            master_status,
+            master_create,
+            master_change,
+            master_verify,
             delete_password,
             copy_password,
             has_password,

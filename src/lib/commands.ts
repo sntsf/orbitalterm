@@ -119,6 +119,20 @@ export async function getPassword(connectionId: string): Promise<string> {
   return invoke("get_password", { connectionId });
 }
 
+// ── Master password (view lock) ──────────────────────────────────────────────
+export async function masterStatus(): Promise<boolean> {
+  return invoke("master_status");
+}
+export async function masterCreate(password: string): Promise<void> {
+  return invoke("master_create", { password });
+}
+export async function masterChange(oldPassword: string, newPassword: string): Promise<void> {
+  return invoke("master_change", { oldPassword, newPassword });
+}
+export async function masterVerify(password: string): Promise<boolean> {
+  return invoke("master_verify", { password });
+}
+
 export async function hasPassword(connectionId: string): Promise<boolean> {
   return invoke("has_password", { connectionId });
 }

@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   Plus, FolderPlus, Upload, Download, LogOut,
   Globe, Info, Bug, Check, X, Maximize2, PanelLeftClose,
-  Heart, RefreshCw, ExternalLink, Palette, Type, RotateCcw, Database,
+  Heart, RefreshCw, ExternalLink, Palette, Type, RotateCcw, Database, KeyRound,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
@@ -17,6 +17,9 @@ import {
   rdpWindowsSetMenuRegion,
 } from "../../lib/commands";
 import { ExportDialog } from "../ExportDialog";
+import { MasterPasswordDialog } from "../MasterPasswordDialog";
+import { useMasterStore } from "../../store/useMasterStore";
+import { masterStatus } from "../../lib/commands";
 
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -46,6 +49,13 @@ export function MenuBar() {
   const [newGroupName, setNewGroupName] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  const [masterSet, setMasterSet] = useState(false);
+  const { dialogMode: masterDialogMode, openDialog: openMasterDialog } = useMasterStore();
+
+  // Track whether a master password exists (refresh whenever the dialog closes).
+  useEffect(() => {
+    masterStatus().then(setMasterSet).catch(() => {});
+  }, [masterDialogMode]);
   const barRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -271,6 +281,14 @@ export function MenuBar() {
         { label: t("importMremoteng"), icon: <Upload size={12} />, action: handleImportMremoteng },
         { label: t("exportConnections"), icon: <Download size={12} />, action: handleExport },
         { separator: true },
+        {
+          label: masterSet
+            ? (lang === "es" ? "Cambiar contraseña maestra" : "Change master password")
+            : (lang === "es" ? "Crear contraseña maestra" : "Create master password"),
+          icon: <KeyRound size={12} />,
+          action: () => { setOpenMenuId(null); openMasterDialog(masterSet ? "change" : "create"); },
+        },
+        { separator: true },
         { label: t("exit"), icon: <LogOut size={12} />, shortcut: "Alt+F4", action: handleExit },
       ],
     },
@@ -417,6 +435,8 @@ export function MenuBar() {
           onDone={(msg, ok) => showToast(msg, ok)}
         />
       )}
+
+      <MasterPasswordDialog />
 
       {/* New data source dialog */}
       {showNewGroup && (

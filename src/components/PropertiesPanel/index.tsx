@@ -3,12 +3,14 @@ import { Plug, Eye, EyeOff, Info, Database, Folder as FolderIcon, type LucideIco
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore } from "../../store/useI18nStore";
 import { useImportStore } from "../../store/useImportStore";
+import { useMasterStore } from "../../store/useMasterStore";
 import {
   updateConnection,
   getConnections,
   savePassword,
   deletePassword,
   getPassword,
+  masterStatus,
   hasPassword,
   updateFolder,
   getFolders,
@@ -101,6 +103,7 @@ function ConnectionProperties() {
   } = useAppStore();
 
   const { sidebarHint } = useAppStore();
+  const { unlocked: masterUnlocked, openDialog: openMasterDialog } = useMasterStore();
   const existing = connections.find((c) => c.id === selectedConnectionId);
 
   const [name, setName] = useState("");
@@ -405,17 +408,27 @@ function ConnectionProperties() {
               <button
                 type="button"
                 onClick={async () => {
-                  const next = !showPassword;
-                  // Revealing a saved-but-unloaded password (sentinel dots):
-                  // fetch the real (decrypted) value so the eye shows it — works
-                  // every time, including after restarting the app.
-                  if (next && existing && isAllDots(password)) {
-                    try {
-                      const real = await getPassword(existing.id);
-                      if (real) setPassword(real);
-                    } catch { /* ignore */ }
+                  // Hiding is always allowed.
+                  if (showPassword) { setShowPassword(false); return; }
+                  // Reveal: fetch the real decrypted value (if the field still
+                  // shows the saved-password sentinel) and show it.
+                  const doReveal = async () => {
+                    if (existing && isAllDots(password)) {
+                      try {
+                        const real = await getPassword(existing.id);
+                        if (real) setPassword(real);
+                      } catch { /* ignore */ }
+                    }
+                    setShowPassword(true);
+                  };
+                  // If a master password is set and we haven't unlocked this
+                  // session, require it before revealing.
+                  const set = await masterStatus().catch(() => false);
+                  if (set && !masterUnlocked) {
+                    openMasterDialog("unlock", () => { void doReveal(); });
+                    return;
                   }
-                  setShowPassword(next);
+                  await doReveal();
                 }}
                 className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]"
               >
