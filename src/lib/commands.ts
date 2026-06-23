@@ -119,18 +119,18 @@ export async function getPassword(connectionId: string): Promise<string> {
   return invoke("get_password", { connectionId });
 }
 
-// ── Master password (view lock) ──────────────────────────────────────────────
-export async function masterStatus(): Promise<boolean> {
-  return invoke("master_status");
+// ── Per-data-source master password (view lock) ──────────────────────────────
+export async function groupMasterStatus(groupId: string): Promise<boolean> {
+  return invoke("group_master_status", { groupId });
 }
-export async function masterCreate(password: string): Promise<void> {
-  return invoke("master_create", { password });
+export async function groupMasterCreate(groupId: string, password: string): Promise<void> {
+  return invoke("group_master_create", { groupId, password });
 }
-export async function masterChange(oldPassword: string, newPassword: string): Promise<void> {
-  return invoke("master_change", { oldPassword, newPassword });
+export async function groupMasterChange(groupId: string, oldPassword: string, newPassword: string): Promise<void> {
+  return invoke("group_master_change", { groupId, oldPassword, newPassword });
 }
-export async function masterVerify(password: string): Promise<boolean> {
-  return invoke("master_verify", { password });
+export async function groupMasterVerify(groupId: string, password: string): Promise<boolean> {
+  return invoke("group_master_verify", { groupId, password });
 }
 
 export async function hasPassword(connectionId: string): Promise<boolean> {

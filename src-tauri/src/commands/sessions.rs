@@ -84,45 +84,69 @@ pub async fn get_password(connection_id: String) -> Result<String, String> {
     Ok(get_saved_password(&connection_id).unwrap_or_default())
 }
 
-// ── Master password (view lock) commands ────────────────────────────────────
+// ── Per-data-source master password (view lock) commands ────────────────────
 
-/// Whether a master password is configured.
-#[tauri::command]
-pub async fn master_status() -> Result<bool, String> {
-    Ok(crate::crypto::master_is_set())
+fn group_verifier(group_id: &str) -> Option<String> {
+    let db = db::open().ok()?;
+    db.query_row(
+        "SELECT verifier FROM group_master WHERE group_id = ?1",
+        params![group_id],
+        |row| row.get::<_, String>(0),
+    ).ok()
 }
 
-/// Create the master password (only when none exists yet).
+/// Whether the given data source has a master password configured.
 #[tauri::command]
-pub async fn master_create(password: String) -> Result<(), String> {
+pub async fn group_master_status(group_id: String) -> Result<bool, String> {
+    Ok(group_verifier(&group_id).is_some())
+}
+
+/// Create the master password for a data source (only when none exists yet).
+#[tauri::command]
+pub async fn group_master_create(group_id: String, password: String) -> Result<(), String> {
     if password.is_empty() {
         return Err("La contraseña maestra no puede estar vacía.".into());
     }
-    if crate::crypto::master_is_set() {
-        return Err("Ya existe una contraseña maestra.".into());
+    if group_verifier(&group_id).is_some() {
+        return Err("Esta fuente de datos ya tiene contraseña maestra.".into());
     }
-    crate::crypto::master_set(&password)
+    let verifier = crate::crypto::make_verifier(&password);
+    let db = db::open().map_err(|e| e.to_string())?;
+    db.execute(
+        "INSERT OR REPLACE INTO group_master (group_id, verifier) VALUES (?1, ?2)",
+        params![group_id, verifier],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
-/// Change the master password — requires the current one.
+/// Change a data source's master password — requires the current one.
 #[tauri::command]
-pub async fn master_change(old_password: String, new_password: String) -> Result<(), String> {
-    if !crate::crypto::master_is_set() {
-        return Err("No hay una contraseña maestra configurada.".into());
-    }
-    if !crate::crypto::master_verify(&old_password) {
+pub async fn group_master_change(group_id: String, old_password: String, new_password: String) -> Result<(), String> {
+    let Some(current) = group_verifier(&group_id) else {
+        return Err("Esta fuente de datos no tiene contraseña maestra.".into());
+    };
+    if !crate::crypto::check_verifier(&old_password, &current) {
         return Err("La contraseña maestra actual es incorrecta.".into());
     }
     if new_password.is_empty() {
         return Err("La nueva contraseña maestra no puede estar vacía.".into());
     }
-    crate::crypto::master_set(&new_password)
+    let verifier = crate::crypto::make_verifier(&new_password);
+    let db = db::open().map_err(|e| e.to_string())?;
+    db.execute(
+        "INSERT OR REPLACE INTO group_master (group_id, verifier) VALUES (?1, ?2)",
+        params![group_id, verifier],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
-/// Verify a candidate master password (unlocks the eye reveal for the session).
+/// Verify a candidate password for a data source (unlocks reveal for the session).
 #[tauri::command]
-pub async fn master_verify(password: String) -> Result<bool, String> {
-    Ok(crate::crypto::master_verify(&password))
+pub async fn group_master_verify(group_id: String, password: String) -> Result<bool, String> {
+    match group_verifier(&group_id) {
+        Some(v) => Ok(crate::crypto::check_verifier(&password, &v)),
+        None => Ok(false),
+    }
 }
 
 /// One-time migration: encrypt any passwords still stored as plaintext.

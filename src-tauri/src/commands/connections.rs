@@ -523,6 +523,8 @@ pub fn delete_group(id: String) -> Result<(), String> {
     // Delete the group itself
     db.execute("DELETE FROM groups WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
+    // Drop its master-password lock, if any.
+    db.execute("DELETE FROM group_master WHERE group_id = ?1", params![id]).ok();
     Ok(())
 }
 

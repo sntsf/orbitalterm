@@ -98,23 +98,15 @@ pub fn decrypt(stored: &str) -> String {
     }
 }
 
-// ── Master password (view lock) ─────────────────────────────────────────────
+// ── Master password verifier (per-data-source view lock) ────────────────────
 //
-// A separate "view lock": gates revealing connection passwords in the UI. It
-// does NOT protect the stored passwords (those use the key above so connections
-// keep working unattended) — it's shoulder-surfing protection. The verifier is
-// a PBKDF2 hash kept in `master.lock` next to the DB, so a user who forgets it
-// can reset the lock by deleting that one file WITHOUT losing any connection.
+// A "view lock" gating the reveal of connection passwords. It does NOT protect
+// the stored passwords (those use the key above so connections keep working
+// unattended) — it's shoulder-surfing protection, scoped per data source. The
+// verifier (random salt + PBKDF2 hash) is stored per group in the database, so
+// a forgotten lock is recovered by deleting/recreating that data source.
 
 const MASTER_ITERS: u32 = 200_000;
-
-fn master_path() -> PathBuf {
-    let mut p = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    p.push("orbitalterm");
-    std::fs::create_dir_all(&p).ok();
-    p.push("master.lock");
-    p
-}
 
 fn pbkdf2_hash(password: &str, salt: &[u8]) -> [u8; 32] {
     let mut hash = [0u8; 32];
@@ -122,35 +114,20 @@ fn pbkdf2_hash(password: &str, salt: &[u8]) -> [u8; 32] {
     hash
 }
 
-/// Whether a master password (view lock) has been configured.
-pub fn master_is_set() -> bool {
-    master_path().exists()
-}
-
-/// Store/overwrite the master password verifier (random salt + PBKDF2 hash).
-pub fn master_set(password: &str) -> Result<(), String> {
-    // Reuse the AES key generator for 16 random salt bytes.
+/// Build a verifier string (base64 of random salt[16] + PBKDF2 hash[32]).
+pub fn make_verifier(password: &str) -> String {
     let rnd = Aes256Gcm::generate_key(&mut OsRng);
     let salt = &rnd[..16];
     let hash = pbkdf2_hash(password, salt);
     let mut buf = Vec::with_capacity(48);
     buf.extend_from_slice(salt);
     buf.extend_from_slice(&hash);
-    fs::write(master_path(), STANDARD.encode(buf)).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(master_path(), fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    STANDARD.encode(buf)
 }
 
-/// Verify a candidate master password against the stored verifier.
-pub fn master_verify(password: &str) -> bool {
-    let Ok(content) = fs::read_to_string(master_path()) else {
-        return false;
-    };
-    let Ok(data) = STANDARD.decode(content.trim()) else {
+/// Check a candidate password against a stored verifier.
+pub fn check_verifier(password: &str, verifier: &str) -> bool {
+    let Ok(data) = STANDARD.decode(verifier.trim()) else {
         return false;
     };
     if data.len() != 48 {

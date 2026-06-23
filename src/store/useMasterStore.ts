@@ -1,28 +1,33 @@
 import { create } from "zustand";
 
-export type MasterDialogMode = "create" | "change" | "unlock" | null;
+export type MasterDialogMode = "create" | "change" | "unlock" | "require";
+
+interface DialogState {
+  mode: MasterDialogMode;
+  groupId: string;
+  groupName: string;
+  afterUnlock?: () => void;
+}
 
 interface MasterState {
-  // Whether the master password has been entered during this app session.
-  // While true, the eye button can reveal connection passwords without asking
-  // again. Resets on app restart (in-memory only).
-  unlocked: boolean;
-  setUnlocked: (b: boolean) => void;
+  // Data-source ids unlocked during this app session. While a group is here,
+  // the eye can reveal its connections' passwords without asking again.
+  // Resets on app restart (in-memory only).
+  unlocked: Record<string, boolean>;
+  isUnlocked: (groupId: string) => boolean;
+  markUnlocked: (groupId: string) => void;
 
-  dialogMode: MasterDialogMode;
-  // Optional action to run once the unlock dialog succeeds (e.g. reveal a field).
-  pendingAfterUnlock: (() => void) | null;
-
-  openDialog: (mode: Exclude<MasterDialogMode, null>, afterUnlock?: () => void) => void;
+  dialog: DialogState | null;
+  openDialog: (d: DialogState) => void;
   closeDialog: () => void;
 }
 
-export const useMasterStore = create<MasterState>((set) => ({
-  unlocked: false,
-  setUnlocked: (b) => set({ unlocked: b }),
-  dialogMode: null,
-  pendingAfterUnlock: null,
-  openDialog: (mode, afterUnlock) =>
-    set({ dialogMode: mode, pendingAfterUnlock: afterUnlock ?? null }),
-  closeDialog: () => set({ dialogMode: null, pendingAfterUnlock: null }),
+export const useMasterStore = create<MasterState>((set, get) => ({
+  unlocked: {},
+  isUnlocked: (groupId) => !!get().unlocked[groupId],
+  markUnlocked: (groupId) => set((s) => ({ unlocked: { ...s.unlocked, [groupId]: true } })),
+
+  dialog: null,
+  openDialog: (d) => set({ dialog: d }),
+  closeDialog: () => set({ dialog: null }),
 }));

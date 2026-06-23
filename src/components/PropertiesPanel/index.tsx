@@ -10,7 +10,7 @@ import {
   savePassword,
   deletePassword,
   getPassword,
-  masterStatus,
+  groupMasterStatus,
   hasPassword,
   updateFolder,
   getFolders,
@@ -102,8 +102,8 @@ function ConnectionProperties() {
     openTab,
   } = useAppStore();
 
-  const { sidebarHint } = useAppStore();
-  const { unlocked: masterUnlocked, openDialog: openMasterDialog } = useMasterStore();
+  const { sidebarHint, groups } = useAppStore();
+  const { isUnlocked: isGroupUnlocked, openDialog: openMasterDialog } = useMasterStore();
   const existing = connections.find((c) => c.id === selectedConnectionId);
 
   const [name, setName] = useState("");
@@ -421,11 +421,18 @@ function ConnectionProperties() {
                     }
                     setShowPassword(true);
                   };
-                  // If a master password is set and we haven't unlocked this
-                  // session, require it before revealing.
-                  const set = await masterStatus().catch(() => false);
-                  if (set && !masterUnlocked) {
-                    openMasterDialog("unlock", () => { void doReveal(); });
+                  // Per-data-source view lock: a connection's passwords can only
+                  // be revealed when its data source has a master password and it
+                  // has been unlocked this session.
+                  const gid = existing?.group_id ?? "";
+                  const gname = groups.find((g) => g.id === gid)?.name ?? "";
+                  const set = await groupMasterStatus(gid).catch(() => false);
+                  if (!set) {
+                    openMasterDialog({ mode: "require", groupId: gid, groupName: gname });
+                    return;
+                  }
+                  if (!isGroupUnlocked(gid)) {
+                    openMasterDialog({ mode: "unlock", groupId: gid, groupName: gname, afterUnlock: () => { void doReveal(); } });
                     return;
                   }
                   await doReveal();

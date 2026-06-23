@@ -251,5 +251,18 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("UPDATE schema_version SET version=11", [])?;
     }
 
+    if ver < 12 {
+        // Per-data-source master password verifier (view lock). Deleting a data
+        // source removes its lock; passwords stay encrypted with the app key.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS group_master (
+                group_id TEXT PRIMARY KEY NOT NULL,
+                verifier TEXT NOT NULL
+            )",
+            [],
+        ).ok();
+        conn.execute("UPDATE schema_version SET version=12", [])?;
+    }
+
     Ok(())
 }

@@ -19,7 +19,7 @@ import {
 import { ExportDialog } from "../ExportDialog";
 import { MasterPasswordDialog } from "../MasterPasswordDialog";
 import { useMasterStore } from "../../store/useMasterStore";
-import { masterStatus } from "../../lib/commands";
+import { groupMasterStatus } from "../../lib/commands";
 
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -41,21 +41,29 @@ export function MenuBar() {
   const t = useT();
   const { lang, setLang } = useI18nStore();
   const { theme, fontSize, setTheme, setFontSize, resetLayout } = usePrefsStore();
-  const { startNewConnection, setConnections, setFolders, setGroups, toggleSidebar, sidebarVisible, tabs, activeTabId } = useAppStore();
+  const { startNewConnection, setConnections, setFolders, groups, setGroups, toggleSidebar, sidebarVisible, tabs, activeTabId } = useAppStore();
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showAbout, setShowAbout] = useState(false);
+  const [showMasterHelp, setShowMasterHelp] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
-  const [masterSet, setMasterSet] = useState(false);
-  const { dialogMode: masterDialogMode, openDialog: openMasterDialog } = useMasterStore();
+  const { dialog: masterDialog, openDialog: openMasterDialog } = useMasterStore();
+  const [masterStatuses, setMasterStatuses] = useState<Record<string, boolean>>({});
 
-  // Track whether a master password exists (refresh whenever the dialog closes).
+  // Per-data-source master-password status (refresh whenever the dialog closes).
   useEffect(() => {
-    masterStatus().then(setMasterSet).catch(() => {});
-  }, [masterDialogMode]);
+    if (masterDialog) return;
+    let cancelled = false;
+    Promise.all(
+      groups.map((g) =>
+        groupMasterStatus(g.id).then((s) => [g.id, s] as const).catch(() => [g.id, false] as const)
+      )
+    ).then((entries) => { if (!cancelled) setMasterStatuses(Object.fromEntries(entries)); });
+    return () => { cancelled = true; };
+  }, [masterDialog, groups]);
   const barRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -281,13 +289,22 @@ export function MenuBar() {
         { label: t("importMremoteng"), icon: <Upload size={12} />, action: handleImportMremoteng },
         { label: t("exportConnections"), icon: <Download size={12} />, action: handleExport },
         { separator: true },
-        {
-          label: masterSet
-            ? (lang === "es" ? "Cambiar contraseña maestra" : "Change master password")
-            : (lang === "es" ? "Crear contraseña maestra" : "Create master password"),
+        ...groups.map((g) => ({
+          label:
+            (masterStatuses[g.id]
+              ? (lang === "es" ? "Cambiar contraseña maestra · BD " : "Change master password · DB ")
+              : (lang === "es" ? "Crear contraseña maestra · BD " : "Create master password · DB ")) +
+            `"${g.name}"`,
           icon: <KeyRound size={12} />,
-          action: () => { setOpenMenuId(null); openMasterDialog(masterSet ? "change" : "create"); },
-        },
+          action: () => {
+            setOpenMenuId(null);
+            openMasterDialog({
+              mode: masterStatuses[g.id] ? "change" : "create",
+              groupId: g.id,
+              groupName: g.name,
+            });
+          },
+        })),
         { separator: true },
         { label: t("exit"), icon: <LogOut size={12} />, shortcut: "Alt+F4", action: handleExit },
       ],
@@ -356,6 +373,11 @@ export function MenuBar() {
           label: t("about"),
           icon: <Info size={12} />,
           action: () => { setOpenMenuId(null); setShowAbout(true); },
+        },
+        {
+          label: lang === "es" ? "Olvidé mi contraseña maestra" : "I forgot my master password",
+          icon: <KeyRound size={12} />,
+          action: () => { setOpenMenuId(null); setShowMasterHelp(true); },
         },
         { separator: true },
         {
@@ -427,6 +449,9 @@ export function MenuBar() {
 
       {/* About modal */}
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
+
+      {/* Master password recovery help */}
+      {showMasterHelp && <MasterHelpModal es={lang === "es"} onClose={() => setShowMasterHelp(false)} />}
 
       {/* Export dialog */}
       {showExport && (
@@ -566,6 +591,57 @@ function AboutModal({ onClose }: { onClose: () => void }) {
             className="px-5 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white transition-colors"
           >
             {t("close")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Master password recovery help ──────────────────────────────────────────────
+
+function MasterHelpModal({ es, onClose }: { es: boolean; onClose: () => void }) {
+  const steps = es
+    ? [
+        "La contraseña maestra protege solo la VISUALIZACIÓN de contraseñas de una fuente de datos (BD). Tus conexiones seguirán funcionando aunque la olvides.",
+        "Si la olvidaste y necesitas volver a ver las contraseñas de esa BD, debes eliminar la fuente de datos y volver a crearla:",
+        "1) Clic derecho sobre la fuente de datos (BD) en la barra lateral → Eliminar. Esto borra sus conexiones y su candado.",
+        "2) Vuelve a crear la fuente de datos (menú Archivo → Nueva fuente de datos) y registra de nuevo tus conexiones.",
+        "3) Crea una nueva contraseña maestra para esa BD y guárdala en un lugar seguro.",
+        "Consejo: exporta tus conexiones (Archivo → Exportar) ANTES, para no perder los datos al recrear la BD. El export incluye las contraseñas en texto plano.",
+      ]
+    : [
+        "The master password only protects VIEWING the saved passwords of a data source (DB). Your connections keep working even if you forget it.",
+        "If you forgot it and need to view that DB's passwords again, delete the data source and recreate it:",
+        "1) Right-click the data source (DB) in the sidebar → Delete. This removes its connections and its lock.",
+        "2) Recreate the data source (File → New data source) and re-add your connections.",
+        "3) Create a new master password for that DB and store it somewhere safe.",
+        "Tip: export your connections (File → Export) BEFORE recreating, so you don't lose data. The export contains plaintext passwords.",
+      ];
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded-xl shadow-2xl w-[30rem] overflow-hidden">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-bg-elevated)]">
+          <KeyRound size={14} className="text-[var(--color-accent)]" />
+          <span className="text-sm font-semibold text-[var(--color-text-primary)]">
+            {es ? "Olvidé mi contraseña maestra" : "I forgot my master password"}
+          </span>
+        </div>
+        <div className="px-5 py-4 space-y-2 max-h-[60vh] overflow-y-auto">
+          {steps.map((s, i) => (
+            <p key={i} className="text-[12px] text-[var(--color-text-primary)] leading-relaxed">{s}</p>
+          ))}
+        </div>
+        <div className="px-5 pb-4 flex justify-end">
+          <button
+            onClick={onClose}
+            className="px-5 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white transition-colors"
+          >
+            {es ? "Entendido" : "Got it"}
           </button>
         </div>
       </div>

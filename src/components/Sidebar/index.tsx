@@ -3,7 +3,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import {
   Plus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
-  Database, X, Bell, Globe, SquarePlus, SquareMinus,
+  Database, X, Bell, Globe, SquarePlus, SquareMinus, KeyRound,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useI18nStore, useT } from "../../store/useI18nStore";
@@ -12,8 +12,10 @@ import {
   getConnections, getFolders, deleteConnection, saveConnection,
   saveFolder, deleteFolder, getFolders as refetchFolders, reorderConnections, reorderFolders,
   moveFolderToGroup, getGroups, saveGroup, renameGroup, deleteGroup, copyPassword,
+  groupMasterStatus,
 } from "../../lib/commands";
 import { ContextMenu, useContextMenu } from "../ContextMenu";
+import { useMasterStore } from "../../store/useMasterStore";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
 import { iconColorClass } from "../../lib/folderColors";
@@ -119,6 +121,7 @@ export function Sidebar() {
   const { notifs, expanded, show, clearAll: clearAllNotifs } = useNotifStore();
 
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
+  const openMasterDialog = useMasterStore((s) => s.openDialog);
 
   const [panelHeight, setPanelHeight] = useState(() => {
     const saved = localStorage.getItem("orbitalterm:panelHeight");
@@ -757,6 +760,14 @@ export function Sidebar() {
       { label: t("newConnectionMenu"), icon: <Plus size={12} />, action: () => startNewConnection(null, group.id, t("newConnectionMenu")) },
       { label: t("newFolder"), icon: <FolderPlus size={12} />, action: () => startCreateFolder(null, group.id) },
       { label: t("rename"), icon: <Edit2 size={12} />, action: () => startRenameGroup(group) },
+      {
+        label: lang === "es" ? "Contraseña maestra" : "Master password",
+        icon: <KeyRound size={12} />,
+        action: async () => {
+          const has = await groupMasterStatus(group.id).catch(() => false);
+          openMasterDialog({ mode: has ? "change" : "create", groupId: group.id, groupName: group.name });
+        },
+      },
       { separator: true },
       { label: t("delete"), icon: <Trash2 size={12} />, action: () => removeGroup(group), danger: true },
     ]);
