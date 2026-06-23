@@ -43,7 +43,7 @@ des = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
 roxmltree = "0.20"
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["getrandom"] }
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 sha1 = "0.10"
 tauri-plugin-clipboard-manager = "2.3.2"

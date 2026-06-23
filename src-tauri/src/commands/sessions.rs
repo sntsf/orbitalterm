@@ -65,23 +65,51 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
 
 fn get_saved_password(connection_id: &str) -> Option<String> {
     let db = db::open().ok()?;
-    db.query_row(
+    let stored: String = db.query_row(
         "SELECT password FROM passwords WHERE connection_id = ?1",
         params![connection_id],
         |row| row.get(0),
-    ).ok()
+    ).ok()?;
+    Some(crate::crypto::decrypt(&stored))
 }
 
 pub fn get_saved_password_pub(connection_id: &str) -> Option<String> {
     get_saved_password(connection_id)
 }
 
+/// Returns the decrypted password for the UI (eye-button reveal). Empty string
+/// when none is saved.
+#[tauri::command]
+pub async fn get_password(connection_id: String) -> Result<String, String> {
+    Ok(get_saved_password(&connection_id).unwrap_or_default())
+}
+
+/// One-time migration: encrypt any passwords still stored as plaintext.
+pub fn migrate_plaintext_passwords() {
+    let Ok(db) = db::open() else { return };
+    let rows: Vec<(String, String)> = {
+        let Ok(mut stmt) = db.prepare("SELECT connection_id, password FROM passwords") else { return };
+        let Ok(mapped) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) else { return };
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (id, pw) in rows {
+        if !crate::crypto::is_encrypted(&pw) {
+            let enc = crate::crypto::encrypt(&pw);
+            db.execute(
+                "UPDATE passwords SET password = ?1 WHERE connection_id = ?2",
+                params![enc, id],
+            ).ok();
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn save_password(connection_id: String, password: String) -> Result<(), String> {
     let db = db::open().map_err(|e| e.to_string())?;
+    let enc = crate::crypto::encrypt(&password);
     db.execute(
         "INSERT OR REPLACE INTO passwords (connection_id, password) VALUES (?1, ?2)",
-        params![connection_id, password],
+        params![connection_id, enc],
     ).map_err(|e| e.to_string())?;
     Ok(())
 }

@@ -544,7 +544,8 @@ pub fn export_connections() -> Result<String, String> {
         ).ok();
         let mut v = serde_json::to_value(c).unwrap_or_default();
         if let Some(p) = pw {
-            v["password"] = serde_json::Value::String(p);
+            // Export decrypted so the JSON is portable (re-importable elsewhere).
+            v["password"] = serde_json::Value::String(crate::crypto::decrypt(&p));
         }
         v
     }).collect();
@@ -656,12 +657,17 @@ pub fn import_connections(json: String) -> Result<usize, String> {
         ).is_ok();
 
         if ok {
-            // Save password if present in the export
+            // Save password if present in the export, encrypting plaintext values.
             if let Some(pw) = item["password"].as_str() {
                 if !pw.is_empty() {
+                    let stored = if crate::crypto::is_encrypted(pw) {
+                        pw.to_string()
+                    } else {
+                        crate::crypto::encrypt(pw)
+                    };
                     let _ = db.execute(
                         "INSERT OR REPLACE INTO passwords (connection_id, password) VALUES (?1, ?2)",
-                        params![id, pw],
+                        params![id, stored],
                     );
                 }
             }
@@ -871,7 +877,7 @@ fn mrng_process_node(node: roxmltree::Node, parent_folder_id: Option<&str>, ctx:
                         if !pw.is_empty() {
                             let _ = ctx.db.execute(
                                 "INSERT OR REPLACE INTO passwords (connection_id, password) VALUES (?1, ?2)",
-                                params![id, pw],
+                                params![id, crate::crypto::encrypt(&pw)],
                             );
                         }
                     }

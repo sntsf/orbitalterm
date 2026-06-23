@@ -1,5 +1,6 @@
 mod browser;
 mod commands;
+mod crypto;
 mod db;
 mod ftp;
 mod rdp;
@@ -21,7 +22,7 @@ use commands::ftp::{
 };
 use commands::sessions::{
     connect_rdp, connect_ssh, copy_password, delete_password, disconnect_rdp, disconnect_ssh,
-    has_password, rdp_get_linux_clipboard, rdp_key_input, rdp_mouse_input, rdp_refresh_session,
+    get_password, has_password, rdp_get_linux_clipboard, rdp_key_input, rdp_mouse_input, rdp_refresh_session,
     rdp_resize_session, rdp_set_clipboard, rdp_status, rdp_windows_reparent,
     rdp_windows_reposition, rdp_windows_set_menu_region, rdp_windows_visibility, resize_pty,
     save_password, send_input, show_rdp_tab_menu,
@@ -148,6 +149,9 @@ pub fn run() {
         .manage(ftp::new_ftp_sessions())
         .manage(vnc::new_vnc_sessions())
         .setup(|app| {
+            // Encrypt any passwords still stored as plaintext (one-time, idempotent).
+            commands::sessions::migrate_plaintext_passwords();
+
             // Embed icon bytes at compile time, decode PNG → raw RGBA, set on window.
             let png = include_bytes!("../icons/icon.png");
             let img = image::load_from_memory(png)
@@ -213,6 +217,7 @@ pub fn run() {
             show_rdp_tab_menu,
             // passwords
             save_password,
+            get_password,
             delete_password,
             copy_password,
             has_password,

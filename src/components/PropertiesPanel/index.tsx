@@ -8,6 +8,7 @@ import {
   getConnections,
   savePassword,
   deletePassword,
+  getPassword,
   hasPassword,
   updateFolder,
   getFolders,
@@ -403,7 +404,19 @@ function ConnectionProperties() {
               />
               <button
                 type="button"
-                onClick={() => setShowPassword(!showPassword)}
+                onClick={async () => {
+                  const next = !showPassword;
+                  // Revealing a saved-but-unloaded password (sentinel dots):
+                  // fetch the real (decrypted) value so the eye shows it — works
+                  // every time, including after restarting the app.
+                  if (next && existing && isAllDots(password)) {
+                    try {
+                      const real = await getPassword(existing.id);
+                      if (real) setPassword(real);
+                    } catch { /* ignore */ }
+                  }
+                  setShowPassword(next);
+                }}
                 className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]"
               >
                 {showPassword ? <EyeOff size={11} /> : <Eye size={11} />}

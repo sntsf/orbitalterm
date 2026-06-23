@@ -115,6 +115,10 @@ export async function deletePassword(connectionId: string): Promise<void> {
   return invoke("delete_password", { connectionId });
 }
 
+export async function getPassword(connectionId: string): Promise<string> {
+  return invoke("get_password", { connectionId });
+}
+
 export async function hasPassword(connectionId: string): Promise<boolean> {
   return invoke("has_password", { connectionId });
 }
