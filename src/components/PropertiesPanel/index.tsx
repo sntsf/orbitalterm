@@ -517,7 +517,7 @@ function HintBox({ hint, hintLang: _hintLang }: { hint: { title: string; body: s
     const { name, done, total } = importProgress;
     const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
     return (
-      <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 min-h-[64px]">
+      <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 h-[92px] flex items-center">
         <div className="flex gap-2.5 items-center">
           <ProgressRing pct={pct} indeterminate={total === 0} />
           <div className="min-w-0">
@@ -535,11 +535,11 @@ function HintBox({ hint, hintLang: _hintLang }: { hint: { title: string; body: s
   }
 
   return (
-    <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 min-h-[64px]">
+    <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 h-[92px]">
       {hint ? (
-        <div className="flex gap-2">
+        <div className="flex gap-2 h-full">
           <Info size={13} className="text-[var(--color-accent)] shrink-0 mt-0.5" />
-          <div>
+          <div className="overflow-y-auto pr-1 min-w-0">
             <p className="text-[12px] font-semibold text-[var(--color-text-primary)] leading-tight mb-0.5">
               {hint.title}
             </p>
