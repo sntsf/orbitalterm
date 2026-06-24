@@ -81,17 +81,18 @@ export function MenuBar() {
 
   // The Windows RDP ActiveX is a native child window that paints on top of the
   // WebView, so any HTML overlay (menus, submenus, modals, popups) would be
-  // hidden behind it. We mark every such overlay with the `rdp-pierce` class and
-  // carve a hole in the RDP WS_POPUP for each one so they show through. A
-  // MutationObserver re-measures whenever overlays mount/unmount (e.g. a submenu
-  // opens or a dialog appears).
+  // hidden behind it. We mark every overlay with the `rdp-pierce` class and,
+  // while an RDP tab is active, continuously re-measure them (rAF loop) and carve
+  // a hole in the RDP WS_POPUP for each. The loop only calls into Tauri when the
+  // set of rects actually changes, so it's cheap.
   useEffect(() => {
     const activeTab = tabs.find((t) => t.id === activeTabId);
     const sessionId = activeTab?.session_id;
     if (!sessionId) return;
 
     let last = "";
-    const apply = () => {
+    let raf = 0;
+    const tick = () => {
       const rects: [number, number, number, number][] = [];
       document.querySelectorAll<HTMLElement>(".rdp-pierce").forEach((el) => {
         const r = el.getBoundingClientRect();
@@ -100,21 +101,15 @@ export function MenuBar() {
         }
       });
       const key = JSON.stringify(rects);
-      if (key === last) return;
-      last = key;
-      rdpWindowsSetMenuRegion(sessionId, rects.length ? rects : null).catch(() => {});
+      if (key !== last) {
+        last = key;
+        rdpWindowsSetMenuRegion(sessionId, rects.length ? rects : null).catch(() => {});
+      }
+      raf = requestAnimationFrame(tick);
     };
-
-    const schedule = () => requestAnimationFrame(apply);
-    // Overlays mount/unmount from the DOM when opened/closed (childList); also
-    // re-measure on resize since positions are viewport-relative.
-    const obs = new MutationObserver(schedule);
-    obs.observe(document.body, { childList: true, subtree: true });
-    window.addEventListener("resize", schedule);
-    schedule();
+    raf = requestAnimationFrame(tick);
     return () => {
-      obs.disconnect();
-      window.removeEventListener("resize", schedule);
+      cancelAnimationFrame(raf);
       rdpWindowsSetMenuRegion(sessionId, null).catch(() => {});
     };
   }, [tabs, activeTabId]);
