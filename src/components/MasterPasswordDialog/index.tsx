@@ -87,7 +87,7 @@ export function MasterPasswordDialog() {
 
   return (
     <div
-      className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50"
+      className="rdp-pierce fixed inset-0 z-[120] flex items-center justify-center bg-black/50"
       onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}
     >
       <div className="bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded-xl shadow-2xl w-[26rem] overflow-hidden">
