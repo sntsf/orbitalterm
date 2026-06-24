@@ -15,9 +15,9 @@ export function Welcome() {
     <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8 bg-[var(--color-bg-base)] h-full">
       <div className="flex flex-col items-center gap-3">
         <img
-          src="/logo.png"
+          src="/logo_centro.svg"
           alt="OrbitalTerm"
-          className="h-28 w-auto object-contain select-none"
+          className="h-36 w-auto object-contain select-none"
           draggable={false}
         />
         <p className="text-[var(--color-text-muted)] text-sm">

@@ -569,9 +569,9 @@ function AboutModal({ onClose }: { onClose: () => void }) {
       <div className="bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded-xl shadow-2xl w-80 overflow-hidden">
         <div className="flex flex-col items-center gap-3 px-6 py-6 bg-[var(--color-bg-elevated)]">
           <img
-            src="/logo.png"
+            src="/logo_centro.svg"
             alt="OrbitalTerm"
-            className="h-20 w-auto object-contain select-none"
+            className="h-28 w-auto object-contain select-none"
             draggable={false}
           />
           <div className="text-center">
