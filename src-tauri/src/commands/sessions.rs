@@ -1074,16 +1074,16 @@ pub async fn rdp_windows_visibility(
 pub async fn rdp_windows_set_menu_region(
     embedded_sessions: State<'_, EmbeddedRdpSessionMap>,
     session_id: String,
-    rect: Option<[i32; 4]>,
+    rects: Option<Vec<[i32; 4]>>,
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let map = embedded_sessions.lock().unwrap();
         if let Some(session) = map.get(&session_id) {
-            crate::rdp::windows_rdp::set_menu_region(session, rect);
+            crate::rdp::windows_rdp::set_menu_region(session, rects.clone());
         }
     }
-    let _ = (embedded_sessions, session_id, rect);
+    let _ = (embedded_sessions, session_id, rects);
     Ok(())
 }
 

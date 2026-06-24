@@ -62,7 +62,7 @@ export function ExportDialog({ onClose, onDone }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
+      className="rdp-pierce fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div className="bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded-xl shadow-2xl w-96 overflow-hidden flex flex-col">

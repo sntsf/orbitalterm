@@ -79,28 +79,45 @@ export function MenuBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When a menu bar dropdown opens, carve a hole in the RDP WS_POPUP so the dropdown
-  // shows through without blacking out the RDP.  When closed, restore the full region.
+  // The Windows RDP ActiveX is a native child window that paints on top of the
+  // WebView, so any HTML overlay (menus, submenus, modals, popups) would be
+  // hidden behind it. We mark every such overlay with the `rdp-pierce` class and
+  // carve a hole in the RDP WS_POPUP for each one so they show through. A
+  // MutationObserver re-measures whenever overlays mount/unmount (e.g. a submenu
+  // opens or a dialog appears).
   useEffect(() => {
     const activeTab = tabs.find((t) => t.id === activeTabId);
     const sessionId = activeTab?.session_id;
     if (!sessionId) return;
 
-    if (openMenuId !== null) {
-      // Measure after the dropdown has rendered
-      requestAnimationFrame(() => {
-        const el = dropdownRef.current;
-        if (!el) return;
+    let last = "";
+    const apply = () => {
+      const rects: [number, number, number, number][] = [];
+      document.querySelectorAll<HTMLElement>(".rdp-pierce").forEach((el) => {
         const r = el.getBoundingClientRect();
-        rdpWindowsSetMenuRegion(sessionId, [
-          Math.floor(r.left), Math.floor(r.top),
-          Math.ceil(r.width), Math.ceil(r.height),
-        ]).catch(() => {});
+        if (r.width > 0 && r.height > 0) {
+          rects.push([Math.floor(r.left), Math.floor(r.top), Math.ceil(r.width), Math.ceil(r.height)]);
+        }
       });
-    } else {
+      const key = JSON.stringify(rects);
+      if (key === last) return;
+      last = key;
+      rdpWindowsSetMenuRegion(sessionId, rects.length ? rects : null).catch(() => {});
+    };
+
+    const schedule = () => requestAnimationFrame(apply);
+    // Overlays mount/unmount from the DOM when opened/closed (childList); also
+    // re-measure on resize since positions are viewport-relative.
+    const obs = new MutationObserver(schedule);
+    obs.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("resize", schedule);
+    schedule();
+    return () => {
+      obs.disconnect();
+      window.removeEventListener("resize", schedule);
       rdpWindowsSetMenuRegion(sessionId, null).catch(() => {});
-    }
-  }, [openMenuId, tabs, activeTabId]);
+    };
+  }, [tabs, activeTabId]);
 
   // Close dropdown on click outside
   useEffect(() => {
@@ -510,7 +527,7 @@ export function MenuBar() {
       {/* New data source dialog */}
       {showNewGroup && (
         <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
+          className="rdp-pierce fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
           onMouseDown={(e) => { if (e.target === e.currentTarget) setShowNewGroup(false); }}
         >
           <div className="bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded-xl shadow-2xl w-80 overflow-hidden">
@@ -614,7 +631,7 @@ function MenuRow({ item, onClose }: { item: Exclude<MenuItemDef, { separator: tr
 
       {hasSub && subOpen && (
         <div
-          className="absolute left-full top-0 -mt-1 -ml-px min-w-[180px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-xl z-50 py-1"
+          className="rdp-pierce absolute left-full top-0 -mt-1 -ml-px min-w-[180px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-xl z-50 py-1"
           onMouseEnter={openSub}
           onMouseLeave={scheduleClose}
         >
@@ -632,7 +649,7 @@ function MenuRow({ item, onClose }: { item: Exclude<MenuItemDef, { separator: tr
 const Dropdown = forwardRef<HTMLDivElement, { items: MenuItemDef[]; onClose: () => void }>(
 function Dropdown({ items, onClose }, ref) {
   return (
-    <div ref={ref} className="absolute top-full left-0 mt-0.5 min-w-[210px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-xl z-50 py-1">
+    <div ref={ref} className="rdp-pierce absolute top-full left-0 mt-0.5 min-w-[210px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-xl z-50 py-1">
       {items.map((item, i) =>
         "separator" in item
           ? <div key={i} className="my-1 border-t border-[var(--color-border)]" />

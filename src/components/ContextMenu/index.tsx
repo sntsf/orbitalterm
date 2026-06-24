@@ -26,7 +26,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 
       <div
         ref={ref}
-        className="fixed z-50 min-w-44 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded-lg shadow-2xl py-1 overflow-hidden"
+        className="rdp-pierce fixed z-50 min-w-44 bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded-lg shadow-2xl py-1 overflow-hidden"
         style={{ left: x, top: y }}
       >
         {items.map((item, i) =>

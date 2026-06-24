@@ -523,57 +523,51 @@ pub fn reparent(session: &WindowsRdpSession, new_parent: HWND, rel_x: i32, rel_y
 /// matching `getBoundingClientRect()`.  Pass `None` to restore the full region.
 ///
 /// SetWindowRgn may be called safely from any thread; the region update is immediate.
-pub fn set_menu_region(session: &WindowsRdpSession, menu_rect: Option<[i32; 4]>) {
+pub fn set_menu_region(session: &WindowsRdpSession, rects: Option<Vec<[i32; 4]>>) {
     let host_hwnd = HWND(session.host_hwnd.load(Ordering::Relaxed) as *mut _);
     if host_hwnd.0.is_null() {
         return;
     }
     unsafe {
-        match menu_rect {
+        let rects = match rects {
             None => {
                 // NULL region → entire window is visible
                 let _ = SetWindowRgn(host_hwnd, None, true);
+                return;
             }
-            Some([menu_vp_x, menu_vp_y, menu_vp_w, menu_vp_h]) => {
-                let popup_vp_x = session.rel_x.load(Ordering::Relaxed) as i32;
-                let popup_vp_y = session.rel_y.load(Ordering::Relaxed) as i32;
-                let popup_w    = session.width.load(Ordering::Relaxed) as i32;
-                let popup_h    = session.height.load(Ordering::Relaxed) as i32;
-
-                // Compute the ACTUAL intersection of the menu and the WS_POPUP in viewport
-                // coordinates, then convert to WS_POPUP-local coordinates for the hole.
-                // Using the full menu rect directly would carve a hole larger than the overlap,
-                // making the WS_POPUP show dark WebView2 background beyond the menu edge.
-                let inter_left   = menu_vp_x.max(popup_vp_x);
-                let inter_top    = menu_vp_y.max(popup_vp_y);
-                let inter_right  = (menu_vp_x + menu_vp_w).min(popup_vp_x + popup_w);
-                let inter_bottom = (menu_vp_y + menu_vp_h).min(popup_vp_y + popup_h);
-
-                if inter_right <= inter_left || inter_bottom <= inter_top {
-                    // No overlap — menu is entirely outside the WS_POPUP; nothing to carve.
-                    return;
-                }
-
-                // Convert intersection to WS_POPUP local (nc offsets cancel out).
-                let lx = inter_left   - popup_vp_x;
-                let ly = inter_top    - popup_vp_y;
-                let rx = inter_right  - popup_vp_x;
-                let by = inter_bottom - popup_vp_y;
-
-                // The WS_POPUP is sized in physical pixels, so scale these logical
-                // viewport coordinates up to match it before carving the hole.
-                let parent = HWND(session.parent_hwnd.load(Ordering::Relaxed) as *mut _);
-                let s = dpi_scale(parent);
-
-                // Build: full_region MINUS hole_region
-                let full = CreateRectRgn(0, 0, scale_px(popup_w, s), scale_px(popup_h, s));
-                let hole = CreateRectRgn(scale_px(lx, s), scale_px(ly, s), scale_px(rx, s), scale_px(by, s));
-                CombineRgn(Some(full), Some(full), Some(hole), RGN_DIFF);
-                // After SetWindowRgn succeeds the OS owns full — do NOT delete it.
-                let _ = SetWindowRgn(host_hwnd, Some(full), true);
-                // hole is ours; delete it.
-                let _ = DeleteObject(hole.into());
+            Some(r) if r.is_empty() => {
+                let _ = SetWindowRgn(host_hwnd, None, true);
+                return;
             }
+            Some(r) => r,
+        };
+
+        let popup_vp_x = session.rel_x.load(Ordering::Relaxed) as i32;
+        let popup_vp_y = session.rel_y.load(Ordering::Relaxed) as i32;
+        let popup_w    = session.width.load(Ordering::Relaxed) as i32;
+        let popup_h    = session.height.load(Ordering::Relaxed) as i32;
+        let parent = HWND(session.parent_hwnd.load(Ordering::Relaxed) as *mut _);
+        let s = dpi_scale(parent);
+
+        // full_region MINUS each overlay's intersection with the WS_POPUP.
+        let full = CreateRectRgn(0, 0, scale_px(popup_w, s), scale_px(popup_h, s));
+        for [menu_vp_x, menu_vp_y, menu_vp_w, menu_vp_h] in rects {
+            let inter_left   = menu_vp_x.max(popup_vp_x);
+            let inter_top    = menu_vp_y.max(popup_vp_y);
+            let inter_right  = (menu_vp_x + menu_vp_w).min(popup_vp_x + popup_w);
+            let inter_bottom = (menu_vp_y + menu_vp_h).min(popup_vp_y + popup_h);
+            if inter_right <= inter_left || inter_bottom <= inter_top {
+                continue; // no overlap with this overlay
+            }
+            let lx = inter_left   - popup_vp_x;
+            let ly = inter_top    - popup_vp_y;
+            let rx = inter_right  - popup_vp_x;
+            let by = inter_bottom - popup_vp_y;
+            let hole = CreateRectRgn(scale_px(lx, s), scale_px(ly, s), scale_px(rx, s), scale_px(by, s));
+            CombineRgn(Some(full), Some(full), Some(hole), RGN_DIFF);
+            let _ = DeleteObject(hole.into());
         }
+        // After SetWindowRgn succeeds the OS owns full — do NOT delete it.
+        let _ = SetWindowRgn(host_hwnd, Some(full), true);
     }
 }
