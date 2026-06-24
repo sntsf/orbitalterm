@@ -44,7 +44,7 @@
     },
     "windows": {
       "nsis": {
-        "languages": ["Spanish", "English", "French", "Russian", "Japanese"],
+        "languages": ["English", "Spanish", "French", "Russian", "Japanese"],
         "displayLanguageSelector": true
       }
     },
