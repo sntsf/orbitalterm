@@ -528,6 +528,12 @@ static BOOL orb_pre_connect(freerdp *instance)
     OrbContext   *ctx      = (OrbContext *)instance->context;
     rdpSettings  *settings = orb_settings(ctx);
 
+#if FREERDP_VERSION_MAJOR < 3
+    /* FreeRDP 2 has no LoadChannels callback, so load channel addins here in
+     * PreConnect (the correct place for FreeRDP 2). */
+    orb_load_channels(instance);
+#endif
+
     /* NOTE: channel addins are loaded in orb_load_channels (the LoadChannels
      * callback), NOT here. FreeRDP 3 moved channel loading out of PreConnect;
      * loading static channels (cliprdr) here is too late and they never
@@ -705,7 +711,10 @@ static void *orb_event_loop(void *arg)
 static BOOL orb_client_new(freerdp *instance, rdpContext *context)
 {
     (void)context;
+#if FREERDP_VERSION_MAJOR >= 3
+    /* FreeRDP 3 loads channels via this callback (before PreConnect). */
     instance->LoadChannels   = orb_load_channels;
+#endif
     instance->PreConnect     = orb_pre_connect;
     instance->PostConnect    = orb_post_connect;
     instance->PostDisconnect = orb_post_disconnect;
