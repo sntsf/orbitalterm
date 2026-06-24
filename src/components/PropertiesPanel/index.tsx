@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Plug, Eye, EyeOff, Info, Database, Folder as FolderIcon, type LucideIcon } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Plug, Eye, EyeOff, Info, Database, Folder as FolderIcon, ChevronDown, type LucideIcon } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore } from "../../store/useI18nStore";
 import { useImportStore } from "../../store/useImportStore";
@@ -315,36 +316,38 @@ function ConnectionProperties() {
       {/* Fields */}
       <div className="flex-1 overflow-y-auto px-3 py-1 space-y-1 min-h-0">
         <Row label={t("propType")}>
-          <select
+          <ThemedSelect
             value={type}
-            onChange={(e) => handleTypeChange(e.target.value as ConnectionType)}
+            onChange={(v) => handleTypeChange(v as ConnectionType)}
             onFocus={focus("type")} onBlur={blur}
-            className={inp}
-          >
-            <option value="ssh">SSH</option>
-            <option value="rdp">RDP</option>
-            <option value="vnc">VNC</option>
-            <option value="ftp">FTP</option>
-            <option value="sftp">SFTP</option>
-            <option value="browser">{lang === "es" ? "Navegador" : "Browser"}</option>
-          </select>
+            options={[
+              { value: "ssh", label: "SSH" },
+              { value: "rdp", label: "RDP" },
+              { value: "vnc", label: "VNC" },
+              { value: "ftp", label: "FTP" },
+              { value: "sftp", label: "SFTP" },
+              { value: "browser", label: lang === "es" ? "Navegador" : "Browser" },
+            ]}
+          />
         </Row>
 
         {/* Icon picker */}
         <Row label={lang === "es" ? "Icono" : "Icon"}>
           <div className="flex items-center gap-2" onFocus={focus("icon")} onBlur={blur}>
             <ConnIconDisplay iconKey={icon || DEFAULT_CONN_ICON[type]} size={20} />
-            <select
+            <ThemedSelect
               value={icon || DEFAULT_CONN_ICON[type]}
-              onChange={(e) => setIcon(e.target.value)}
-              className={inp}
-            >
-              {(Object.entries(CONN_ICONS) as [ConnIconKey, typeof CONN_ICONS[ConnIconKey]][]).map(([key, def]) => (
-                <option key={key} value={key}>
-                  {lang === "es" ? def.label_es : def.label_en}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => setIcon(v)}
+              options={(Object.entries(CONN_ICONS) as [ConnIconKey, typeof CONN_ICONS[ConnIconKey]][]).map(([key, def]) => ({
+                value: key,
+                label: (
+                  <span className="flex items-center gap-2">
+                    <ConnIconDisplay iconKey={key} size={14} />
+                    {lang === "es" ? def.label_es : def.label_en}
+                  </span>
+                ),
+              }))}
+            />
           </div>
         </Row>
 
@@ -377,12 +380,10 @@ function ConnectionProperties() {
 
         {showAuthSection && (
           <Row label={t("propAuth")}>
-            <select value={authType} onChange={(e) => handleAuthTypeChange(e.target.value as AuthType)}
-              onFocus={focus("auth")} onBlur={blur} className={inp}>
-              {supportedAuthTypes.map((a) => (
-                <option key={a} value={a}>{authLabels[a]}</option>
-              ))}
-            </select>
+            <ThemedSelect value={authType} onChange={(v) => handleAuthTypeChange(v as AuthType)}
+              onFocus={focus("auth")} onBlur={blur}
+              options={supportedAuthTypes.map((a) => ({ value: a, label: authLabels[a] }))}
+            />
           </Row>
         )}
 
@@ -627,6 +628,85 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 const inp =
   "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-px text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";
 
+// Themed replacement for the native <select>. The webkit2gtk webview ignores
+// CSS on native <option> popups, so on the light/pastel themes they render with
+// a dark system menu. This draws the list ourselves (in a body portal so it
+// isn't clipped by the scrollable panel) using the theme variables.
+function ThemedSelect({
+  value, onChange, options, onFocus, onBlur,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: React.ReactNode }[];
+  onFocus?: () => void;
+  onBlur?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  const place = () => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (r) setRect({ top: r.bottom + 2, left: r.left, width: r.width });
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const reposition = () => place();
+    const close = () => setOpen(false);
+    const onDown = (e: MouseEvent) => {
+      if (btnRef.current && !btnRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("mousedown", onDown);
+    return () => {
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("mousedown", onDown);
+    };
+  }, [open]);
+
+  const current = options.find((o) => o.value === value);
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => { if (!open) place(); setOpen((o) => !o); }}
+        onFocus={onFocus}
+        onBlur={onBlur}
+        className={inp + " flex items-center justify-between gap-1 text-left"}
+      >
+        <span className="truncate">{current?.label ?? value}</span>
+        <ChevronDown size={12} className="shrink-0 opacity-60" />
+      </button>
+      {open && rect && createPortal(
+        <div
+          style={{ position: "fixed", top: rect.top, left: rect.left, width: rect.width, zIndex: 200 }}
+          className="max-h-56 overflow-auto bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded shadow-xl py-1"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {options.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => { onChange(o.value); setOpen(false); }}
+              className={
+                "flex items-center gap-2 w-full px-2 py-1 text-left text-[11px] transition-colors hover:bg-[var(--color-bg-hover)] " +
+                (o.value === value ? "text-[var(--color-accent)]" : "text-[var(--color-text-primary)]")
+              }
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 // ── Folder / Group properties ──────────────────────────────────────────────────
 
 function FolderProperties({ folderId }: { folderId: string }) {
@@ -731,13 +811,17 @@ function ItemEditor({
         <Row label={t("propColor")}>
           <div className="flex items-center gap-2">
             <Icon size={20} className={iconColorClass(color)} />
-            <select value={color} onChange={(e) => setColor(e.target.value)} className={inp}>
-              {ICON_COLORS.map((c) => (
-                <option key={c.key} value={c.key}>
-                  {lang === "es" ? c.label_es : c.label_en}
-                </option>
-              ))}
-            </select>
+            <ThemedSelect value={color} onChange={(v) => setColor(v)}
+              options={ICON_COLORS.map((c) => ({
+                value: c.key,
+                label: (
+                  <span className="flex items-center gap-2">
+                    <Icon size={14} className={iconColorClass(c.key)} />
+                    {lang === "es" ? c.label_es : c.label_en}
+                  </span>
+                ),
+              }))}
+            />
           </div>
         </Row>
         <Row label={t("propDesc")}>
