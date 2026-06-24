@@ -290,9 +290,20 @@ pub fn run() {
                     // Drop SFTP sessions — closing the ssh2 Session sends TCP FIN,
                     // which the SSH server interprets as a clean disconnect.
                     app.state::<sftp::SftpSessionMap>().lock().unwrap().clear();
-                    // RDP and VNC sessions are intentionally NOT cleared here:
-                    // remote sessions remain active in "Disconnected" state on
-                    // the server, so the user can reconnect without logging out.
+                    // Tear down local RDP/VNC processes so nothing is left
+                    // orphaned after the app closes. Killing the RDP client only
+                    // puts the remote session into "Disconnected" state (the user
+                    // can reconnect without logging out) — it does not log out.
+                    app.state::<rdp::EmbeddedRdpSessionMap>().lock().unwrap().clear();
+                    {
+                        let state = app.state::<rdp::RdpSessionMap>();
+                        let mut map = state.lock().unwrap();
+                        for (_, mut child) in map.drain() { child.kill().ok(); }
+                    }
+                    app.state::<vnc::VncSessionMap>().lock().unwrap().clear();
+                    // Give the Windows host threads a moment to actually kill
+                    // their OrbitalRdpHost.exe helpers before we exit the process.
+                    std::thread::sleep(std::time::Duration::from_millis(400));
                     app.exit(0);
                 });
             }
