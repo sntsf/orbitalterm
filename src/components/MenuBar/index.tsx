@@ -562,12 +562,20 @@ function MenuRow({ item, onClose }: { item: Exclude<MenuItemDef, { separator: tr
   const [subOpen, setSubOpen] = useState(false);
   const hasSub = !!item.submenu?.length;
   const isHeader = item.disabled && !hasSub;
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelClose = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
+  const openSub = () => { cancelClose(); setSubOpen(true); };
+  // Forgiving close: small delay so moving the mouse toward the flyout (or
+  // briefly off it) doesn't snap the submenu shut.
+  const scheduleClose = () => { cancelClose(); closeTimer.current = setTimeout(() => setSubOpen(false), 260); };
+  useEffect(() => cancelClose, []);
 
   return (
     <div
       className="relative"
-      onMouseEnter={() => hasSub && setSubOpen(true)}
-      onMouseLeave={() => hasSub && setSubOpen(false)}
+      onMouseEnter={() => hasSub && openSub()}
+      onMouseLeave={() => hasSub && scheduleClose()}
     >
       <button
         onClick={
@@ -605,7 +613,11 @@ function MenuRow({ item, onClose }: { item: Exclude<MenuItemDef, { separator: tr
       </button>
 
       {hasSub && subOpen && (
-        <div className="absolute left-full top-0 -mt-1 ml-0.5 min-w-[180px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-xl z-50 py-1">
+        <div
+          className="absolute left-full top-0 -mt-1 -ml-px min-w-[180px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-xl z-50 py-1"
+          onMouseEnter={openSub}
+          onMouseLeave={scheduleClose}
+        >
           {item.submenu!.map((sub, j) =>
             "separator" in sub
               ? <div key={j} className="my-1 border-t border-[var(--color-border)]" />
