@@ -763,7 +763,7 @@ export function Sidebar() {
       { label: t("newFolder"), icon: <FolderPlus size={12} />, action: () => startCreateFolder(null, group.id) },
       { label: t("rename"), icon: <Edit2 size={12} />, action: () => startRenameGroup(group) },
       {
-        label: lang === "es" ? "Contraseña maestra" : "Master password",
+        label: t("mpMasterPh"),
         icon: <KeyRound size={12} />,
         action: async () => {
           const has = await groupMasterStatus(group.id).catch(() => false);

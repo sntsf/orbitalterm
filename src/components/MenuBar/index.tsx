@@ -292,11 +292,8 @@ export function MenuBar() {
         { label: t("exportConnections"), icon: <Download size={12} />, action: handleExport },
         { separator: true },
         ...groups.map((g) => ({
-          label:
-            (masterStatuses[g.id]
-              ? (lang === "es" ? "Cambiar contraseña maestra · BD " : "Change master password · DB ")
-              : (lang === "es" ? "Crear contraseña maestra · BD " : "Create master password · DB ")) +
-            `"${g.name}"`,
+          label: (masterStatuses[g.id] ? t("mpTitleChange") : t("mpTitleCreate"))
+            .replace("{bd}", `"${g.name}"`),
           icon: <KeyRound size={12} />,
           action: () => {
             setOpenMenuId(null);
@@ -384,7 +381,7 @@ export function MenuBar() {
           action: () => { setOpenMenuId(null); setShowAbout(true); },
         },
         {
-          label: lang === "es" ? "Olvidé mi contraseña maestra" : "I forgot my master password",
+          label: t("helpForgot"),
           icon: <KeyRound size={12} />,
           action: () => { setOpenMenuId(null); setShowMasterHelp(true); },
         },
@@ -460,7 +457,7 @@ export function MenuBar() {
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
 
       {/* Master password recovery help */}
-      {showMasterHelp && <MasterHelpModal es={lang === "es"} onClose={() => setShowMasterHelp(false)} />}
+      {showMasterHelp && <MasterHelpModal onClose={() => setShowMasterHelp(false)} />}
 
       {/* Export dialog */}
       {showExport && (
@@ -640,24 +637,11 @@ function AboutModal({ onClose }: { onClose: () => void }) {
 
 // ── Master password recovery help ──────────────────────────────────────────────
 
-function MasterHelpModal({ es, onClose }: { es: boolean; onClose: () => void }) {
-  const steps = es
-    ? [
-        "La contraseña maestra protege solo la VISUALIZACIÓN de contraseñas de una fuente de datos (BD). Tus conexiones seguirán funcionando aunque la olvides.",
-        "Si la olvidaste y necesitas volver a ver las contraseñas de esa BD, debes eliminar la fuente de datos y volver a crearla:",
-        "1) Clic derecho sobre la fuente de datos (BD) en la barra lateral → Eliminar. Esto borra sus conexiones y su candado.",
-        "2) Vuelve a crear la fuente de datos (menú Archivo → Nueva fuente de datos) y registra de nuevo tus conexiones.",
-        "3) Crea una nueva contraseña maestra para esa BD y guárdala en un lugar seguro.",
-        "Consejo: exporta tus conexiones (Archivo → Exportar) ANTES, para no perder los datos al recrear la BD. El export incluye las contraseñas en texto plano.",
-      ]
-    : [
-        "The master password only protects VIEWING the saved passwords of a data source (DB). Your connections keep working even if you forget it.",
-        "If you forgot it and need to view that DB's passwords again, delete the data source and recreate it:",
-        "1) Right-click the data source (DB) in the sidebar → Delete. This removes its connections and its lock.",
-        "2) Recreate the data source (File → New data source) and re-add your connections.",
-        "3) Create a new master password for that DB and store it somewhere safe.",
-        "Tip: export your connections (File → Export) BEFORE recreating, so you don't lose data. The export contains plaintext passwords.",
-      ];
+function MasterHelpModal({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  const steps = [
+    t("helpS1"), t("helpS2"), t("helpS3"), t("helpS4"), t("helpS5"), t("helpS6"),
+  ];
 
   return (
     <div
@@ -668,7 +652,7 @@ function MasterHelpModal({ es, onClose }: { es: boolean; onClose: () => void }) 
         <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-bg-elevated)]">
           <KeyRound size={14} className="text-[var(--color-accent)]" />
           <span className="text-sm font-semibold text-[var(--color-text-primary)]">
-            {es ? "Olvidé mi contraseña maestra" : "I forgot my master password"}
+            {t("helpForgot")}
           </span>
         </div>
         <div className="px-5 py-4 space-y-2 max-h-[60vh] overflow-y-auto">
@@ -681,7 +665,7 @@ function MasterHelpModal({ es, onClose }: { es: boolean; onClose: () => void }) 
             onClick={onClose}
             className="px-5 py-1.5 rounded text-xs bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white transition-colors"
           >
-            {es ? "Entendido" : "Got it"}
+            {t("helpGotIt")}
           </button>
         </div>
       </div>
