@@ -115,6 +115,24 @@ export async function deletePassword(connectionId: string): Promise<void> {
   return invoke("delete_password", { connectionId });
 }
 
+export async function getPassword(connectionId: string): Promise<string> {
+  return invoke("get_password", { connectionId });
+}
+
+// ── Per-data-source master password (view lock) ──────────────────────────────
+export async function groupMasterStatus(groupId: string): Promise<boolean> {
+  return invoke("group_master_status", { groupId });
+}
+export async function groupMasterCreate(groupId: string, password: string): Promise<void> {
+  return invoke("group_master_create", { groupId, password });
+}
+export async function groupMasterChange(groupId: string, oldPassword: string, newPassword: string): Promise<void> {
+  return invoke("group_master_change", { groupId, oldPassword, newPassword });
+}
+export async function groupMasterVerify(groupId: string, password: string): Promise<boolean> {
+  return invoke("group_master_verify", { groupId, password });
+}
+
 export async function hasPassword(connectionId: string): Promise<boolean> {
   return invoke("has_password", { connectionId });
 }

@@ -3,7 +3,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import {
   Plus, Search, FolderOpen, Folder, Terminal,
   Copy, Trash2, Plug, FolderPlus, Edit2, FolderInput as FolderInputIcon,
-  Database, X, Bell, Globe, SquarePlus, SquareMinus,
+  Database, X, Bell, Globe, SquarePlus, SquareMinus, KeyRound,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useI18nStore, useT } from "../../store/useI18nStore";
@@ -12,8 +12,11 @@ import {
   getConnections, getFolders, deleteConnection, saveConnection,
   saveFolder, deleteFolder, getFolders as refetchFolders, reorderConnections, reorderFolders,
   moveFolderToGroup, getGroups, saveGroup, renameGroup, deleteGroup, copyPassword,
+  groupMasterStatus,
 } from "../../lib/commands";
 import { ContextMenu, useContextMenu } from "../ContextMenu";
+import { useMasterStore } from "../../store/useMasterStore";
+import { useIsLightTheme } from "../../store/usePrefsStore";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
 import { iconColorClass } from "../../lib/folderColors";
@@ -102,6 +105,7 @@ export function Sidebar() {
   const groups = useAppStore((s) => s.groups);
   const searchQuery = useAppStore((s) => s.searchQuery);
   const selectedConnectionId = useAppStore((s) => s.selectedConnectionId);
+  const light = useIsLightTheme();
   const selectedFolderId = useAppStore((s) => s.selectedFolderId);
   const selectedGroupId = useAppStore((s) => s.selectedGroupId);
   const setConnections = useAppStore((s) => s.setConnections);
@@ -119,6 +123,7 @@ export function Sidebar() {
   const { notifs, expanded, show, clearAll: clearAllNotifs } = useNotifStore();
 
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
+  const openMasterDialog = useMasterStore((s) => s.openDialog);
 
   const [panelHeight, setPanelHeight] = useState(() => {
     const saved = localStorage.getItem("orbitalterm:panelHeight");
@@ -408,7 +413,7 @@ export function Sidebar() {
   // During a search every group is treated as open so matches in any database
   // are reachable; otherwise honour the user's per-group toggle (default open).
   const isGroupExpanded = (groupId: string) =>
-    searchQuery ? true : (groupExpanded[groupId] ?? true);
+    searchQuery.trim() ? true : (groupExpanded[groupId] ?? true);
 
   const startCreateFolder = (parentId: string | null = null, groupId: string | null = null) => {
     setNewFolderName("");
@@ -757,6 +762,14 @@ export function Sidebar() {
       { label: t("newConnectionMenu"), icon: <Plus size={12} />, action: () => startNewConnection(null, group.id, t("newConnectionMenu")) },
       { label: t("newFolder"), icon: <FolderPlus size={12} />, action: () => startCreateFolder(null, group.id) },
       { label: t("rename"), icon: <Edit2 size={12} />, action: () => startRenameGroup(group) },
+      {
+        label: t("mpMasterPh"),
+        icon: <KeyRound size={12} />,
+        action: async () => {
+          const has = await groupMasterStatus(group.id).catch(() => false);
+          openMasterDialog({ mode: has ? "change" : "create", groupId: group.id, groupName: group.name });
+        },
+      },
       { separator: true },
       { label: t("delete"), icon: <Trash2 size={12} />, action: () => removeGroup(group), danger: true },
     ]);
@@ -772,16 +785,20 @@ export function Sidebar() {
       rdp_redirect_drives: conn.rdp_redirect_drives ?? false,
       rdp_gateway: conn.rdp_gateway ?? "",
       proxy_jump: conn.proxy_jump ?? "",
+      rdp_drive_path: conn.rdp_drive_path ?? "",
     });
     await copyPassword(conn.id, created.id).catch(() => {});
 
-    // Place the duplicate directly after the original in the same scope
+    // Place the duplicate directly after the original in the same scope.
     const freshConns = await getConnections();
     const siblings = freshConns
       .filter((c) => c.folder_id === conn.folder_id && c.group_id === conn.group_id)
       .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
-    const origIdx = siblings.findIndex((c) => c.id === conn.id);
+    // Compute the original's index in the list WITHOUT the new duplicate — the
+    // duplicate sorts to the top (lowest sort_order), which would otherwise
+    // offset the index and drop the copy one slot too low.
     const withoutNew = siblings.filter((c) => c.id !== created.id);
+    const origIdx = withoutNew.findIndex((c) => c.id === conn.id);
     const insertAt = origIdx >= 0 ? origIdx + 1 : withoutNew.length;
     withoutNew.splice(insertAt, 0, created);
     await reorderConnections(
@@ -910,7 +927,7 @@ export function Sidebar() {
 
   // Folders the tree should render as open: the ones the user opened, plus the
   // ancestor chain of the focused search match (so it's revealed in place).
-  const effectiveExpanded = searchQuery
+  const effectiveExpanded = searchQuery.trim()
     ? new Set<string>([...expandedFolders, ...searchExpanded])
     : expandedFolders;
 
@@ -986,9 +1003,9 @@ export function Sidebar() {
         {/* Logo row — logo on left, utility icons on right */}
         <div className="flex items-center px-3 py-2 gap-1">
           <img
-            src="/logo_icon.png"
+            src={light ? "/logo_animado_light.svg" : "/logo_animado.svg"}
             alt="OrbitalTerm"
-            className="h-6 w-auto object-contain select-none"
+            className="h-8 w-auto object-contain select-none"
             draggable={false}
           />
           <div className="ml-auto flex items-center gap-0.5">
@@ -1307,13 +1324,40 @@ export function Sidebar() {
 
 // ── Tree prefix ───────────────────────────────────────────────────────────────
 
+// mRemoteNG-style dotted connector lines drawn with thin dotted borders so they
+// connect vertically between rows. `continuations[i]` = an ancestor at level i
+// still has siblings below (draw a passing-through vertical line).
 function TreePrefix({ continuations, isLast }: { continuations: boolean[]; isLast: boolean }) {
+  const W = 15;
+  const col = "var(--color-text-muted)";
+  const last = continuations.length; // index of this node's own connector column
   return (
     <span
-      className="font-mono shrink-0 select-none text-[var(--color-border)]"
-      style={{ fontSize: "11px", whiteSpace: "pre", lineHeight: 1 }}
+      aria-hidden
+      className="relative self-stretch shrink-0 select-none"
+      style={{ width: (last + 1) * W }}
     >
-      {continuations.map((c) => (c ? "│ " : "  ")).join("")}{isLast ? "└─" : "├─"}{" "}
+      {/* vertical lines passing through ancestor levels (overrun row padding by
+          1px each side so they join the rows above/below) */}
+      {continuations.map((c, i) =>
+        c ? (
+          <span
+            key={i}
+            className="absolute border-l border-dotted"
+            style={{ left: i * W + W / 2, top: -1, bottom: -1, borderColor: col }}
+          />
+        ) : null,
+      )}
+      {/* this node's vertical connector: full height, or half (top→middle) if last child */}
+      <span
+        className="absolute border-l border-dotted"
+        style={{ left: last * W + W / 2, top: -1, bottom: isLast ? "50%" : -1, borderColor: col }}
+      />
+      {/* horizontal connector from the vertical line to the node */}
+      <span
+        className="absolute border-t border-dotted"
+        style={{ top: "50%", left: last * W + W / 2, width: W / 2, borderColor: col }}
+      />
     </span>
   );
 }

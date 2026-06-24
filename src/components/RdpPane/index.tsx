@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Monitor, RefreshCw, AlertCircle, CheckCircle, PackageOpen } from "lucide-react";
 import {
@@ -9,6 +9,8 @@ import {
   rdpKeyInput,
   rdpResizeSession,
   rdpRefreshSession,
+  rdpGetLinuxClipboard,
+  rdpSetClipboard,
   rdpWindowsReposition,
   rdpWindowsVisibility,
   rdpWindowsReparent,
@@ -138,6 +140,38 @@ interface EmbeddedViewerProps {
 function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: EmbeddedViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Mouse-move coalescing: raw mousemove fires far faster than the session can
+  // usefully consume, and one Tauri IPC call per event floods the channel and
+  // adds latency. Keep only the latest position and flush it once per animation
+  // frame (~60 Hz), which is plenty for smooth cursor tracking.
+  const pendingMoveRef = useRef<[number, number] | null>(null);
+  const moveRafRef = useRef<number | null>(null);
+
+  // Resize without the black flash. Changing a canvas's backing-store size
+  // clears it to transparent (black against the container), and a fresh frame
+  // at the new resolution only arrives after the server reconfigures. To bridge
+  // that gap we snapshot the current pixels and redraw them stretched into the
+  // resized canvas as a placeholder until real frames repaint over them.
+  // The canvas has no width/height JSX attributes so React never clears it —
+  // we own the backing-store size here.
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (canvas.width === width && canvas.height === height) return;
+    const ctx = canvas.getContext("2d");
+    let snapshot: HTMLCanvasElement | null = null;
+    if (ctx && canvas.width > 0 && canvas.height > 0) {
+      snapshot = document.createElement("canvas");
+      snapshot.width = canvas.width;
+      snapshot.height = canvas.height;
+      snapshot.getContext("2d")?.drawImage(canvas, 0, 0);
+    }
+    canvas.width = width;
+    canvas.height = height;
+    if (ctx && snapshot) {
+      ctx.drawImage(snapshot, 0, 0, snapshot.width, snapshot.height, 0, 0, width, height);
+    }
+  }, [width, height]);
 
   // Dynamic resize: when the container changes size, resize the RDP session
   useEffect(() => {
@@ -152,10 +186,13 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
       const w = Math.max(640, Math.floor(entry.contentRect.width));
       const h = Math.max(480, Math.floor(entry.contentRect.height));
       if (timer) clearTimeout(timer);
+      // Debounce so we send ONE resolution change after the drag settles
+      // (each one is a server round-trip). 150ms keeps drags coalesced while
+      // feeling responsive — 400ms felt sluggish.
       timer = setTimeout(() => {
         rdpResizeSession(sessionId, w, h).catch(() => {});
         onResize(w, h);
-      }, 400);
+      }, 150);
     });
     observer.observe(container);
     return () => { observer.disconnect(); if (timer) clearTimeout(timer); };
@@ -207,18 +244,43 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
   const PTR_WHEEL  = 0x0200;
   const PTR_WHEEL_NEG = 0x0100;
 
+  // Drop any queued move; button/wheel events carry their own coordinates, so a
+  // stale move arriving after them would just fight the click position.
+  function cancelPendingMove() {
+    if (moveRafRef.current != null) {
+      cancelAnimationFrame(moveRafRef.current);
+      moveRafRef.current = null;
+    }
+    pendingMoveRef.current = null;
+  }
+
+  function flushMove() {
+    moveRafRef.current = null;
+    const p = pendingMoveRef.current;
+    if (!p) return;
+    pendingMoveRef.current = null;
+    rdpMouseInput(sessionId, PTR_MOVE, p[0], p[1]).catch(() => {});
+  }
+
+  // Cancel a pending move frame on unmount so it can't fire after teardown.
+  useEffect(() => () => cancelPendingMove(), []);
+
   function onMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
-    const [x, y] = remoteCoords(e);
-    rdpMouseInput(sessionId, PTR_MOVE, x, y).catch(() => {});
+    pendingMoveRef.current = remoteCoords(e);
+    if (moveRafRef.current == null) {
+      moveRafRef.current = requestAnimationFrame(flushMove);
+    }
   }
 
   function onMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
+    cancelPendingMove();
     const [x, y] = remoteCoords(e);
     const btn = e.button === 0 ? PTR_BTN1 : e.button === 1 ? PTR_BTN3 : PTR_BTN2;
     rdpMouseInput(sessionId, btn | PTR_DOWN, x, y).catch(() => {});
   }
 
   function onMouseUp(e: React.MouseEvent<HTMLCanvasElement>) {
+    cancelPendingMove();
     const [x, y] = remoteCoords(e);
     const btn = e.button === 0 ? PTR_BTN1 : e.button === 1 ? PTR_BTN3 : PTR_BTN2;
     rdpMouseInput(sessionId, btn, x, y).catch(() => {});
@@ -249,6 +311,17 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
     // Request a full-screen repaint from Windows whenever the canvas is
     // focused (e.g. after switching tabs or clicking back into the session).
     rdpRefreshSession(sessionId).catch(() => {});
+    // Mirror this machine's clipboard into the remote session. The only way to
+    // copy locally is to interact with another window (which blurs the canvas),
+    // so re-syncing on focus means whatever the user just copied is advertised
+    // to the server and a Ctrl+V inside the remote desktop pastes it. Read via
+    // the Rust side (wl-paste/xclip) — the Tauri clipboard plugin does not work
+    // on GNOME Wayland.
+    rdpGetLinuxClipboard()
+      .then((text) => {
+        if (text) rdpSetClipboard(sessionId, text).catch(() => {});
+      })
+      .catch(() => {});
   }
 
   function onContextMenu(e: React.MouseEvent<HTMLCanvasElement>) {
@@ -262,8 +335,6 @@ function EmbeddedViewer({ sessionId, width, height, onSessionError, onResize }: 
     >
       <canvas
         ref={canvasRef}
-        width={width}
-        height={height}
         tabIndex={0}
         style={{ position: "absolute", inset: 0, width: "100%", height: "100%", cursor: "crosshair", outline: "none", display: "block" }}
         onMouseMove={onMouseMove}

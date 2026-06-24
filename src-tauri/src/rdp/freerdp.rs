@@ -136,7 +136,9 @@ pub enum OrbRdpSession {}
 
 /// Callback fired by the C bridge for each dirty-rect paint.
 /// `data` points to the full BGRX32 framebuffer; `(x,y,w,h)` is the dirty
-/// rectangle; `stride` is the full-framebuffer row stride in bytes.
+/// rectangle; `stride` is the full-framebuffer row stride in bytes;
+/// `full_w`/`full_h` are the framebuffer dimensions (used to clamp the rect so
+/// a stale/oversized region can never index past the buffer).
 pub type OrbFrameFn = unsafe extern "C" fn(
     user_ctx: *mut std::ffi::c_void,
     data: *const u8,
@@ -145,9 +147,14 @@ pub type OrbFrameFn = unsafe extern "C" fn(
     w: u32,
     h: u32,
     stride: u32,
+    full_w: u32,
+    full_h: u32,
 );
 pub type OrbErrorFn =
     unsafe extern "C" fn(user_ctx: *mut std::ffi::c_void, msg: *const std::ffi::c_char);
+/// Callback fired when the REMOTE clipboard changes; `text` is UTF-8.
+pub type OrbClipboardFn =
+    unsafe extern "C" fn(user_ctx: *mut std::ffi::c_void, text: *const std::ffi::c_char);
 
 extern "C" {
     fn orb_session_new(
@@ -161,8 +168,10 @@ extern "C" {
         console_mode: bool,
         security_mode: std::ffi::c_int,
         color_depth: u16,
+        shared_folder: *const std::ffi::c_char,
         on_frame: OrbFrameFn,
         on_error: OrbErrorFn,
+        on_clipboard: OrbClipboardFn,
         user_ctx: *mut std::ffi::c_void,
     ) -> *mut OrbRdpSession;
 
@@ -242,6 +251,8 @@ unsafe extern "C" fn on_frame(
     w: u32,
     h: u32,
     stride: u32,
+    full_w: u32,
+    full_h: u32,
 ) {
     if w == 0 || h == 0 {
         return;
@@ -250,7 +261,7 @@ unsafe extern "C" fn on_frame(
 
     // Union current dirty rect with any previously dropped region so no pixels
     // are permanently lost when the encoder falls behind.
-    let (ex, ey, ew, eh) = {
+    let (mut ex, mut ey, mut ew, mut eh) = {
         let mut ov = state.overflow.lock().unwrap();
         match ov.take() {
             None => (x, y, w, h),
@@ -264,20 +275,45 @@ unsafe extern "C" fn on_frame(
         }
     };
 
+    // Clamp to the current framebuffer bounds. The dirty rect (or an overflow
+    // region accumulated under a previous, larger resolution) can otherwise
+    // extend past the buffer after a resize and cause an out-of-bounds slice.
+    // stride >= full_w*4, so clamping width to full_w keeps every row in range,
+    // and clamping ey+eh to full_h keeps the row slice within the buffer.
+    if ex >= full_w || ey >= full_h {
+        return;
+    }
+    if ew > full_w - ex {
+        ew = full_w - ex;
+    }
+    if eh > full_h - ey {
+        eh = full_h - ey;
+    }
+    if ew == 0 || eh == 0 {
+        return;
+    }
+
     // Slice only the rows we need.
     let row_offset = (ey * stride) as usize;
     let row_bytes  = (eh * stride) as usize;
     let raw = std::slice::from_raw_parts(data.add(row_offset), row_bytes);
 
     // Convert BGRX → RGB for the expanded dirty sub-image.
-    let mut rgb = Vec::with_capacity((ew * eh * 3) as usize);
+    // Pre-allocate the exact output size and write through fixed-size chunk
+    // slices: this lets the compiler elide bounds checks and avoids the
+    // per-pixel growth/check overhead of `Vec::push`, roughly halving the
+    // per-frame conversion cost on the FreeRDP thread.
+    let src_row_bytes = ew as usize * 4;
+    let dst_row_bytes = ew as usize * 3;
+    let mut rgb = vec![0u8; eh as usize * dst_row_bytes];
     for row in 0..eh as usize {
         let row_start = row * stride as usize + ex as usize * 4;
-        let row_slice = &raw[row_start..row_start + ew as usize * 4];
-        for chunk in row_slice.chunks_exact(4) {
-            rgb.push(chunk[2]); // R  (BGRX: B=0, G=1, R=2, X=3)
-            rgb.push(chunk[1]); // G
-            rgb.push(chunk[0]); // B
+        let src = &raw[row_start..row_start + src_row_bytes];
+        let dst = &mut rgb[row * dst_row_bytes..row * dst_row_bytes + dst_row_bytes];
+        for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(3)) {
+            d[0] = s[2]; // R  (BGRX: B=0, G=1, R=2, X=3)
+            d[1] = s[1]; // G
+            d[2] = s[0]; // B
         }
     }
 
@@ -296,6 +332,52 @@ unsafe extern "C" fn on_frame(
             }
         });
     }
+}
+
+/// Fired when the remote clipboard changes. Writes the text into this machine's
+/// clipboard (remote → local sync). Uses wl-copy (Wayland) with an xclip (X11)
+/// fallback, because arboard/the Tauri clipboard plugin does not work on GNOME
+/// Wayland.
+unsafe extern "C" fn on_clipboard(
+    _user_ctx: *mut std::ffi::c_void,
+    text: *const std::ffi::c_char,
+) {
+    if text.is_null() {
+        return;
+    }
+    let s = std::ffi::CStr::from_ptr(text).to_string_lossy().into_owned();
+    write_local_clipboard(&s);
+}
+
+/// Write `text` to the OS clipboard via native CLI tools. wl-copy serves the
+/// Wayland selection (it daemonizes itself); xclip covers X11 sessions.
+fn write_local_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let spawn = |cmd: &str, args: &[&str]| -> bool {
+        let child = Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(mut child) = child {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+                // Drop stdin (close the pipe) so the tool sees EOF and stores it.
+            }
+            let _ = child.wait();
+            true
+        } else {
+            false
+        }
+    };
+
+    if spawn("wl-copy", &[]) {
+        return;
+    }
+    spawn("xclip", &["-selection", "clipboard"]);
 }
 
 unsafe extern "C" fn on_error(
@@ -368,6 +450,7 @@ pub fn launch(
     console_mode: bool,
     rdp_security: &str,
     color_depth: u16,
+    shared_folder: Option<&str>,
 ) -> Result<FreerdpSession, String> {
     let password = password.ok_or_else(|| {
         "NO_PASSWORD\nNo hay contraseña guardada para esta conexión.\n\
@@ -379,6 +462,14 @@ pub fn launch(
     let c_username = CString::new(username).map_err(|e| e.to_string())?;
     let c_password = CString::new(password).map_err(|e| e.to_string())?;
     let c_domain   = CString::new(domain).map_err(|e| e.to_string())?;
+
+    // Optional local folder shared into the session as a drive (decided by the
+    // caller from the connection's settings). Kept alive until after the FFI
+    // call below.
+    let c_shared = shared_folder
+        .filter(|s| !s.is_empty())
+        .and_then(|s| CString::new(s).ok());
+    let shared_ptr = c_shared.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
 
     // Bounded channel: capacity 4 gives the encoder a buffer across ~65ms
     // of encoding time before frames are dropped via try_send.
@@ -415,8 +506,10 @@ pub fn launch(
             console_mode,
             security_mode,
             depth,
+            shared_ptr,
             on_frame,
             on_error,
+            on_clipboard,
             user_ctx,
         )
     };

@@ -23,7 +23,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
         "SELECT id, name, type, host, port, username, auth_type, key_path,
                 folder_id, notes, description, domain, rdp_admin, created_at, updated_at,
                 sort_order, group_id, icon, url, custom_hosts, rdp_security, rdp_color_depth, tunnels,
-                rdp_redirect_drives, rdp_gateway, proxy_jump
+                rdp_redirect_drives, rdp_gateway, proxy_jump, rdp_drive_path
          FROM connections WHERE id=?1",
         params![id],
         |row| {
@@ -54,6 +54,7 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
                 rdp_redirect_drives: row.get::<_, i64>(23).unwrap_or(0) != 0,
                 rdp_gateway: row.get::<_, String>(24).unwrap_or_default(),
                 proxy_jump: row.get::<_, String>(25).unwrap_or_default(),
+                rdp_drive_path: row.get::<_, String>(26).unwrap_or_default(),
             })
         },
     )
@@ -64,23 +65,116 @@ pub fn load_connection(id: &str) -> Result<Connection, String> {
 
 fn get_saved_password(connection_id: &str) -> Option<String> {
     let db = db::open().ok()?;
-    db.query_row(
+    let stored: String = db.query_row(
         "SELECT password FROM passwords WHERE connection_id = ?1",
         params![connection_id],
         |row| row.get(0),
-    ).ok()
+    ).ok()?;
+    Some(crate::crypto::decrypt(&stored))
 }
 
 pub fn get_saved_password_pub(connection_id: &str) -> Option<String> {
     get_saved_password(connection_id)
 }
 
+/// Returns the decrypted password for the UI (eye-button reveal). Empty string
+/// when none is saved.
+#[tauri::command]
+pub async fn get_password(connection_id: String) -> Result<String, String> {
+    Ok(get_saved_password(&connection_id).unwrap_or_default())
+}
+
+// ── Per-data-source master password (view lock) commands ────────────────────
+
+fn group_verifier(group_id: &str) -> Option<String> {
+    let db = db::open().ok()?;
+    db.query_row(
+        "SELECT verifier FROM group_master WHERE group_id = ?1",
+        params![group_id],
+        |row| row.get::<_, String>(0),
+    ).ok()
+}
+
+/// Whether the given data source has a master password configured.
+#[tauri::command]
+pub async fn group_master_status(group_id: String) -> Result<bool, String> {
+    Ok(group_verifier(&group_id).is_some())
+}
+
+/// Create the master password for a data source (only when none exists yet).
+#[tauri::command]
+pub async fn group_master_create(group_id: String, password: String) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("La contraseña maestra no puede estar vacía.".into());
+    }
+    if group_verifier(&group_id).is_some() {
+        return Err("Esta fuente de datos ya tiene contraseña maestra.".into());
+    }
+    let verifier = crate::crypto::make_verifier(&password);
+    let db = db::open().map_err(|e| e.to_string())?;
+    db.execute(
+        "INSERT OR REPLACE INTO group_master (group_id, verifier) VALUES (?1, ?2)",
+        params![group_id, verifier],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Change a data source's master password — requires the current one.
+#[tauri::command]
+pub async fn group_master_change(group_id: String, old_password: String, new_password: String) -> Result<(), String> {
+    let Some(current) = group_verifier(&group_id) else {
+        return Err("Esta fuente de datos no tiene contraseña maestra.".into());
+    };
+    if !crate::crypto::check_verifier(&old_password, &current) {
+        return Err("La contraseña maestra actual es incorrecta.".into());
+    }
+    if new_password.is_empty() {
+        return Err("La nueva contraseña maestra no puede estar vacía.".into());
+    }
+    let verifier = crate::crypto::make_verifier(&new_password);
+    let db = db::open().map_err(|e| e.to_string())?;
+    db.execute(
+        "INSERT OR REPLACE INTO group_master (group_id, verifier) VALUES (?1, ?2)",
+        params![group_id, verifier],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Verify a candidate password for a data source (unlocks reveal for the session).
+#[tauri::command]
+pub async fn group_master_verify(group_id: String, password: String) -> Result<bool, String> {
+    match group_verifier(&group_id) {
+        Some(v) => Ok(crate::crypto::check_verifier(&password, &v)),
+        None => Ok(false),
+    }
+}
+
+/// One-time migration: encrypt any passwords still stored as plaintext.
+pub fn migrate_plaintext_passwords() {
+    let Ok(db) = db::open() else { return };
+    let rows: Vec<(String, String)> = {
+        let Ok(mut stmt) = db.prepare("SELECT connection_id, password FROM passwords") else { return };
+        let Ok(mapped) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) else { return };
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (id, pw) in rows {
+        if !crate::crypto::is_encrypted(&pw) {
+            let enc = crate::crypto::encrypt(&pw);
+            db.execute(
+                "UPDATE passwords SET password = ?1 WHERE connection_id = ?2",
+                params![enc, id],
+            ).ok();
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn save_password(connection_id: String, password: String) -> Result<(), String> {
     let db = db::open().map_err(|e| e.to_string())?;
+    let enc = crate::crypto::encrypt(&password);
     db.execute(
         "INSERT OR REPLACE INTO passwords (connection_id, password) VALUES (?1, ?2)",
-        params![connection_id, password],
+        params![connection_id, enc],
     ).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -587,6 +681,20 @@ pub async fn connect_rdp(
         let w = width.unwrap_or(1280).max(640);
         let h = height.unwrap_or(800).max(480);
         let session_id = Uuid::new_v4().to_string();
+        // Folder shared into the session as a drive. Only when the connection
+        // opted in (rdp_redirect_drives); empty custom path → user's Downloads.
+        let shared_folder: Option<String> = if connection.rdp_redirect_drives {
+            let p = connection.rdp_drive_path.trim();
+            if p.is_empty() {
+                dirs::download_dir()
+                    .or_else(dirs::home_dir)
+                    .map(|d| d.to_string_lossy().into_owned())
+            } else {
+                Some(p.to_string())
+            }
+        } else {
+            None
+        };
         let session = crate::rdp::freerdp::launch(
             app,
             &session_id,
@@ -600,6 +708,7 @@ pub async fn connect_rdp(
             connection.rdp_admin || admin_mode.unwrap_or(false),
             &connection.rdp_security,
             connection.rdp_color_depth as u16,
+            shared_folder.as_deref(),
         )?;
         let width = session.width;
         let height = session.height;
@@ -802,14 +911,24 @@ pub async fn rdp_set_clipboard(
 /// Read the user's real Linux clipboard (Wayland-native, falls back to X11).
 #[cfg(target_os = "linux")]
 fn read_linux_clipboard() -> Option<String> {
-    let out = std::process::Command::new("wl-paste")
-        .args(["--no-newline", "--type", "text/plain"])
-        .stderr(std::process::Stdio::null())
-        .output();
-    if let Ok(o) = out {
-        if o.status.success() {
-            if let Ok(s) = String::from_utf8(o.stdout) {
-                if !s.is_empty() { return Some(s); }
+    // Try, in order: explicit utf-8 text, plain text, then whatever wl-paste
+    // offers by default. Restricting to "text/plain" alone misses apps that
+    // only advertise "text/plain;charset=utf-8", which returned nothing.
+    let attempts: [&[&str]; 3] = [
+        &["--no-newline", "--type", "text/plain;charset=utf-8"],
+        &["--no-newline", "--type", "text/plain"],
+        &["--no-newline"],
+    ];
+    for args in attempts {
+        if let Ok(o) = std::process::Command::new("wl-paste")
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            if o.status.success() {
+                if let Ok(s) = String::from_utf8(o.stdout) {
+                    if !s.is_empty() { return Some(s); }
+                }
             }
         }
     }

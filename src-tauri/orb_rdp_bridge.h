@@ -26,9 +26,19 @@ typedef void (*orb_frame_fn )(void *user_ctx,
                                uint32_t y,      /* dirty rect top */
                                uint32_t w,      /* dirty rect width */
                                uint32_t h,      /* dirty rect height */
-                               uint32_t stride  /* full framebuffer stride */
+                               uint32_t stride, /* full framebuffer stride */
+                               uint32_t full_w, /* full framebuffer width */
+                               uint32_t full_h  /* full framebuffer height */
                                );
 typedef void (*orb_error_fn )(void *user_ctx, const char *msg);
+
+/*
+ * on_clipboard – called when the REMOTE clipboard changes and we have fetched
+ *                its text.  text is a UTF-8 string valid only for the call
+ *                duration; copy it if you need to keep it.  Enables the
+ *                remote → local direction of clipboard sync.
+ */
+typedef void (*orb_clipboard_fn)(void *user_ctx, const char *text);
 
 /*
  * Security mode values for orb_session_new security_mode parameter:
@@ -58,8 +68,10 @@ OrbRdpSession *orb_session_new(const char   *host,
                                 bool          console_mode,
                                 int           security_mode, /* ORB_SEC_* */
                                 uint16_t      color_depth,   /* 8/15/16/24/32 */
+                                const char   *shared_folder, /* local dir to share as a drive; may be NULL */
                                 orb_frame_fn  on_frame,
                                 orb_error_fn  on_error,
+                                orb_clipboard_fn on_clipboard,
                                 void         *user_ctx);
 
 /*

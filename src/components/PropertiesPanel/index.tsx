@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { Plug, Eye, EyeOff, Info, Database, Folder as FolderIcon, type LucideIcon } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Plug, Eye, EyeOff, Info, Database, Folder as FolderIcon, ChevronDown, type LucideIcon } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore } from "../../store/useI18nStore";
 import { useImportStore } from "../../store/useImportStore";
+import { useMasterStore } from "../../store/useMasterStore";
 import {
   updateConnection,
   getConnections,
   savePassword,
   deletePassword,
+  getPassword,
+  groupMasterStatus,
   hasPassword,
   updateFolder,
   getFolders,
@@ -99,7 +103,8 @@ function ConnectionProperties() {
     openTab,
   } = useAppStore();
 
-  const { sidebarHint } = useAppStore();
+  const { sidebarHint, groups } = useAppStore();
+  const { isUnlocked: isGroupUnlocked, openDialog: openMasterDialog } = useMasterStore();
   const existing = connections.find((c) => c.id === selectedConnectionId);
 
   const [name, setName] = useState("");
@@ -123,6 +128,7 @@ function ConnectionProperties() {
   const [tunnels, setTunnels] = useState("");
   const [proxyJump, setProxyJump] = useState("");
   const [rdpRedirectDrives, setRdpRedirectDrives] = useState(false);
+  const [rdpDrivePath, setRdpDrivePath] = useState("");
   const [rdpGateway, setRdpGateway] = useState("");
   const [connectError, setConnectError] = useState("");
   const [focusedField, setFocusedField] = useState<FieldKey | null>(null);
@@ -155,6 +161,7 @@ function ConnectionProperties() {
         tunnels,
         proxy_jump: proxyJump.trim(),
         rdp_redirect_drives: rdpRedirectDrives,
+        rdp_drive_path: rdpDrivePath,
         rdp_gateway: rdpGateway.trim(),
       });
       setConnections(await getConnections());
@@ -185,6 +192,7 @@ function ConnectionProperties() {
     setTunnels(existing.tunnels ?? "");
     setProxyJump(existing.proxy_jump ?? "");
     setRdpRedirectDrives(existing.rdp_redirect_drives ?? false);
+    setRdpDrivePath(existing.rdp_drive_path ?? "");
     setRdpGateway(existing.rdp_gateway ?? "");
     setPassword("");
     setConnectError("");
@@ -206,7 +214,7 @@ function ConnectionProperties() {
     const timer = setTimeout(() => { doSaveRef.current?.(); }, 600);
     return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts, tunnels, proxyJump, rdpRedirectDrives, rdpGateway]);
+  }, [name, description, host, port, username, domain, authType, keyPath, type, folderId, groupId, notes, icon, url, customHosts, tunnels, proxyJump, rdpRedirectDrives, rdpDrivePath, rdpGateway]);
 
   const handleTypeChange = (newType: ConnectionType) => {
     setType(newType);
@@ -308,36 +316,38 @@ function ConnectionProperties() {
       {/* Fields */}
       <div className="flex-1 overflow-y-auto px-3 py-1 space-y-1 min-h-0">
         <Row label={t("propType")}>
-          <select
+          <ThemedSelect
             value={type}
-            onChange={(e) => handleTypeChange(e.target.value as ConnectionType)}
+            onChange={(v) => handleTypeChange(v as ConnectionType)}
             onFocus={focus("type")} onBlur={blur}
-            className={inp}
-          >
-            <option value="ssh">SSH</option>
-            <option value="rdp">RDP</option>
-            <option value="vnc">VNC</option>
-            <option value="ftp">FTP</option>
-            <option value="sftp">SFTP</option>
-            <option value="browser">{lang === "es" ? "Navegador" : "Browser"}</option>
-          </select>
+            options={[
+              { value: "ssh", label: "SSH" },
+              { value: "rdp", label: "RDP" },
+              { value: "vnc", label: "VNC" },
+              { value: "ftp", label: "FTP" },
+              { value: "sftp", label: "SFTP" },
+              { value: "browser", label: lang === "es" ? "Navegador" : "Browser" },
+            ]}
+          />
         </Row>
 
         {/* Icon picker */}
         <Row label={lang === "es" ? "Icono" : "Icon"}>
           <div className="flex items-center gap-2" onFocus={focus("icon")} onBlur={blur}>
             <ConnIconDisplay iconKey={icon || DEFAULT_CONN_ICON[type]} size={20} />
-            <select
+            <ThemedSelect
               value={icon || DEFAULT_CONN_ICON[type]}
-              onChange={(e) => setIcon(e.target.value)}
-              className={inp}
-            >
-              {(Object.entries(CONN_ICONS) as [ConnIconKey, typeof CONN_ICONS[ConnIconKey]][]).map(([key, def]) => (
-                <option key={key} value={key}>
-                  {lang === "es" ? def.label_es : def.label_en}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => setIcon(v)}
+              options={(Object.entries(CONN_ICONS) as [ConnIconKey, typeof CONN_ICONS[ConnIconKey]][]).map(([key, def]) => ({
+                value: key,
+                label: (
+                  <span className="flex items-center gap-2">
+                    <ConnIconDisplay iconKey={key} size={14} />
+                    {lang === "es" ? def.label_es : def.label_en}
+                  </span>
+                ),
+              }))}
+            />
           </div>
         </Row>
 
@@ -370,12 +380,10 @@ function ConnectionProperties() {
 
         {showAuthSection && (
           <Row label={t("propAuth")}>
-            <select value={authType} onChange={(e) => handleAuthTypeChange(e.target.value as AuthType)}
-              onFocus={focus("auth")} onBlur={blur} className={inp}>
-              {supportedAuthTypes.map((a) => (
-                <option key={a} value={a}>{authLabels[a]}</option>
-              ))}
-            </select>
+            <ThemedSelect value={authType} onChange={(v) => handleAuthTypeChange(v as AuthType)}
+              onFocus={focus("auth")} onBlur={blur}
+              options={supportedAuthTypes.map((a) => ({ value: a, label: authLabels[a] }))}
+            />
           </Row>
         )}
 
@@ -400,7 +408,36 @@ function ConnectionProperties() {
               />
               <button
                 type="button"
-                onClick={() => setShowPassword(!showPassword)}
+                onClick={async () => {
+                  // Hiding is always allowed.
+                  if (showPassword) { setShowPassword(false); return; }
+                  // Reveal: fetch the real decrypted value (if the field still
+                  // shows the saved-password sentinel) and show it.
+                  const doReveal = async () => {
+                    if (existing && isAllDots(password)) {
+                      try {
+                        const real = await getPassword(existing.id);
+                        if (real) setPassword(real);
+                      } catch { /* ignore */ }
+                    }
+                    setShowPassword(true);
+                  };
+                  // Per-data-source view lock: a connection's passwords can only
+                  // be revealed when its data source has a master password and it
+                  // has been unlocked this session.
+                  const gid = existing?.group_id ?? "";
+                  const gname = groups.find((g) => g.id === gid)?.name ?? "";
+                  const set = await groupMasterStatus(gid).catch(() => false);
+                  if (!set) {
+                    openMasterDialog({ mode: "require", groupId: gid, groupName: gname });
+                    return;
+                  }
+                  if (!isGroupUnlocked(gid)) {
+                    openMasterDialog({ mode: "unlock", groupId: gid, groupName: gname, afterUnlock: () => { void doReveal(); } });
+                    return;
+                  }
+                  await doReveal();
+                }}
                 className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]"
               >
                 {showPassword ? <EyeOff size={11} /> : <Eye size={11} />}
@@ -423,13 +460,27 @@ function ConnectionProperties() {
                 placeholder={lang === "es" ? "host del gateway (opcional)" : "gateway host (optional)"}
                 className={inp} />
             </Row>
-            <Row label={lang === "es" ? "Unidades" : "Drives"}>
+            <Row label={lang === "es" ? "Carpeta / Unidades" : "Folder / Drives"}>
               <label className="flex items-center gap-1.5 text-[12px] text-[var(--color-text-primary)] cursor-pointer">
                 <input type="checkbox" checked={rdpRedirectDrives}
                   onChange={(e) => setRdpRedirectDrives(e.target.checked)} />
-                {lang === "es" ? "Redirigir mis discos locales" : "Redirect my local drives"}
+                {lang === "es" ? "Compartir carpeta / discos con el remoto" : "Share a folder / drives with the remote"}
               </label>
             </Row>
+            {rdpRedirectDrives && (
+              <Row label={lang === "es" ? "Carpeta a montar" : "Folder to mount"}>
+                <div className="flex flex-col gap-1">
+                  <input value={rdpDrivePath} onChange={(e) => setRdpDrivePath(e.target.value)}
+                    placeholder={lang === "es" ? "vacío = Descargas" : "empty = Downloads"}
+                    className={inp} />
+                  <span className="text-[10px] text-[var(--color-text-muted)]">
+                    {lang === "es"
+                      ? "Linux: carpeta local compartida como unidad. En Windows se comparten los discos locales. Reinicia la conexión para aplicar."
+                      : "Linux: local folder shared as a drive. On Windows the local disks are shared. Reconnect to apply."}
+                  </span>
+                </div>
+              </Row>
+            )}
           </>
         )}
 
@@ -500,7 +551,7 @@ function HintBox({ hint, hintLang: _hintLang }: { hint: { title: string; body: s
     const { name, done, total } = importProgress;
     const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
     return (
-      <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 min-h-[64px]">
+      <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 h-[92px] flex items-center">
         <div className="flex gap-2.5 items-center">
           <ProgressRing pct={pct} indeterminate={total === 0} />
           <div className="min-w-0">
@@ -518,11 +569,11 @@ function HintBox({ hint, hintLang: _hintLang }: { hint: { title: string; body: s
   }
 
   return (
-    <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 min-h-[64px]">
+    <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-1.5 h-[92px]">
       {hint ? (
-        <div className="flex gap-2">
+        <div className="flex gap-2 h-full">
           <Info size={13} className="text-[var(--color-accent)] shrink-0 mt-0.5" />
-          <div>
+          <div className="overflow-y-auto pr-1 min-w-0">
             <p className="text-[12px] font-semibold text-[var(--color-text-primary)] leading-tight mb-0.5">
               {hint.title}
             </p>
@@ -576,6 +627,85 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 const inp =
   "w-full bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded px-2 py-px text-[11px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] transition-colors";
+
+// Themed replacement for the native <select>. The webkit2gtk webview ignores
+// CSS on native <option> popups, so on the light/pastel themes they render with
+// a dark system menu. This draws the list ourselves (in a body portal so it
+// isn't clipped by the scrollable panel) using the theme variables.
+function ThemedSelect({
+  value, onChange, options, onFocus, onBlur,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: React.ReactNode }[];
+  onFocus?: () => void;
+  onBlur?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  const place = () => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (r) setRect({ top: r.bottom + 2, left: r.left, width: r.width });
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const reposition = () => place();
+    const close = () => setOpen(false);
+    const onDown = (e: MouseEvent) => {
+      if (btnRef.current && !btnRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("mousedown", onDown);
+    return () => {
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("mousedown", onDown);
+    };
+  }, [open]);
+
+  const current = options.find((o) => o.value === value);
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => { if (!open) place(); setOpen((o) => !o); }}
+        onFocus={onFocus}
+        onBlur={onBlur}
+        className={inp + " flex items-center justify-between gap-1 text-left"}
+      >
+        <span className="truncate">{current?.label ?? value}</span>
+        <ChevronDown size={12} className="shrink-0 opacity-60" />
+      </button>
+      {open && rect && createPortal(
+        <div
+          style={{ position: "fixed", top: rect.top, left: rect.left, width: rect.width, zIndex: 200 }}
+          className="max-h-56 overflow-auto bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded shadow-xl py-1"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {options.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => { onChange(o.value); setOpen(false); }}
+              className={
+                "flex items-center gap-2 w-full px-2 py-1 text-left text-[11px] transition-colors hover:bg-[var(--color-bg-hover)] " +
+                (o.value === value ? "text-[var(--color-accent)]" : "text-[var(--color-text-primary)]")
+              }
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
 
 // ── Folder / Group properties ──────────────────────────────────────────────────
 
@@ -681,13 +811,17 @@ function ItemEditor({
         <Row label={t("propColor")}>
           <div className="flex items-center gap-2">
             <Icon size={20} className={iconColorClass(color)} />
-            <select value={color} onChange={(e) => setColor(e.target.value)} className={inp}>
-              {ICON_COLORS.map((c) => (
-                <option key={c.key} value={c.key}>
-                  {lang === "es" ? c.label_es : c.label_en}
-                </option>
-              ))}
-            </select>
+            <ThemedSelect value={color} onChange={(v) => setColor(v)}
+              options={ICON_COLORS.map((c) => ({
+                value: c.key,
+                label: (
+                  <span className="flex items-center gap-2">
+                    <Icon size={14} className={iconColorClass(c.key)} />
+                    {lang === "es" ? c.label_es : c.label_en}
+                  </span>
+                ),
+              }))}
+            />
           </div>
         </Row>
         <Row label={t("propDesc")}>

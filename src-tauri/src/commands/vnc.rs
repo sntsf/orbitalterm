@@ -74,6 +74,9 @@ fn rfb_handshake(s: &mut TcpStream, password: Option<&str>) -> Result<(u32, u32)
         return Err(format!("VNC server refused connection: {}", String::from_utf8_lossy(&reason)));
     }
     let sec_types = read_exact(s, num_types as usize)?;
+    eprintln!("[orb-vnc] server_ver={:?} sec_types={:?} password={}",
+              ver_str.trim_end(), sec_types,
+              match password { Some(p) => format!("{} chars", p.len()), None => "none".into() });
 
     // Prefer None (1), then VNC auth (2)
     let chosen = if sec_types.contains(&1) {
@@ -85,6 +88,7 @@ fn rfb_handshake(s: &mut TcpStream, password: Option<&str>) -> Result<(u32, u32)
     };
 
     write_all(s, &[chosen])?;
+    eprintln!("[orb-vnc] chosen security type = {chosen}");
 
     match chosen {
         1 => {
@@ -104,6 +108,7 @@ fn rfb_handshake(s: &mut TcpStream, password: Option<&str>) -> Result<(u32, u32)
             let response = vnc_des_encrypt(&challenge, password.unwrap_or(""));
             write_all(s, &response)?;
             let result = read_u32be(s)?;
+            eprintln!("[orb-vnc] vnc-auth result = {result} (0 = OK)");
             if result != 0 {
                 // Try to read the reason string (3.8+)
                 if let Ok(reason_len) = read_u32be(s) {
@@ -213,20 +218,31 @@ fn send_cut_text(s: &mut TcpStream, text: &str) -> Result<(), String> {
     write_all(s, &msg)
 }
 
-// Encode framebuffer (RGBA layout) to JPEG base64
-fn encode_frame(fb: &[u8], width: u32, height: u32) -> Option<String> {
-    let expected = (width * height * 4) as usize;
-    if fb.len() < expected {
+// Encode a sub-region of the framebuffer (RGBA layout) to JPEG base64. Encoding
+// only the changed bounding box — instead of the whole screen on every update —
+// is the difference between a sluggish and a responsive session.
+fn encode_region(fb: &[u8], fb_width: u32, x: u32, y: u32, w: u32, h: u32) -> Option<String> {
+    if w == 0 || h == 0 {
         return None;
     }
-    // RGBA → RGB
-    let rgb: Vec<u8> = fb[..expected]
-        .chunks(4)
-        .flat_map(|p| [p[0], p[1], p[2]])
-        .collect();
+    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+    for row in 0..h {
+        let line = (((y + row) * fb_width + x) * 4) as usize;
+        let end = line + (w * 4) as usize;
+        if end > fb.len() {
+            return None;
+        }
+        for px in fb[line..end].chunks_exact(4) {
+            rgb.push(px[0]);
+            rgb.push(px[1]);
+            rgb.push(px[2]);
+        }
+    }
+    // Higher quality for small regions (crisp text), lower for big ones (speed).
+    let quality = if w * h < 100_000 { 72 } else { 55 };
     let mut jpeg = Vec::new();
-    JpegEncoder::new_with_quality(&mut jpeg, 70)
-        .write_image(&rgb, width, height, image::ExtendedColorType::Rgb8)
+    JpegEncoder::new_with_quality(&mut jpeg, quality)
+        .write_image(&rgb, w, h, image::ExtendedColorType::Rgb8)
         .ok()?;
     Some(base64::engine::general_purpose::STANDARD.encode(&jpeg))
 }
@@ -236,6 +252,8 @@ fn encode_frame(fb: &[u8], width: u32, height: u32) -> Option<String> {
 #[derive(Serialize, Clone)]
 struct VncFrame {
     data: String,
+    x: u32,
+    y: u32,
     width: u32,
     height: u32,
 }
@@ -258,11 +276,13 @@ fn session_thread(
     };
 
     // Initial setup
-    if send_set_pixel_format(&mut write_s).is_err() { return; }
-    if send_set_encodings(&mut write_s).is_err() { return; }
+    if send_set_pixel_format(&mut write_s).is_err() { eprintln!("[orb-vnc] set_pixel_format failed"); return; }
+    if send_set_encodings(&mut write_s).is_err() { eprintln!("[orb-vnc] set_encodings failed"); return; }
     if send_fb_update_request(&mut write_s, false, 0, 0, width as u16, height as u16).is_err() {
+        eprintln!("[orb-vnc] initial fb_update_request failed");
         return;
     }
+    eprintln!("[orb-vnc] session thread entering render loop");
 
     // Use a short read timeout so we can interleave client-event processing
     read_s.set_read_timeout(Some(Duration::from_millis(20))).ok();
@@ -291,7 +311,13 @@ fn session_thread(
         // Read one byte to determine the server message type
         let mut type_buf = [0u8; 1];
         match read_s.read_exact(&mut type_buf) {
-            Ok(()) => {}
+            Ok(()) => {
+                // Read the rest of the message in BLOCKING mode. A big update
+                // (e.g. minimizing a window) can't arrive within the 20ms
+                // type-byte timeout, and that timeout would abort read_exact
+                // mid-message and kill the session.
+                read_s.set_read_timeout(None).ok();
+            }
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -311,7 +337,8 @@ fn session_thread(
                 }
                 continue;
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("[orb-vnc] read error -> disconnect: {e}");
                 app.emit(&format!("vnc-disconnected-{session_id}"), ()).ok();
                 return;
             }
@@ -321,9 +348,12 @@ fn session_thread(
             // FramebufferUpdate
             0 => {
                 let mut hdr = [0u8; 3]; // padding + num_rects(2)
-                if read_s.read_exact(&mut hdr).is_err() { break; }
+                if read_s.read_exact(&mut hdr).is_err() { eprintln!("[orb-vnc] fb update header read failed"); break; }
                 let num_rects = u16::from_be_bytes([hdr[1], hdr[2]]);
                 let mut bad = false;
+                // Union of all changed rects, so we only re-encode/send that box.
+                let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
+                let mut any_rect = false;
 
                 for _ in 0..num_rects {
                     let mut rh = [0u8; 12];
@@ -333,6 +363,14 @@ fn session_thread(
                     let rw = u16::from_be_bytes([rh[4], rh[5]]) as u32;
                     let rh_ = u16::from_be_bytes([rh[6], rh[7]]) as u32;
                     let enc = i32::from_be_bytes([rh[8], rh[9], rh[10], rh[11]]);
+
+                    if rw > 0 && rh_ > 0 {
+                        min_x = min_x.min(rx);
+                        min_y = min_y.min(ry);
+                        max_x = max_x.max(rx + rw);
+                        max_y = max_y.max(ry + rh_);
+                        any_rect = true;
+                    }
 
                     match enc {
                         0 => {
@@ -433,13 +471,21 @@ fn session_thread(
 
                 if bad { break; }
 
-                // Emit the updated frame
-                if let Some(b64) = encode_frame(&fb, width, height) {
-                    app.emit(
-                        &format!("vnc-frame-{session_id}"),
-                        VncFrame { data: b64, width, height },
-                    )
-                    .ok();
+                // Emit only the changed bounding box (clamped to the framebuffer).
+                if any_rect {
+                    let bx = min_x.min(width);
+                    let by = min_y.min(height);
+                    let ex = max_x.min(width);
+                    let ey = max_y.min(height);
+                    if ex > bx && ey > by {
+                        if let Some(b64) = encode_region(&fb, width, bx, by, ex - bx, ey - by) {
+                            app.emit(
+                                &format!("vnc-frame-{session_id}"),
+                                VncFrame { data: b64, x: bx, y: by, width: ex - bx, height: ey - by },
+                            )
+                            .ok();
+                        }
+                    }
                 }
                 update_pending = false;
             }
@@ -475,6 +521,10 @@ fn session_thread(
             send_fb_update_request(&mut write_s, true, 0, 0, width as u16, height as u16).ok();
             update_pending = true;
         }
+
+        // Restore the short timeout so the next type-byte read can interleave
+        // client input events instead of blocking on the server.
+        read_s.set_read_timeout(Some(Duration::from_millis(20))).ok();
     }
 
     app.emit(&format!("vnc-disconnected-{session_id}"), ()).ok();
@@ -501,13 +551,13 @@ pub async fn vnc_connect(
     let mut stream = TcpStream::connect(&addr)
         .map_err(|e| format!("TCP connect failed: {e}"))?;
 
-    let password = if connection.auth_type == "password" {
-        crate::commands::sessions::get_saved_password_pub(&connection_id)
-    } else {
-        None
-    };
+    // VNC only supports password authentication, so always use the saved
+    // password when there is one (gating on auth_type == "password" meant a
+    // VNC connection saved with any other auth_type silently sent no password).
+    let password = crate::commands::sessions::get_saved_password_pub(&connection_id);
 
     let (width, height) = rfb_handshake(&mut stream, password.as_deref())?;
+    eprintln!("[orb-vnc] handshake OK {width}x{height}; starting session thread");
 
     let (tx, rx) = mpsc::sync_channel::<VncMsg>(128);
     let session_id = Uuid::new_v4().to_string();

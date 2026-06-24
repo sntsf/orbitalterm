@@ -226,7 +226,7 @@ jobs:
       - name: Point .deb dependencies at FreeRDP 2
         shell: bash
         run: |
-          node -e "const f='src-tauri/tauri.conf.json'; const j=require('./'+f); j.bundle.linux.deb.depends=['libwebkit2gtk-4.1-0','libgtk-3-0','libfreerdp-client2-2','libfreerdp2-2','libwinpr2-2']; require('fs').writeFileSync(f, JSON.stringify(j, null, 2) + '\n');"
+          node -e "const f='src-tauri/tauri.conf.json'; const j=require('./'+f); j.bundle.linux.deb.depends=['libwebkit2gtk-4.1-0','libgtk-3-0','libfreerdp-client2-2','libfreerdp2-2','libwinpr2-2','wl-clipboard']; require('fs').writeFileSync(f, JSON.stringify(j, null, 2) + '\n');"
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4

@@ -79,6 +79,8 @@ function domKeyToKeysym(e: KeyboardEvent): number {
 
 interface VncFrame {
   data: string;
+  x: number;
+  y: number;
   width: number;
   height: number;
 }
@@ -91,33 +93,54 @@ export function VncPane({ tab }: VncPaneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
+  // Generation guard: React 18 StrictMode double-invokes the connect effect,
+  // which otherwise opens TWO simultaneous VNC sessions to the same server —
+  // many servers (e.g. UltraVNC) then drop one and the viewer "connects and
+  // closes". Any in-flight connect whose generation is stale discards its session.
+  const connectGenRef = useRef(0);
 
   const [status, setStatus] = useState<"connecting" | "connected">("connecting");
   const [vncSize, setVncSize] = useState({ width: 1024, height: 768 });
   const [viewOnly, setViewOnly] = useState(false);
   const [fitMode, setFitMode] = useState<"fit" | "actual">("fit");
 
-  // Draw a received JPEG frame onto the canvas
+  // Draw a received JPEG frame onto the canvas. createImageBitmap decodes off
+  // the main thread (faster than new Image()+data-URL), matching the RDP path.
   const drawFrame = useCallback((payload: VncFrame) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const img = new Image();
-    img.onload = () => { ctx.drawImage(img, 0, 0); };
-    img.src = `data:image/jpeg;base64,${payload.data}`;
+    const { x, y } = payload;
+    const bytes = Uint8Array.from(atob(payload.data), (c) => c.charCodeAt(0));
+    createImageBitmap(new Blob([bytes], { type: "image/jpeg" }))
+      .then((bmp) => { ctx.drawImage(bmp, x, y); bmp.close(); })
+      .catch(() => {});
   }, []);
 
   const connect = useCallback(async () => {
     if (!connection) return;
+    const gen = ++connectGenRef.current;
     setStatus("connecting");
+    // Yield one event-loop turn so StrictMode's mount→cleanup→mount settles
+    // before we call the backend. The stale first invoke aborts here instead of
+    // opening a second VNC connection to the server.
+    await new Promise<void>((r) => setTimeout(r, 0));
+    if (gen !== connectGenRef.current) return;
     try {
       const result = await vncConnect(connection.id);
+      if (gen !== connectGenRef.current) {
+        // Superseded by a newer connect (StrictMode re-invoke / remount).
+        // Discard this session so we don't leak a second VNC connection.
+        vncDisconnect(result.session_id).catch(() => {});
+        return;
+      }
       sessionIdRef.current = result.session_id;
       setVncSize({ width: result.width, height: result.height });
       setStatus("connected");
       setTabStatus(tab.id, "connected");
     } catch (err) {
+      if (gen !== connectGenRef.current) return;
       const raw = String(err);
       useNotifStore.getState().add({
         connName: connection.name,
@@ -133,6 +156,7 @@ export function VncPane({ tab }: VncPaneProps) {
   useEffect(() => {
     connect();
     return () => {
+      connectGenRef.current++;
       if (sessionIdRef.current) {
         vncDisconnect(sessionIdRef.current).catch(console.error);
         sessionIdRef.current = null;
@@ -295,6 +319,8 @@ export function VncPane({ tab }: VncPaneProps) {
         width={vncSize.width}
         height={vncSize.height}
         style={{
+          width: fit ? "100%" : undefined,
+          height: fit ? "100%" : undefined,
           maxWidth: fit ? "100%" : "none",
           maxHeight: fit ? "100%" : "none",
           objectFit: "contain",
