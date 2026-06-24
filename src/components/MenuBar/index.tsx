@@ -2,12 +2,13 @@ import { useEffect, useRef, useState, forwardRef } from "react";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
 import {
   Plus, FolderPlus, Upload, Download, LogOut,
   Globe, Info, Bug, Check, X, Maximize2, PanelLeftClose,
   Heart, RefreshCw, ExternalLink, Palette, Type, RotateCcw, Database, KeyRound,
-  ChevronRight,
+  ChevronRight, ZoomIn, ZoomOut, Search, Pin,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
@@ -51,6 +52,8 @@ export function MenuBar() {
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [zoom, setZoom] = useState(() => Number(localStorage.getItem("orbitalterm:zoom") ?? "1"));
+  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const { dialog: masterDialog, openDialog: openMasterDialog } = useMasterStore();
   const [masterStatuses, setMasterStatuses] = useState<Record<string, boolean>>({});
@@ -69,9 +72,11 @@ export function MenuBar() {
   const barRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Sync initial fullscreen state
+  // Sync initial fullscreen state + restore saved webview zoom
   useEffect(() => {
     getCurrentWindow().isFullscreen().then(setIsFullscreen).catch(() => {});
+    if (zoom !== 1) getCurrentWebview().setZoom(zoom).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // When a menu bar dropdown opens, carve a hole in the RDP WS_POPUP so the dropdown
@@ -107,10 +112,15 @@ export function MenuBar() {
     return () => window.removeEventListener("mousedown", onDown);
   }, [openMenuId]);
 
-  // Keyboard shortcut: F11 → fullscreen
+  // Keyboard shortcuts: F11 fullscreen, Ctrl +/-/0 zoom
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "F11") { e.preventDefault(); handleFullscreen(); }
+      if (e.key === "F11") { e.preventDefault(); handleFullscreen(); return; }
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === "+" || e.key === "=") { e.preventDefault(); handleZoomIn(); }
+        else if (e.key === "-") { e.preventDefault(); handleZoomOut(); }
+        else if (e.key === "0") { e.preventDefault(); handleZoomReset(); }
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -127,8 +137,26 @@ export function MenuBar() {
 
   const handleFullscreen = async () => {
     const next = !isFullscreen;
-    await getCurrentWindow().setFullscreen(next);
-    setIsFullscreen(next);
+    try { await getCurrentWindow().setFullscreen(next); setIsFullscreen(next); }
+    catch (e) { console.error("fullscreen", e); }
+    setOpenMenuId(null);
+  };
+
+  // Webview zoom (persisted), clamped 0.5–3.0.
+  const applyZoom = async (z: number) => {
+    const clamped = Math.min(3, Math.max(0.5, Math.round(z * 100) / 100));
+    setZoom(clamped);
+    localStorage.setItem("orbitalterm:zoom", String(clamped));
+    try { await getCurrentWebview().setZoom(clamped); } catch (e) { console.error("zoom", e); }
+  };
+  const handleZoomIn = () => { applyZoom(zoom + 0.1); setOpenMenuId(null); };
+  const handleZoomOut = () => { applyZoom(zoom - 0.1); setOpenMenuId(null); };
+  const handleZoomReset = () => { applyZoom(1); setOpenMenuId(null); };
+
+  const handleAlwaysOnTop = async () => {
+    const next = !alwaysOnTop;
+    try { await getCurrentWindow().setAlwaysOnTop(next); setAlwaysOnTop(next); }
+    catch (e) { console.error("always-on-top", e); }
     setOpenMenuId(null);
   };
 
@@ -319,6 +347,16 @@ export function MenuBar() {
           action: handleToggleSidebar,
         },
         { separator: true },
+        { label: t("zoomIn"),    icon: <ZoomIn size={12} />,  shortcut: "Ctrl +", action: handleZoomIn },
+        { label: t("zoomOut"),   icon: <ZoomOut size={12} />, shortcut: "Ctrl -", action: handleZoomOut },
+        { label: `${t("zoomReset")} (${Math.round(zoom * 100)}%)`, icon: <Search size={12} />, shortcut: "Ctrl 0", action: handleZoomReset },
+        { separator: true },
+        {
+          label: t("alwaysOnTop"),
+          icon: <Pin size={12} />,
+          checked: alwaysOnTop,
+          action: handleAlwaysOnTop,
+        },
         {
           label: t("fullscreen"),
           icon: <Maximize2 size={12} />,

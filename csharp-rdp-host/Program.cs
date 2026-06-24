@@ -474,6 +474,22 @@ public sealed class RdpHostForm : Form
                 catch { }
             }
 
+            // Hint a fast LAN so mstscax skips the slow bandwidth auto-detect
+            // round-trip at connect time. (Set before PerformanceFlags, which it
+            // can otherwise reset.)
+            try { _rdp.AdvancedSettings8.NetworkConnectionType = 6; } catch { }
+            try { _rdp.AdvancedSettings8.BandwidthDetection = false; } catch { }
+            // Persistent bitmap cache → faster redraws and reconnects.
+            try { _rdp.AdvancedSettings9.BitmapPersistence = 1; } catch { }
+            try { _rdp.AdvancedSettings2.BitmapPersistence = 1; } catch { }
+            try { _rdp.AdvancedSettings2.CachePersistenceActive = 1; } catch { }
+            // Fast-connect profile so the desktop paints quickly (matches the
+            // Linux bridge and mRemoteNG defaults): disable wallpaper (0x1),
+            // full-window drag (0x2), menu animations (0x4) and cursor shadow
+            // (0x20) = 0x27; theming is kept on. Set last so it isn't reset.
+            try { _rdp.AdvancedSettings9.PerformanceFlags = 0x27; } catch { }
+            try { _rdp.AdvancedSettings8.PerformanceFlags = 0x27; } catch { }
+
             Emit("STATE:connecting");
             _rdp.Connect();
         }
