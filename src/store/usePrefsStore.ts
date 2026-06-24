@@ -3,18 +3,21 @@ import { useEffect, useState } from "react";
 
 export type Theme =
   | "dark" | "light" | "nord" | "system"
-  | "terminal" | "pastel-yellow" | "pastel-blue" | "pastel-pink";
+  | "high-contrast" | "magenta"
+  | "pastel-yellow" | "pastel-blue" | "pastel-pink" | "pastel-orange";
 export type FontSize = 12 | 13 | 15 | 18;
 
 export const THEMES: { value: Theme; label: string; labelEs: string }[] = [
-  { value: "system",        label: "System",        labelEs: "Sistema"          },
-  { value: "dark",          label: "Dark",          labelEs: "Oscuro"           },
-  { value: "light",         label: "Light",         labelEs: "Claro"            },
-  { value: "nord",          label: "Nord",          labelEs: "Nord"             },
-  { value: "terminal",      label: "Terminal",      labelEs: "Terminal"         },
-  { value: "pastel-yellow", label: "Pastel Yellow", labelEs: "Amarillo pastel"  },
-  { value: "pastel-blue",   label: "Pastel Blue",   labelEs: "Celeste pastel"   },
-  { value: "pastel-pink",   label: "Pastel Pink",   labelEs: "Rosa pastel"      },
+  { value: "system",        label: "System",         labelEs: "Sistema"          },
+  { value: "dark",          label: "Dark",           labelEs: "Oscuro"           },
+  { value: "light",         label: "Light",          labelEs: "Claro"            },
+  { value: "nord",          label: "Nord",           labelEs: "Nord"             },
+  { value: "high-contrast", label: "High Contrast",  labelEs: "Alto contraste"   },
+  { value: "magenta",       label: "Magenta",        labelEs: "Magenta"          },
+  { value: "pastel-yellow", label: "Pastel Yellow",  labelEs: "Amarillo pastel"  },
+  { value: "pastel-orange", label: "Pastel Orange",  labelEs: "Naranja pastel"   },
+  { value: "pastel-blue",   label: "Pastel Blue",    labelEs: "Celeste pastel"   },
+  { value: "pastel-pink",   label: "Pastel Pink",    labelEs: "Rosa pastel"      },
 ];
 
 export const FONT_SIZES: { value: FontSize; label: string }[] = [
@@ -74,20 +77,37 @@ const THEME_VARS: Record<Exclude<Theme, "system">, Record<string, string>> = {
     "--color-danger":       "#bf616a",
     "color-scheme":         "dark",
   },
-  // Green-phosphor look — everything reads like a classic terminal.
-  terminal: {
-    "--color-bg-base":      "#060a06",
-    "--color-bg-surface":   "#0a0f0a",
-    "--color-bg-elevated":  "#0e150e",
-    "--color-bg-hover":     "#142016",
-    "--color-border":       "#1d3a24",
-    "--color-text-primary": "#4ade80",
-    "--color-text-muted":   "#3f8f5c",
-    "--color-accent":       "#22c55e",
-    "--color-accent-hover": "#4ade80",
-    "--color-success":      "#22c55e",
-    "--color-warning":      "#d4d44a",
-    "--color-danger":       "#ff5f56",
+  // IntelliJ "High Contrast" — pure black, white text, vivid accents, bright
+  // borders for maximum legibility.
+  "high-contrast": {
+    "--color-bg-base":      "#000000",
+    "--color-bg-surface":   "#0a0a0a",
+    "--color-bg-elevated":  "#141414",
+    "--color-bg-hover":     "#2a2a2a",
+    "--color-border":       "#6a6a6a",
+    "--color-text-primary": "#ffffff",
+    "--color-text-muted":   "#cfcfcf",
+    "--color-accent":       "#1fd0ff",
+    "--color-accent-hover": "#7fe6ff",
+    "--color-success":      "#36ff5e",
+    "--color-warning":      "#ffd633",
+    "--color-danger":       "#ff4d4d",
+    "color-scheme":         "dark",
+  },
+  // Synthwave magenta — dark plum base with hot-pink accents.
+  magenta: {
+    "--color-bg-base":      "#150b14",
+    "--color-bg-surface":   "#1e0f1a",
+    "--color-bg-elevated":  "#281422",
+    "--color-bg-hover":     "#341a2c",
+    "--color-border":       "#4a2540",
+    "--color-text-primary": "#fce4f1",
+    "--color-text-muted":   "#c98bb0",
+    "--color-accent":       "#ff2d8a",
+    "--color-accent-hover": "#ff66ab",
+    "--color-success":      "#2dd4a7",
+    "--color-warning":      "#ffb340",
+    "--color-danger":       "#ff4d6d",
     "color-scheme":         "dark",
   },
   "pastel-yellow": {
@@ -100,6 +120,21 @@ const THEME_VARS: Record<Exclude<Theme, "system">, Record<string, string>> = {
     "--color-text-muted":   "#8a7635",
     "--color-accent":       "#ca8a04",
     "--color-accent-hover": "#a16207",
+    "--color-success":      "#16a34a",
+    "--color-warning":      "#b45309",
+    "--color-danger":       "#dc2626",
+    "color-scheme":         "light",
+  },
+  "pastel-orange": {
+    "--color-bg-base":      "#fdeede",
+    "--color-bg-surface":   "#fef5ec",
+    "--color-bg-elevated":  "#fffdfa",
+    "--color-bg-hover":     "#f7e2cd",
+    "--color-border":       "#ecd2b6",
+    "--color-text-primary": "#5a300f",
+    "--color-text-muted":   "#8a5a30",
+    "--color-accent":       "#ea7317",
+    "--color-accent-hover": "#c2410c",
     "--color-success":      "#16a34a",
     "--color-warning":      "#b45309",
     "--color-danger":       "#dc2626",
@@ -175,17 +210,29 @@ export const TERM_THEMES: Record<Exclude<Theme, "system">, object> = {
     brightBlue: "#81a1c1",  brightMagenta: "#b48ead",
     brightCyan: "#8fbcbb",  brightWhite: "#eceff4",
   },
-  terminal: {
-    background: "#060a06", foreground: "#4ade80", cursor: "#22c55e",
-    selectionBackground: "#22c55e44",
-    black: "#0a0f0a",       red: "#ff6b6b",
-    green: "#4ade80",       yellow: "#d4d44a",
-    blue: "#4fd0e0",        magenta: "#c792ea",
-    cyan: "#56d4dd",        white: "#b8e0c0",
-    brightBlack: "#3f8f5c", brightRed: "#ff8b8b",
-    brightGreen: "#86efac", brightYellow: "#eaea6a",
-    brightBlue: "#7ee0ee",  brightMagenta: "#dab8f5",
-    brightCyan: "#86e8ee",  brightWhite: "#e0ffe8",
+  "high-contrast": {
+    background: "#000000", foreground: "#ffffff", cursor: "#ffffff",
+    selectionBackground: "#1fd0ff55",
+    black: "#000000",       red: "#ff5f5f",
+    green: "#36ff5e",       yellow: "#ffd633",
+    blue: "#5f8cff",        magenta: "#ff5fff",
+    cyan: "#1fd0ff",        white: "#ffffff",
+    brightBlack: "#8a8a8a", brightRed: "#ff8a8a",
+    brightGreen: "#7dff97", brightYellow: "#ffe770",
+    brightBlue: "#9db8ff",  brightMagenta: "#ff8aff",
+    brightCyan: "#7fe6ff",  brightWhite: "#ffffff",
+  },
+  magenta: {
+    background: "#150b14", foreground: "#fce4f1", cursor: "#ff2d8a",
+    selectionBackground: "#ff2d8a44",
+    black: "#2a1626",       red: "#ff4d6d",
+    green: "#2dd4a7",       yellow: "#ffb340",
+    blue: "#8a6bff",        magenta: "#ff2d8a",
+    cyan: "#3ad0d0",        white: "#e9c7da",
+    brightBlack: "#6a4560", brightRed: "#ff7d95",
+    brightGreen: "#5ee6c2", brightYellow: "#ffc873",
+    brightBlue: "#ab92ff",  brightMagenta: "#ff66ab",
+    brightCyan: "#6ee0e0",  brightWhite: "#ffe6f4",
   },
   "pastel-yellow": {
     background: "#fdf9ec", foreground: "#574613", cursor: "#ca8a04",
@@ -198,6 +245,18 @@ export const TERM_THEMES: Record<Exclude<Theme, "system">, object> = {
     brightGreen: "#15803d", brightYellow: "#854d0e",
     brightBlue: "#0550ae",  brightMagenta: "#6d28d9",
     brightCyan: "#0e7490",  brightWhite: "#3f3410",
+  },
+  "pastel-orange": {
+    background: "#fef5ec", foreground: "#5a300f", cursor: "#ea7317",
+    selectionBackground: "#ea731733",
+    black: "#5a300f",       red: "#dc2626",
+    green: "#16a34a",       yellow: "#b45309",
+    blue: "#0969da",        magenta: "#c2410c",
+    cyan: "#0891b2",        white: "#8a5a30",
+    brightBlack: "#8a5a30", brightRed: "#b91c1c",
+    brightGreen: "#15803d", brightYellow: "#92400e",
+    brightBlue: "#0550ae",  brightMagenta: "#9a3412",
+    brightCyan: "#0e7490",  brightWhite: "#3a1f0a",
   },
   "pastel-blue": {
     background: "#eff8fd", foreground: "#0e3850", cursor: "#0284c7",
@@ -227,14 +286,14 @@ export const TERM_THEMES: Record<Exclude<Theme, "system">, object> = {
 
 /** Returns the actual vars to apply, resolving "system" to dark or light. */
 function resolvedVars(theme: Theme): Record<string, string> {
-  if (theme !== "system") return THEME_VARS[theme];
+  if (theme !== "system") return THEME_VARS[theme] ?? THEME_VARS.dark;
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   return THEME_VARS[prefersDark ? "dark" : "light"];
 }
 
 /** Returns the resolved terminal theme, resolving "system". */
 export function resolvedTermTheme(theme: Theme): object {
-  if (theme !== "system") return TERM_THEMES[theme];
+  if (theme !== "system") return TERM_THEMES[theme] ?? TERM_THEMES.dark;
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   return TERM_THEMES[prefersDark ? "dark" : "light"];
 }
@@ -262,7 +321,11 @@ interface PrefsStore {
 export const usePrefsStore = create<PrefsStore>((set) => {
   // No saved preference → follow the OS ("system"), so the app is born in the
   // operating system's light/dark mode.
-  const savedTheme = (localStorage.getItem("orbitalterm:theme") as Theme | null) ?? "system";
+  const rawTheme = localStorage.getItem("orbitalterm:theme") as Theme | null;
+  // Validate against known themes so a stale value (e.g. a removed theme) safely
+  // falls back to "system" instead of breaking.
+  const savedTheme: Theme =
+    rawTheme && (rawTheme === "system" || rawTheme in THEME_VARS) ? rawTheme : "system";
   const savedSize = Number(localStorage.getItem("orbitalterm:fontSize") ?? "13") as FontSize;
 
   applyTheme(savedTheme);

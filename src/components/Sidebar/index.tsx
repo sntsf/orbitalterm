@@ -1005,7 +1005,7 @@ export function Sidebar() {
           <img
             src={light ? "/logo_animado_light.svg" : "/logo_animado.svg"}
             alt="OrbitalTerm"
-            className="h-10 w-auto object-contain select-none"
+            className="h-8 w-auto object-contain select-none"
             draggable={false}
           />
           <div className="ml-auto flex items-center gap-0.5">
