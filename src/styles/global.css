@@ -41,13 +41,4 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--color-text-muted); }
-
-  /* Native <select> dropdown popup — the option list is drawn by the webview and
-     otherwise defaults to a dark canvas, which looks broken on the light/pastel
-     themes. Force it to follow the active theme so the chosen option is legible. */
-  select option,
-  select optgroup {
-    background-color: var(--color-bg-elevated);
-    color: var(--color-text-primary);
-  }
 }
