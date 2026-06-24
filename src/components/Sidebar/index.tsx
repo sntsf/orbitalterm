@@ -1324,13 +1324,40 @@ export function Sidebar() {
 
 // ── Tree prefix ───────────────────────────────────────────────────────────────
 
+// mRemoteNG-style dotted connector lines drawn with thin dotted borders so they
+// connect vertically between rows. `continuations[i]` = an ancestor at level i
+// still has siblings below (draw a passing-through vertical line).
 function TreePrefix({ continuations, isLast }: { continuations: boolean[]; isLast: boolean }) {
+  const W = 15;
+  const col = "var(--color-text-muted)";
+  const last = continuations.length; // index of this node's own connector column
   return (
     <span
-      className="font-mono shrink-0 select-none text-[var(--color-text-muted)]"
-      style={{ fontSize: "11px", whiteSpace: "pre", lineHeight: 1 }}
+      aria-hidden
+      className="relative self-stretch shrink-0 select-none"
+      style={{ width: (last + 1) * W }}
     >
-      {continuations.map((c) => (c ? "│ " : "  ")).join("")}{isLast ? "└─" : "├─"}{" "}
+      {/* vertical lines passing through ancestor levels (overrun row padding by
+          1px each side so they join the rows above/below) */}
+      {continuations.map((c, i) =>
+        c ? (
+          <span
+            key={i}
+            className="absolute border-l border-dotted"
+            style={{ left: i * W + W / 2, top: -1, bottom: -1, borderColor: col }}
+          />
+        ) : null,
+      )}
+      {/* this node's vertical connector: full height, or half (top→middle) if last child */}
+      <span
+        className="absolute border-l border-dotted"
+        style={{ left: last * W + W / 2, top: -1, bottom: isLast ? "50%" : -1, borderColor: col }}
+      />
+      {/* horizontal connector from the vertical line to the node */}
+      <span
+        className="absolute border-t border-dotted"
+        style={{ top: "50%", left: last * W + W / 2, width: W / 2, borderColor: col }}
+      />
     </span>
   );
 }
