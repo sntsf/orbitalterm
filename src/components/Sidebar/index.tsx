@@ -1327,7 +1327,7 @@ export function Sidebar() {
 function TreePrefix({ continuations, isLast }: { continuations: boolean[]; isLast: boolean }) {
   return (
     <span
-      className="font-mono shrink-0 select-none text-[var(--color-border)]"
+      className="font-mono shrink-0 select-none text-[var(--color-text-muted)]"
       style={{ fontSize: "11px", whiteSpace: "pre", lineHeight: 1 }}
     >
       {continuations.map((c) => (c ? "│ " : "  ")).join("")}{isLast ? "└─" : "├─"}{" "}
