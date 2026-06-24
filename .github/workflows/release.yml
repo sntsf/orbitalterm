@@ -284,12 +284,21 @@ jobs:
             const release_id = ${{ needs.create-release.outputs.release_id }};
             const { owner, repo } = context.repo;
             const base = 'src-tauri/target/release/bundle';
+            // Existing assets on the release, so re-runs don't fail with
+            // "already_exists" — we delete a duplicate before re-uploading.
+            const existing = await github.paginate(
+              github.rest.repos.listReleaseAssets, { owner, repo, release_id });
             for (const d of ['deb', 'rpm', 'appimage']) {
               const full = path.join(base, d);
               if (!fs.existsSync(full)) continue;
               for (const name of fs.readdirSync(full)) {
                 if (!/\.(deb|rpm|AppImage)$/.test(name)) continue;
                 const file = path.join(full, name);
+                const dup = existing.find((a) => a.name === name);
+                if (dup) {
+                  console.log('Replacing existing asset', name);
+                  await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: dup.id });
+                }
                 console.log('Uploading', name);
                 await github.rest.repos.uploadReleaseAsset({
                   owner, repo, release_id, name,
