@@ -1,14 +1,20 @@
 import { create } from "zustand";
 import { useEffect, useState } from "react";
 
-export type Theme = "dark" | "light" | "nord" | "system";
+export type Theme =
+  | "dark" | "light" | "nord" | "system"
+  | "terminal" | "pastel-yellow" | "pastel-blue" | "pastel-pink";
 export type FontSize = 12 | 13 | 15 | 18;
 
 export const THEMES: { value: Theme; label: string; labelEs: string }[] = [
-  { value: "system", label: "System", labelEs: "Sistema" },
-  { value: "dark",   label: "Dark",   labelEs: "Oscuro"  },
-  { value: "light",  label: "Light",  labelEs: "Claro"   },
-  { value: "nord",   label: "Nord",   labelEs: "Nord"    },
+  { value: "system",        label: "System",        labelEs: "Sistema"          },
+  { value: "dark",          label: "Dark",          labelEs: "Oscuro"           },
+  { value: "light",         label: "Light",         labelEs: "Claro"            },
+  { value: "nord",          label: "Nord",          labelEs: "Nord"             },
+  { value: "terminal",      label: "Terminal",      labelEs: "Terminal"         },
+  { value: "pastel-yellow", label: "Pastel Yellow", labelEs: "Amarillo pastel"  },
+  { value: "pastel-blue",   label: "Pastel Blue",   labelEs: "Celeste pastel"   },
+  { value: "pastel-pink",   label: "Pastel Pink",   labelEs: "Rosa pastel"      },
 ];
 
 export const FONT_SIZES: { value: FontSize; label: string }[] = [
@@ -68,6 +74,67 @@ const THEME_VARS: Record<Exclude<Theme, "system">, Record<string, string>> = {
     "--color-danger":       "#bf616a",
     "color-scheme":         "dark",
   },
+  // Green-phosphor look — everything reads like a classic terminal.
+  terminal: {
+    "--color-bg-base":      "#060a06",
+    "--color-bg-surface":   "#0a0f0a",
+    "--color-bg-elevated":  "#0e150e",
+    "--color-bg-hover":     "#142016",
+    "--color-border":       "#1d3a24",
+    "--color-text-primary": "#4ade80",
+    "--color-text-muted":   "#3f8f5c",
+    "--color-accent":       "#22c55e",
+    "--color-accent-hover": "#4ade80",
+    "--color-success":      "#22c55e",
+    "--color-warning":      "#d4d44a",
+    "--color-danger":       "#ff5f56",
+    "color-scheme":         "dark",
+  },
+  "pastel-yellow": {
+    "--color-bg-base":      "#fbf5e0",
+    "--color-bg-surface":   "#fdf9ec",
+    "--color-bg-elevated":  "#fffdf6",
+    "--color-bg-hover":     "#f2e9cd",
+    "--color-border":       "#e4d9b3",
+    "--color-text-primary": "#574613",
+    "--color-text-muted":   "#8a7635",
+    "--color-accent":       "#ca8a04",
+    "--color-accent-hover": "#a16207",
+    "--color-success":      "#16a34a",
+    "--color-warning":      "#b45309",
+    "--color-danger":       "#dc2626",
+    "color-scheme":         "light",
+  },
+  "pastel-blue": {
+    "--color-bg-base":      "#e4f1fb",
+    "--color-bg-surface":   "#eff8fd",
+    "--color-bg-elevated":  "#ffffff",
+    "--color-bg-hover":     "#d3e9f6",
+    "--color-border":       "#b8d9ed",
+    "--color-text-primary": "#0e3850",
+    "--color-text-muted":   "#3d6e88",
+    "--color-accent":       "#0284c7",
+    "--color-accent-hover": "#0369a1",
+    "--color-success":      "#0d9488",
+    "--color-warning":      "#b45309",
+    "--color-danger":       "#dc2626",
+    "color-scheme":         "light",
+  },
+  "pastel-pink": {
+    "--color-bg-base":      "#fceaf2",
+    "--color-bg-surface":   "#fef3f8",
+    "--color-bg-elevated":  "#ffffff",
+    "--color-bg-hover":     "#f9dbe7",
+    "--color-border":       "#f1c5d8",
+    "--color-text-primary": "#591d39",
+    "--color-text-muted":   "#8a4a64",
+    "--color-accent":       "#db2777",
+    "--color-accent-hover": "#be185d",
+    "--color-success":      "#16a34a",
+    "--color-warning":      "#b45309",
+    "--color-danger":       "#dc2626",
+    "color-scheme":         "light",
+  },
 };
 
 // Terminal color palettes per theme
@@ -108,6 +175,54 @@ export const TERM_THEMES: Record<Exclude<Theme, "system">, object> = {
     brightBlue: "#81a1c1",  brightMagenta: "#b48ead",
     brightCyan: "#8fbcbb",  brightWhite: "#eceff4",
   },
+  terminal: {
+    background: "#060a06", foreground: "#4ade80", cursor: "#22c55e",
+    selectionBackground: "#22c55e44",
+    black: "#0a0f0a",       red: "#ff6b6b",
+    green: "#4ade80",       yellow: "#d4d44a",
+    blue: "#4fd0e0",        magenta: "#c792ea",
+    cyan: "#56d4dd",        white: "#b8e0c0",
+    brightBlack: "#3f8f5c", brightRed: "#ff8b8b",
+    brightGreen: "#86efac", brightYellow: "#eaea6a",
+    brightBlue: "#7ee0ee",  brightMagenta: "#dab8f5",
+    brightCyan: "#86e8ee",  brightWhite: "#e0ffe8",
+  },
+  "pastel-yellow": {
+    background: "#fdf9ec", foreground: "#574613", cursor: "#ca8a04",
+    selectionBackground: "#ca8a0433",
+    black: "#574613",       red: "#dc2626",
+    green: "#16a34a",       yellow: "#a16207",
+    blue: "#0969da",        magenta: "#7c3aed",
+    cyan: "#0891b2",        white: "#8a7635",
+    brightBlack: "#8a7635", brightRed: "#b91c1c",
+    brightGreen: "#15803d", brightYellow: "#854d0e",
+    brightBlue: "#0550ae",  brightMagenta: "#6d28d9",
+    brightCyan: "#0e7490",  brightWhite: "#3f3410",
+  },
+  "pastel-blue": {
+    background: "#eff8fd", foreground: "#0e3850", cursor: "#0284c7",
+    selectionBackground: "#0284c733",
+    black: "#0e3850",       red: "#dc2626",
+    green: "#0d9488",       yellow: "#b45309",
+    blue: "#0284c7",        magenta: "#7c3aed",
+    cyan: "#0891b2",        white: "#3d6e88",
+    brightBlack: "#3d6e88", brightRed: "#b91c1c",
+    brightGreen: "#0f766e", brightYellow: "#92400e",
+    brightBlue: "#0369a1",  brightMagenta: "#6d28d9",
+    brightCyan: "#0e7490",  brightWhite: "#0a2a3c",
+  },
+  "pastel-pink": {
+    background: "#fef3f8", foreground: "#591d39", cursor: "#db2777",
+    selectionBackground: "#db277733",
+    black: "#591d39",       red: "#dc2626",
+    green: "#16a34a",       yellow: "#b45309",
+    blue: "#0969da",        magenta: "#db2777",
+    cyan: "#0891b2",        white: "#8a4a64",
+    brightBlack: "#8a4a64", brightRed: "#b91c1c",
+    brightGreen: "#15803d", brightYellow: "#92400e",
+    brightBlue: "#0550ae",  brightMagenta: "#be185d",
+    brightCyan: "#0e7490",  brightWhite: "#451530",
+  },
 };
 
 /** Returns the actual vars to apply, resolving "system" to dark or light. */
@@ -145,7 +260,9 @@ interface PrefsStore {
 }
 
 export const usePrefsStore = create<PrefsStore>((set) => {
-  const savedTheme = (localStorage.getItem("orbitalterm:theme") as Theme | null) ?? "dark";
+  // No saved preference → follow the OS ("system"), so the app is born in the
+  // operating system's light/dark mode.
+  const savedTheme = (localStorage.getItem("orbitalterm:theme") as Theme | null) ?? "system";
   const savedSize = Number(localStorage.getItem("orbitalterm:fontSize") ?? "13") as FontSize;
 
   applyTheme(savedTheme);
@@ -189,10 +306,10 @@ export const usePrefsStore = create<PrefsStore>((set) => {
 });
 
 /**
- * True when the active theme renders on a light background ("light", or
- * "system" resolving to light). Only "light" uses a light surface — "dark" and
- * "nord" are both dark — so the light logo variants are used only in that case.
- * Reacts to OS preference changes while on "system".
+ * True when the active theme renders on a light background, derived from each
+ * theme's declared color-scheme ("light" and the pastel themes are light; dark,
+ * nord and terminal are dark). Drives the light logo variants. Reacts to OS
+ * preference changes while on "system".
  */
 export function useIsLightTheme(): boolean {
   const theme = usePrefsStore((s) => s.theme);
@@ -206,7 +323,6 @@ export function useIsLightTheme(): boolean {
     mq.addEventListener("change", handler);
     return () => mq.removeEventListener("change", handler);
   }, [theme]);
-  if (theme === "light") return true;
-  if (theme === "system") return !sysDark;
-  return false;
+  const resolved = theme === "system" ? (sysDark ? "dark" : "light") : theme;
+  return THEME_VARS[resolved]["color-scheme"] === "light";
 }

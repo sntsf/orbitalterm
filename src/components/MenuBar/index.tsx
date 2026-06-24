@@ -7,6 +7,7 @@ import {
   Plus, FolderPlus, Upload, Download, LogOut,
   Globe, Info, Bug, Check, X, Maximize2, PanelLeftClose,
   Heart, RefreshCw, ExternalLink, Palette, Type, RotateCcw, Database, KeyRound,
+  ChevronRight,
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
@@ -33,6 +34,7 @@ type MenuItemDef =
       action?: () => void;
       checked?: boolean;
       disabled?: boolean;
+      submenu?: MenuItemDef[];
     };
 
 // ── MenuBar ───────────────────────────────────────────────────────────────────
@@ -333,29 +335,36 @@ export function MenuBar() {
       id: "tools",
       label: t("menuTools"),
       items: [
-        // Theme
-        { label: t("theme"), icon: <Palette size={12} />, disabled: true },
-        ...THEMES.map((th) => ({
-          label: lang === "es" ? th.labelEs : th.label,
-          checked: theme === th.value,
-          action: () => { setTheme(th.value); setOpenMenuId(null); },
-        })),
-        { separator: true },
-        // Terminal font size
-        { label: t("termFontSize"), icon: <Type size={12} />, disabled: true },
-        ...FONT_SIZES.map((fs) => ({
-          label: fs.label,
-          checked: fontSize === fs.value,
-          action: () => { setFontSize(fs.value); setOpenMenuId(null); },
-        })),
-        { separator: true },
-        // Language
-        { label: t("language"), icon: <Globe size={12} />, disabled: true },
-        ...LANGS.map((l) => ({
-          label: l.label,
-          checked: lang === l.value,
-          action: () => { setLang(l.value); setOpenMenuId(null); },
-        })),
+        // Theme (flyout submenu)
+        {
+          label: t("theme"),
+          icon: <Palette size={12} />,
+          submenu: THEMES.map((th) => ({
+            label: lang === "es" ? th.labelEs : th.label,
+            checked: theme === th.value,
+            action: () => { setTheme(th.value); setOpenMenuId(null); },
+          })),
+        },
+        // Terminal font size (flyout submenu)
+        {
+          label: t("termFontSize"),
+          icon: <Type size={12} />,
+          submenu: FONT_SIZES.map((fs) => ({
+            label: fs.label,
+            checked: fontSize === fs.value,
+            action: () => { setFontSize(fs.value); setOpenMenuId(null); },
+          })),
+        },
+        // Language (flyout submenu)
+        {
+          label: t("language"),
+          icon: <Globe size={12} />,
+          submenu: LANGS.map((l) => ({
+            label: l.label,
+            checked: lang === l.value,
+            action: () => { setLang(l.value); setOpenMenuId(null); },
+          })),
+        },
         { separator: true },
         // Reset layout
         {
@@ -512,46 +521,76 @@ export function MenuBar() {
 
 // ── Dropdown ──────────────────────────────────────────────────────────────────
 
+// A single menu row (leaf or submenu parent). Submenu parents reveal a flyout
+// panel to the right on hover.
+function MenuRow({ item, onClose }: { item: Exclude<MenuItemDef, { separator: true }>; onClose: () => void }) {
+  const [subOpen, setSubOpen] = useState(false);
+  const hasSub = !!item.submenu?.length;
+  const isHeader = item.disabled && !hasSub;
+
+  return (
+    <div
+      className="relative"
+      onMouseEnter={() => hasSub && setSubOpen(true)}
+      onMouseLeave={() => hasSub && setSubOpen(false)}
+    >
+      <button
+        onClick={
+          hasSub
+            ? () => setSubOpen((s) => !s)
+            : item.action && !item.disabled
+            ? () => { item.action!(); onClose(); }
+            : undefined
+        }
+        disabled={item.disabled}
+        className={[
+          "flex items-center gap-2 w-full px-3 py-1 text-left text-xs transition-colors",
+          isHeader
+            ? "text-[var(--color-text-muted)] cursor-default font-semibold opacity-50"
+            : item.action || hasSub
+            ? "hover:bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] cursor-pointer"
+            : "text-[var(--color-text-muted)] cursor-default",
+        ].join(" ")}
+      >
+        {/* Check / icon column (fixed 16px width) */}
+        <span className="w-4 shrink-0 flex items-center justify-center">
+          {item.checked
+            ? <Check size={11} className="text-[var(--color-accent)]" />
+            : (item.icon ?? null)}
+        </span>
+
+        <span className="flex-1">{item.label}</span>
+
+        {item.shortcut && (
+          <span className="text-[10px] text-[var(--color-text-muted)] ml-4 shrink-0">
+            {item.shortcut}
+          </span>
+        )}
+        {hasSub && <ChevronRight size={11} className="ml-1 shrink-0 text-[var(--color-text-muted)]" />}
+      </button>
+
+      {hasSub && subOpen && (
+        <div className="absolute left-full top-0 -mt-1 ml-0.5 min-w-[180px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-xl z-50 py-1">
+          {item.submenu!.map((sub, j) =>
+            "separator" in sub
+              ? <div key={j} className="my-1 border-t border-[var(--color-border)]" />
+              : <MenuRow key={j} item={sub} onClose={onClose} />,
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const Dropdown = forwardRef<HTMLDivElement, { items: MenuItemDef[]; onClose: () => void }>(
 function Dropdown({ items, onClose }, ref) {
   return (
     <div ref={ref} className="absolute top-full left-0 mt-0.5 min-w-[210px] bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded shadow-xl z-50 py-1">
-      {items.map((item, i) => {
-        if ("separator" in item) {
-          return <div key={i} className="my-1 border-t border-[var(--color-border)]" />;
-        }
-        const isHeader = item.disabled;
-        return (
-          <button
-            key={i}
-            onClick={item.action && !item.disabled ? () => { item.action!(); onClose(); } : undefined}
-            disabled={item.disabled}
-            className={[
-              "flex items-center gap-2 w-full px-3 py-1 text-left text-xs transition-colors",
-              isHeader
-                ? "text-[var(--color-text-muted)] cursor-default font-semibold opacity-50"
-                : item.action
-                ? "hover:bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] cursor-pointer"
-                : "text-[var(--color-text-muted)] cursor-default",
-            ].join(" ")}
-          >
-            {/* Check / icon column (fixed 16px width) */}
-            <span className="w-4 shrink-0 flex items-center justify-center">
-              {item.checked
-                ? <Check size={11} className="text-[var(--color-accent)]" />
-                : (item.icon ?? null)}
-            </span>
-
-            <span className="flex-1">{item.label}</span>
-
-            {item.shortcut && (
-              <span className="text-[10px] text-[var(--color-text-muted)] ml-4 shrink-0">
-                {item.shortcut}
-              </span>
-            )}
-          </button>
-        );
-      })}
+      {items.map((item, i) =>
+        "separator" in item
+          ? <div key={i} className="my-1 border-t border-[var(--color-border)]" />
+          : <MenuRow key={i} item={item} onClose={onClose} />,
+      )}
     </div>
   );
 });

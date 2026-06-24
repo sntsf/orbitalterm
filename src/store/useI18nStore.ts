@@ -707,8 +707,20 @@ interface I18nStore {
   t: (k: TranslationKey) => string;
 }
 
+// Pick the closest supported language to the OS locale (navigator.language),
+// used only on first run when the user hasn't chosen one yet.
+function detectOsLang(): Lang {
+  const supported: Lang[] = ["es", "en", "fr", "ru", "ja"];
+  const locales = [navigator.language, ...(navigator.languages ?? [])];
+  for (const loc of locales) {
+    const code = loc.toLowerCase().split("-")[0] as Lang;
+    if (supported.includes(code)) return code;
+  }
+  return "en";
+}
+
 export const useI18nStore = create<I18nStore>((set, get) => ({
-  lang: (localStorage.getItem("orbitalterm:lang") as Lang | null) ?? "es",
+  lang: (localStorage.getItem("orbitalterm:lang") as Lang | null) ?? detectOsLang(),
   setLang: (lang) => {
     localStorage.setItem("orbitalterm:lang", lang);
     set({ lang });
