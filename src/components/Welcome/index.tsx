@@ -1,10 +1,12 @@
 import { Terminal, Monitor, Download, FileInput } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT } from "../../store/useI18nStore";
+import { useIsLightTheme } from "../../store/usePrefsStore";
 
 export function Welcome() {
   const { startNewConnection } = useAppStore();
   const t = useT();
+  const light = useIsLightTheme();
 
   // Import flows live in the MenuBar (dialog + progress wiring); fire the same
   // events it listens for instead of duplicating that logic here.
@@ -15,7 +17,7 @@ export function Welcome() {
     <div className="flex-1 flex flex-col items-center justify-center gap-6 text-center p-8 bg-[var(--color-bg-base)] h-full">
       <div className="flex flex-col items-center gap-3">
         <img
-          src="/logo_centro.svg"
+          src={light ? "/logo_centro_light.svg" : "/logo_centro.svg"}
           alt="OrbitalTerm"
           className="h-36 w-auto object-contain select-none"
           draggable={false}

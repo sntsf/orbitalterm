@@ -16,6 +16,7 @@ import {
 } from "../../lib/commands";
 import { ContextMenu, useContextMenu } from "../ContextMenu";
 import { useMasterStore } from "../../store/useMasterStore";
+import { useIsLightTheme } from "../../store/usePrefsStore";
 import { PropertiesPanel } from "../PropertiesPanel";
 import { ConnIconDisplay, DEFAULT_CONN_ICON } from "../../lib/connIcons";
 import { iconColorClass } from "../../lib/folderColors";
@@ -104,6 +105,7 @@ export function Sidebar() {
   const groups = useAppStore((s) => s.groups);
   const searchQuery = useAppStore((s) => s.searchQuery);
   const selectedConnectionId = useAppStore((s) => s.selectedConnectionId);
+  const light = useIsLightTheme();
   const selectedFolderId = useAppStore((s) => s.selectedFolderId);
   const selectedGroupId = useAppStore((s) => s.selectedGroupId);
   const setConnections = useAppStore((s) => s.setConnections);
@@ -1001,7 +1003,7 @@ export function Sidebar() {
         {/* Logo row — logo on left, utility icons on right */}
         <div className="flex items-center px-3 py-2 gap-1">
           <img
-            src="/logo_animado.svg"
+            src={light ? "/logo_animado_light.svg" : "/logo_animado.svg"}
             alt="OrbitalTerm"
             className="h-9 w-auto object-contain select-none"
             draggable={false}

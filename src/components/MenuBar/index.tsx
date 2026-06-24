@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 import { useT, useI18nStore, LANGS } from "../../store/useI18nStore";
-import { usePrefsStore, THEMES, FONT_SIZES } from "../../store/usePrefsStore";
+import { usePrefsStore, useIsLightTheme, THEMES, FONT_SIZES } from "../../store/usePrefsStore";
 import { useImportStore, type ImportProgress } from "../../store/useImportStore";
 import {
   importFromFile, importFromMremoteng, getConnections, getFolders, getGroups, saveGroup,
@@ -560,6 +560,7 @@ function Dropdown({ items, onClose }, ref) {
 
 function AboutModal({ onClose }: { onClose: () => void }) {
   const t = useT();
+  const light = useIsLightTheme();
 
   return (
     <div
@@ -569,7 +570,7 @@ function AboutModal({ onClose }: { onClose: () => void }) {
       <div className="bg-[var(--color-bg-surface)] border border-[var(--color-border)] rounded-xl shadow-2xl w-80 overflow-hidden">
         <div className="flex flex-col items-center gap-3 px-6 py-6 bg-[var(--color-bg-elevated)]">
           <img
-            src="/logo_centro.svg"
+            src={light ? "/logo_centro_light.svg" : "/logo_centro.svg"}
             alt="OrbitalTerm"
             className="h-28 w-auto object-contain select-none"
             draggable={false}

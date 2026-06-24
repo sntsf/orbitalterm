@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useEffect, useState } from "react";
 
 export type Theme = "dark" | "light" | "nord" | "system";
 export type FontSize = 12 | 13 | 15 | 18;
@@ -186,3 +187,26 @@ export const usePrefsStore = create<PrefsStore>((set) => {
     },
   };
 });
+
+/**
+ * True when the active theme renders on a light background ("light", or
+ * "system" resolving to light). Only "light" uses a light surface — "dark" and
+ * "nord" are both dark — so the light logo variants are used only in that case.
+ * Reacts to OS preference changes while on "system".
+ */
+export function useIsLightTheme(): boolean {
+  const theme = usePrefsStore((s) => s.theme);
+  const [sysDark, setSysDark] = useState(
+    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
+  );
+  useEffect(() => {
+    if (theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = () => setSysDark(mq.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, [theme]);
+  if (theme === "light") return true;
+  if (theme === "system") return !sysDark;
+  return false;
+}
