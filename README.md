@@ -7,6 +7,22 @@ OrbitalTerm es un gestor de conexiones remotas de escritorio construido con [Tau
 
 ---
 
+## Descargas
+
+Descarga la última versión desde la **[página de Releases](https://github.com/sntsf/orbitalterm/releases/latest)**.
+
+| Sistema | Archivos |
+|---------|----------|
+| **Windows** | `.exe` (instalador) · `.msi` |
+| **Linux** — Ubuntu 25.04+ / Fedora / openSUSE | `.deb` · `.rpm` · `.AppImage` |
+| **Linux** — Ubuntu 24.04 y anteriores | `*_ubuntu24.04.deb` · `*.rpm` · `*.AppImage` |
+
+> ¿No sabes cuál elegir en Linux? Mira [Instalación en Linux](#instalación-en-linux) más abajo.
+
+Los instaladores de Windows están firmados digitalmente con un certificado de firma de código **gratuito proporcionado por la [SignPath Foundation](https://signpath.org)** (entidad certificadora: [Certum](https://www.certum.eu)).
+
+---
+
 ## Características
 
 - **SSH** — Terminal completa con xterm.js. Autenticación por contraseña o llave SSH.
@@ -156,8 +172,8 @@ En las propiedades de una conexión Navegador puedes agregar entradas DNS en for
 
 ```
 # Mi red interna
-10.208.21.10  pnet-ap1-sv-ws.onpe.gob.pe
-10.208.23.10  vcenter-ap1-sv-ws.elecciones.onpe
+192.168.1.1  vcenter.com
+192.168.18.1  vcenter.com.pe
 ```
 
 ---
