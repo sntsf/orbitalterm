@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "OrbitalTerm - Remote Connection Manager"
 authors = ["OrbitalTerm"]
 edition = "2021"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "orbitalterm_lib"

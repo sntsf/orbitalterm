@@ -164,7 +164,21 @@ En las propiedades de una conexión Navegador puedes agregar entradas DNS en for
 
 ## Licencia
 
-MIT — ver [LICENSE](LICENSE).
+OrbitalTerm es software libre publicado bajo la **GNU General Public License v3.0 o posterior** (GPL-3.0-or-later) — ver [LICENSE](LICENSE).
+
+Esto significa que puedes usar, estudiar, modificar y redistribuir el código libremente, siempre que cualquier versión que distribuyas se mantenga también bajo GPL-3.0 y con el código fuente disponible.
+
+> El nombre **OrbitalTerm** y su logotipo son marcas del proyecto y no se conceden bajo la licencia del código.
+
+Copyright (C) 2026 OrbitalTerm.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
+details.
 
 ---
 
