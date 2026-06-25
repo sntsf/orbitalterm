@@ -172,8 +172,8 @@ En las propiedades de una conexión Navegador puedes agregar entradas DNS en for
 
 ```
 # Mi red interna
-10.208.21.10  pnet-ap1-sv-ws.onpe.gob.pe
-10.208.23.10  vcenter-ap1-sv-ws.elecciones.onpe
+192.168.1.1  vcenter.com
+192.168.18.1  vcenter.com.pe
 ```
 
 ---
