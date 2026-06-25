@@ -31,11 +31,31 @@ jobs:
             });
             let release = releases.find((r) => r.tag_name === tag);
             if (!release) {
+              const body = [
+                `## Download OrbitalTerm ${tag}`,
+                '',
+                'Pick the file for your platform from the **Assets** below.',
+                '',
+                '| Platform | File |',
+                '|----------|------|',
+                '| **Windows** | `*_x64-setup.exe` (installer) · `*_x64_en-US.msi` |',
+                '| **Linux** — Ubuntu 25.04+ / Fedora / openSUSE | `*_amd64.deb` · `*.rpm` · `*.AppImage` |',
+                '| **Linux** — Ubuntu 24.04 and older | `*_ubuntu24.04.deb` · `*.rpm` · `*.AppImage` |',
+                '',
+                '> On Linux, the `_ubuntu24.04` builds link against FreeRDP 2; the',
+                '> unsuffixed builds link against FreeRDP 3. Installing the wrong one',
+                '> will prevent the app from starting. See the README for details.',
+                '',
+                '### Code signing',
+                '',
+                'Windows builds are code-signed with a free certificate provided by the',
+                '[SignPath Foundation](https://signpath.org) (CA: [Certum](https://www.certum.eu)).',
+              ].join('\n');
               const res = await github.rest.repos.createRelease({
                 owner, repo,
                 tag_name: tag,
                 name: `OrbitalTerm ${tag}`,
-                body: 'See the assets below to download for your platform.',
+                body,
                 draft: true,
                 prerelease: false,
               });
