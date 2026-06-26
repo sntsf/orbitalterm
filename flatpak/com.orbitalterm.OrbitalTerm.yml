@@ -74,6 +74,8 @@ modules:
       - type: git
         url: https://github.com/sntsf/orbitalterm.git
         tag: v1.0.0   # TODO: bump per release
-      # TODO: generate and add these two files (see flatpak/README.md):
-      # - cargo-sources.json
-      # - node-sources.json
+      # Offline dependency sources. Generated into this folder by the CI
+      # workflow (.github/workflows/flatpak.yml) or manually (see README) before
+      # building. flatpak-builder reads a string entry as a path to a JSON list.
+      - cargo-sources.json
+      - node-sources.json

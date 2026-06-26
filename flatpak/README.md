@@ -37,8 +37,19 @@ npm install -g flatpak-node-generator   # or use the script from flatpak-builder
 flatpak-node-generator pnpm ../pnpm-lock.yaml -o node-sources.json
 ```
 
-Then add both files to the `orbitalterm` module `sources:` list in the manifest
-(they are referenced as TODO there).
+Both files are already referenced in the manifest's `sources:` list. They are
+**git-ignored** (large, regenerated each build), so they must exist before you
+build locally — or just let CI generate them (below).
+
+## 🤖 Automated path (recommended)
+
+`.github/workflows/flatpak.yml` generates both source files and builds the
+bundle with `flatpak-builder` on every tag, uploading `orbitalterm.flatpak` as
+an artifact. It stays **dormant** until you set repository variable
+`ENABLE_FLATPAK = true`.
+
+Use it to validate the build in CI; the actual Flathub listing is still done via
+a PR to `flathub/flathub` (see below).
 
 ## Build & test locally
 
