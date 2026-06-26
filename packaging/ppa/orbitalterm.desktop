@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=OrbitalTerm
+Comment=All your remote connections in one workspace
+Comment[es]=Todas tus conexiones remotas en un mismo espacio de trabajo
+Exec=orbitalterm
+Icon=orbitalterm
+Terminal=false
+Type=Application
+Categories=Network;RemoteAccess;Utility;
+Keywords=SSH;RDP;VNC;SFTP;FTP;Terminal;Remote;
+StartupNotify=true
