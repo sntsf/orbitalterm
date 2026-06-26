@@ -11,11 +11,12 @@ OrbitalTerm es un gestor de conexiones remotas de escritorio construido con [Tau
 
 Descarga la última versión desde la **[página de Releases](https://github.com/sntsf/orbitalterm/releases/latest)**.
 
-| Sistema | Archivos |
-|---------|----------|
-| **Windows** | `.exe` (instalador) · `.msi` |
-| **Linux** — Ubuntu 25.04+ / Fedora / openSUSE | `.deb` · `.rpm` · `.AppImage` |
-| **Linux** — Ubuntu 24.04 y anteriores | `*_ubuntu24.04.deb` · `*.rpm` · `*.AppImage` |
+| Sistema | Archivo |
+|---------|---------|
+| **Windows** | `*_x64-setup.exe` (instalador) · `*_x64_en-US.msi` |
+| **Linux** — Debian/Ubuntu/Mint | `*_freerdp3.deb` (distros nuevas) · `*_freerdp2.deb` (antiguas) |
+| **Linux** — Fedora/RHEL/openSUSE | `*_freerdp3.rpm` (distros nuevas) · `*_freerdp2.rpm` (antiguas) |
+| **Linux** — cualquier distro | `*_freerdp3.AppImage` · `*_freerdp2.AppImage` |
 
 > ¿No sabes cuál elegir en Linux? Mira [Instalación en Linux](#instalación-en-linux) más abajo.
 
@@ -116,9 +117,11 @@ src-tauri/target/release/bundle/
 
 ## Instalación en Linux
 
-> **¿Qué archivo descargar?** En cada release hay dos familias de paquetes Linux:
-> - **Sin sufijo** (`OrbitalTerm_<v>_amd64.deb`, etc.) → compilados contra **FreeRDP 3**. Para **Ubuntu 25.04 / 26.04** y derivados modernos (usan `libfreerdp3-3` / `libwinpr3-3`).
-> - **Con sufijo `_ubuntu24.04`** → compilados contra **FreeRDP 2**. Para **Ubuntu 24.04** y anteriores (usan `libfreerdp2-2` / `libwinpr2-2`).
+> **¿Qué archivo descargar?** En cada release hay dos familias de paquetes Linux, según la versión de **FreeRDP** que trae tu distribución (no según la distro en sí):
+> - **`*_freerdp3.*`** → compilados contra **FreeRDP 3** (`libfreerdp3` / `libwinpr3`). Para distros modernas: **Ubuntu 25.04+, Debian 13+, Fedora 40+** y derivados.
+> - **`*_freerdp2.*`** → compilados contra **FreeRDP 2** (`libfreerdp2` / `libwinpr2`). Para distros antiguas: **Ubuntu 24.04 y anteriores, Debian 12, Linux Mint 22, Fedora 39 y anteriores**.
+>
+> **¿Dudas?** Ejecuta `ldconfig -p | grep -E 'libfreerdp(2|3)'`: si ves `libfreerdp3` usa el archivo *freerdp3*; si ves `libfreerdp2`, el *freerdp2*.
 >
 > Instalar el paquete equivocado hará que la app no arranque porque le faltará la versión de FreeRDP correspondiente.
 
@@ -127,8 +130,8 @@ src-tauri/target/release/bundle/
 No requiere instalación ni dependencias adicionales. Funciona en cualquier distribución Linux x86_64.
 
 ```bash
-chmod +x OrbitalTerm_0.1.0_amd64.AppImage
-./OrbitalTerm_0.1.0_amd64.AppImage
+chmod +x OrbitalTerm_*_amd64_freerdp3.AppImage
+./OrbitalTerm_*_amd64_freerdp3.AppImage
 ```
 
 ### Opción 2 — Paquete .deb (Ubuntu / Debian)
@@ -136,13 +139,13 @@ chmod +x OrbitalTerm_0.1.0_amd64.AppImage
 > Usa `apt install` (no `dpkg -i`) para que las dependencias se resuelvan automáticamente.
 
 ```bash
-sudo apt install ./OrbitalTerm_0.1.0_amd64.deb
+sudo apt install ./OrbitalTerm_*_amd64_freerdp3.deb
 ```
 
 Si usas `dpkg -i` y falla al abrir la aplicación, instala las dependencias manualmente:
 
 ```bash
-sudo dpkg -i OrbitalTerm_0.1.0_amd64.deb
+sudo dpkg -i OrbitalTerm_*_amd64_freerdp3.deb
 sudo apt install libfreerdp-client3-3 libfreerdp3-3 libwinpr3-3 libwebkit2gtk-4.1-0
 ```
 
@@ -154,7 +157,7 @@ ldd /usr/bin/orbitalterm | grep "not found"
 ### Opción 3 — Paquete .rpm (Fedora / openSUSE)
 
 ```bash
-sudo rpm -i orbitalterm-0.1.0-1.x86_64.rpm
+sudo rpm -i OrbitalTerm-*-1.x86_64_freerdp3.rpm
 ```
 
 ---

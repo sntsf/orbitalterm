@@ -31,26 +31,9 @@ jobs:
             });
             let release = releases.find((r) => r.tag_name === tag);
             if (!release) {
-              const body = [
-                `## Download OrbitalTerm ${tag}`,
-                '',
-                'Pick the file for your platform from the **Assets** below.',
-                '',
-                '| Platform | File |',
-                '|----------|------|',
-                '| **Windows** | `*_x64-setup.exe` (installer) · `*_x64_en-US.msi` |',
-                '| **Linux** — Ubuntu 25.04+ / Fedora / openSUSE | `*_amd64.deb` · `*.rpm` · `*.AppImage` |',
-                '| **Linux** — Ubuntu 24.04 and older | `*_ubuntu24.04.deb` · `*.rpm` · `*.AppImage` |',
-                '',
-                '> On Linux, the `_ubuntu24.04` builds link against FreeRDP 2; the',
-                '> unsuffixed builds link against FreeRDP 3. Installing the wrong one',
-                '> will prevent the app from starting. See the README for details.',
-                '',
-                '### Code signing',
-                '',
-                'Windows builds are code-signed with a free certificate provided by the',
-                '[SignPath Foundation](https://signpath.org) (CA: [Certum](https://www.certum.eu)).',
-              ].join('\n');
+              const body = `## OrbitalTerm ${tag}\n\n`
+                + 'The installers are being built — the download table and '
+                + 'checksums will appear here automatically when the build finishes.';
               const res = await github.rest.repos.createRelease({
                 owner, repo,
                 tag_name: tag,
@@ -205,12 +188,54 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
-      - name: Build (FreeRDP 3)
+      - name: Build (FreeRDP 3, no upload)
         uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # No releaseId → tauri-action only builds; we rename + upload below so
+        # the artifacts carry a clear "_freerdp3" suffix.
+
+      - name: Add "_freerdp3" suffix to the artifacts
+        shell: bash
+        run: |
+          cd src-tauri/target/release/bundle
+          shopt -s nullglob
+          for f in deb/*.deb rpm/*.rpm appimage/*.AppImage; do
+            ext="${f##*.}"
+            dir="$(dirname "$f")"
+            base="$(basename "$f" ".$ext")"
+            case "$base" in *_freerdp3) continue;; esac
+            mv "$f" "$dir/${base}_freerdp3.${ext}"
+            echo "Renamed -> $dir/${base}_freerdp3.${ext}"
+          done
+
+      - name: Upload FreeRDP 3 assets to the release
+        uses: actions/github-script@v7
         with:
-          releaseId: ${{ needs.create-release.outputs.release_id }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const release_id = ${{ needs.create-release.outputs.release_id }};
+            const { owner, repo } = context.repo;
+            const base = 'src-tauri/target/release/bundle';
+            const existing = await github.paginate(
+              github.rest.repos.listReleaseAssets, { owner, repo, release_id });
+            for (const d of ['deb', 'rpm', 'appimage']) {
+              const full = path.join(base, d);
+              if (!fs.existsSync(full)) continue;
+              for (const name of fs.readdirSync(full)) {
+                if (!/\.(deb|rpm|AppImage)$/.test(name)) continue;
+                const file = path.join(full, name);
+                const dup = existing.find((a) => a.name === name);
+                if (dup) {
+                  console.log('Replacing existing asset', name);
+                  await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: dup.id });
+                }
+                console.log('Uploading', name);
+                await github.rest.repos.uploadReleaseAsset({
+                  owner, repo, release_id, name,
+                  data: fs.readFileSync(file),
+                });
+              }
+            }
 
   # ---------------------------------------------------------------------------
   # Linux — FreeRDP 2 (Ubuntu 24.04 and older)
@@ -282,7 +307,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         # No releaseId → tauri-action only builds; we upload renamed assets below.
 
-      - name: Add "_ubuntu24.04" suffix to the artifacts
+      - name: Add "_freerdp2" suffix to the artifacts
         shell: bash
         run: |
           cd src-tauri/target/release/bundle
@@ -291,8 +316,9 @@ jobs:
             ext="${f##*.}"
             dir="$(dirname "$f")"
             base="$(basename "$f" ".$ext")"
-            mv "$f" "$dir/${base}_ubuntu24.04.${ext}"
-            echo "Renamed -> $dir/${base}_ubuntu24.04.${ext}"
+            case "$base" in *_freerdp2) continue;; esac
+            mv "$f" "$dir/${base}_freerdp2.${ext}"
+            echo "Renamed -> $dir/${base}_freerdp2.${ext}"
           done
 
       - name: Upload FreeRDP 2 assets to the release
@@ -326,3 +352,74 @@ jobs:
                 });
               }
             }
+
+  # ---------------------------------------------------------------------------
+  # Finalize — once all platforms have uploaded their assets, rewrite the
+  # release notes with a per-platform "which file" guide plus an auto-generated
+  # download table (direct links + SHA-256), RustDesk-style.
+  # ---------------------------------------------------------------------------
+  finalize-release:
+    needs: [create-release, build-windows, build-linux-freerdp3, build-linux-freerdp2]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate download table with checksums
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const crypto = require('crypto');
+            const tag = context.ref.replace('refs/tags/', '');
+            const { owner, repo } = context.repo;
+            const release_id = ${{ needs.create-release.outputs.release_id }};
+
+            const assets = await github.paginate(
+              github.rest.repos.listReleaseAssets, { owner, repo, release_id });
+
+            // Compute SHA-256 for every uploaded asset by hashing its bytes.
+            const rows = [];
+            for (const a of assets) {
+              const res = await github.request(
+                'GET /repos/{owner}/{repo}/releases/assets/{asset_id}',
+                { owner, repo, asset_id: a.id, headers: { accept: 'application/octet-stream' } });
+              const sha = crypto.createHash('sha256').update(Buffer.from(res.data)).digest('hex');
+              const mb = (a.size / (1024 * 1024)).toFixed(1);
+              rows.push({ name: a.name, url: a.browser_download_url, sha, mb });
+            }
+            rows.sort((x, y) => x.name.localeCompare(y.name));
+            const tableRows = rows.map(
+              (r) => `| [${r.name}](${r.url}) | ${r.mb} MB | \`${r.sha}\` |`).join('\n');
+
+            const body = [
+              `## OrbitalTerm ${tag}`,
+              '',
+              '### ¿Qué archivo descargar? / Which file to download?',
+              '',
+              '**Windows:** `*_x64-setup.exe` (recomendado / recommended) o `*_x64_en-US.msi`.',
+              '',
+              '**Linux** — elige según la versión de **FreeRDP** que trae tu distro / pick by the **FreeRDP** version your distro ships:',
+              '',
+              '| Paquete / Package | FreeRDP 3 (distros nuevas / newer) | FreeRDP 2 (distros antiguas / older) |',
+              '|---|---|---|',
+              '| Debian · Ubuntu · Mint · Pop!_OS (`.deb`) | `*_freerdp3.deb` | `*_freerdp2.deb` |',
+              '| Fedora · RHEL · CentOS · openSUSE (`.rpm`) | `*_freerdp3.rpm` | `*_freerdp2.rpm` |',
+              '| Cualquier distro / any distro (`.AppImage`) | `*_freerdp3.AppImage` | `*_freerdp2.AppImage` |',
+              '',
+              '> **Ejemplos:** Ubuntu 25.04+ · Debian 13+ · Fedora 40+ → **FreeRDP 3**.',
+              '> Ubuntu 24.04 y anteriores · Debian 12 · Linux Mint 22 · Fedora 39 y anteriores → **FreeRDP 2**.',
+              '>',
+              '> **¿Dudas? / Not sure?** Ejecuta / run:',
+              '> `ldconfig -p | grep -E "libfreerdp(2|3)"` — si ves `libfreerdp3` usa el archivo *freerdp3*; si ves `libfreerdp2`, el *freerdp2*.',
+              '',
+              '### Descargas / Downloads',
+              '',
+              '| Archivo / File | Tamaño / Size | SHA-256 |',
+              '|---|---|---|',
+              tableRows,
+              '',
+              '### Code signing',
+              '',
+              'Windows builds are code-signed with a free certificate provided by the',
+              '[SignPath Foundation](https://signpath.org) (CA: [Certum](https://www.certum.eu)).',
+            ].join('\n');
+
+            await github.rest.repos.updateRelease({ owner, repo, release_id, body });
+            console.log('Updated release body with', rows.length, 'assets.');
