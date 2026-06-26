@@ -393,7 +393,7 @@ jobs:
               '',
               '### ¿Qué archivo descargar? / Which file to download?',
               '',
-              '**Windows:** `*_x64-setup.exe` (recomendado / recommended) o `*_x64_en-US.msi`.',
+              '**Windows:** `*_x64_en-US.msi` (recomendado / recommended) o `*_x64-setup.exe` (alternativo / alternative).',
               '',
               '**Linux** — elige según la versión de **FreeRDP** que trae tu distro / pick by the **FreeRDP** version your distro ships:',
               '',

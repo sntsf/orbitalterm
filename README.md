@@ -13,7 +13,7 @@ Descarga la última versión desde la **[página de Releases](https://github.com
 
 | Sistema | Archivo |
 |---------|---------|
-| **Windows** | `*_x64-setup.exe` (instalador) · `*_x64_en-US.msi` |
+| **Windows** | `*_x64_en-US.msi` (recomendado) · `*_x64-setup.exe` (alternativo) |
 | **Linux** — Debian/Ubuntu/Mint | `*_freerdp3.deb` (distros nuevas) · `*_freerdp2.deb` (antiguas) |
 | **Linux** — Fedora/RHEL/openSUSE | `*_freerdp3.rpm` (distros nuevas) · `*_freerdp2.rpm` (antiguas) |
 | **Linux** — cualquier distro | `*_freerdp3.AppImage` · `*_freerdp2.AppImage` |
