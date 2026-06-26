@@ -1,0 +1,106 @@
+name: Publish to Launchpad PPA
+
+# Builds a signed Debian SOURCE package per Ubuntu series and uploads it to a
+# Launchpad PPA, which then compiles the binaries. The frontend (dist/) is
+# pre-built here and the Rust crates are vendored, so the Launchpad builders
+# compile fully offline (no Node needed there).
+#
+# Dormant until you opt in: set repository variable ENABLE_PPA = true and add
+# the secrets below.
+#
+# Required repository secrets:
+#   PPA_GPG_PRIVATE_KEY  – ASCII-armored private key registered on Launchpad
+#   PPA_GPG_PASSPHRASE   – passphrase for that key
+#   PPA_NAME             – e.g. "your-lp-user/orbitalterm"
+#   PPA_MAINTAINER       – e.g. "OrbitalTerm <anderson.sflorez@gmail.com>"
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to package (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  ppa:
+    if: vars.ENABLE_PPA == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Target Ubuntu series. Adjust to the ones you want to support; each
+        # must ship rustc >= 1.77 (or have a Rust PPA configured as a build
+        # dependency of your PPA).
+        series: [plucky, oracular, noble]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install packaging tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y devscripts debhelper dput
+
+      - name: Install Node + pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install -g pnpm@9
+
+      - name: Resolve version from tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Packaging OrbitalTerm $VERSION"
+          node -e "for (const f of ['src-tauri/tauri.conf.json','package.json']) { const j=require('./'+f); j.version=process.argv[1]; require('fs').writeFileSync(f, JSON.stringify(j, null, 2) + '\n'); }" "$VERSION"
+
+      - name: Build frontend (dist/)
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Vendor Rust crates (offline build on Launchpad)
+        run: |
+          mkdir -p .cargo
+          cargo vendor --manifest-path src-tauri/Cargo.toml --locked vendor > .cargo/config.toml
+
+      - name: Import GPG signing key
+        env:
+          GPG_KEY: ${{ secrets.PPA_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_KEY" | gpg --batch --import
+          KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')
+          echo "DEBSIGN_KEYID=$KEYID" >> "$GITHUB_ENV"
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
+          gpgconf --kill gpg-agent || true
+
+      - name: Assemble debian/ for ${{ matrix.series }}
+        env:
+          DEBEMAIL: ${{ secrets.PPA_MAINTAINER }}
+        run: |
+          rm -rf debian
+          cp -r packaging/ppa/debian ./debian
+          rm -f debian/changelog
+          DEBFULLNAME="OrbitalTerm" dch --create --package orbitalterm \
+            -v "${VERSION}-0ppa1~${{ matrix.series }}1" \
+            --distribution "${{ matrix.series }}" \
+            "Automated PPA build of ${VERSION} for ${{ matrix.series }}."
+
+      - name: Build signed source package
+        run: |
+          debuild -S -sa -d -k"${DEBSIGN_KEYID}" --no-lintian \
+            -p"gpg --batch --pinentry-mode loopback --passphrase ${{ secrets.PPA_GPG_PASSPHRASE }}"
+
+      - name: Upload to the PPA
+        run: |
+          dput "ppa:${{ secrets.PPA_NAME }}" \
+            "../orbitalterm_${VERSION}-0ppa1~${{ matrix.series }}1_source.changes"

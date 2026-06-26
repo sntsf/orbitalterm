@@ -1,24 +1,20 @@
 #!/usr/bin/make -f
 # Debian build rules for OrbitalTerm (PPA / Launchpad source build).
 #
-# Launchpad builders have NO network access, so both the Rust crates and the
-# Node packages must be vendored into the source tarball beforehand (see
-# packaging/ppa/README.md). The build below runs fully offline.
+# The frontend (dist/) is pre-built and the Rust crates are vendored into the
+# SOURCE package by CI before upload (see packaging/ppa/README.md and
+# .github/workflows/ppa.yml). Launchpad builders have NO network, so the build
+# below only compiles the Rust binary fully offline; Tauri embeds the prebuilt
+# dist/ at compile time, so Node is NOT needed on the builder.
 
 export DH_VERBOSE = 1
 export CARGO_HOME = $(CURDIR)/.cargo
-# Use the vendored crates (vendor/) instead of crates.io.
 export CARGO_NET_OFFLINE = true
 
 %:
 	dh $@
 
 override_dh_auto_build:
-	# Frontend (offline). Adjust to your package manager; npm shown for
-	# broad Launchpad availability. If you vendor a pnpm store, swap these.
-	npm ci --offline || npm install --offline
-	npm run build
-	# Rust / Tauri binary (offline, vendored crates).
 	cd src-tauri && cargo build --release --offline --locked
 
 override_dh_auto_install:
@@ -31,9 +27,8 @@ override_dh_auto_install:
 	install -Dm644 src-tauri/icons/icon.png \
 		debian/orbitalterm/usr/share/icons/hicolor/512x512/apps/orbitalterm.png
 
-# The binary bundles a webview; there are no Rust unit tests to run here.
+# No Rust unit tests to run for the bundled webview binary.
 override_dh_auto_test:
 
-# cargo's target/ dir confuses the default clean; remove build artifacts.
 override_dh_auto_clean:
-	rm -rf src-tauri/target dist node_modules .cargo
+	rm -rf src-tauri/target

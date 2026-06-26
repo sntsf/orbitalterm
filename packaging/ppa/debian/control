@@ -5,9 +5,6 @@ Maintainer: OrbitalTerm <anderson.sflorez@gmail.com>
 Build-Depends:
  debhelper-compat (= 13),
  ca-certificates,
- curl,
- nodejs,
- npm,
  pkg-config,
  libssl-dev,
  libgtk-3-dev,
@@ -19,8 +16,9 @@ Build-Depends:
 # (e.g. noble) or FreeRDP 3 (e.g. plucky) automatically:
  freerdp3-dev | freerdp2-dev,
  libwinpr3-dev | libwinpr2-dev,
-# Rust: prefer the distro toolchain; on older series you may need to pull a
-# newer rustc/cargo from the Rust PPA or vendor a rustup toolchain.
+# Rust: Tauri 2 needs rustc >= 1.77. If the target series ships an older
+# toolchain, configure the PPA to also pull build-deps from a newer Rust PPA
+# (PPA settings → "Dependencies"), or this build will fail to compile.
  cargo,
  rustc
 Standards-Version: 4.6.2
