@@ -14,9 +14,9 @@ Descarga la última versión desde la **[página de Releases](https://github.com
 | Sistema | Archivo |
 |---------|---------|
 | **Windows** | `*_x64_en-US.msi` (recomendado) · `*_x64-setup.exe` (alternativo) |
-| **Linux** — Debian/Ubuntu/Mint | `*_freerdp3.deb` (distros nuevas) · `*_freerdp2.deb` (antiguas) |
-| **Linux** — Fedora/RHEL/openSUSE | `*_freerdp3.rpm` (distros nuevas) · `*_freerdp2.rpm` (antiguas) |
-| **Linux** — cualquier distro | `*_freerdp3.AppImage` · `*_freerdp2.AppImage` |
+| **Linux** — Debian/Ubuntu/Mint | `*_support_freerdp3.deb` (distros nuevas) · `*_support_freerdp2.deb` (antiguas) |
+| **Linux** — Fedora/RHEL/openSUSE | `*_support_freerdp3.rpm` (distros nuevas) · `*_support_freerdp2.rpm` (antiguas) |
+| **Linux** — cualquier distro | `*_support_freerdp3.AppImage` · `*_support_freerdp2.AppImage` |
 
 > ¿No sabes cuál elegir en Linux? Mira [Instalación en Linux](#instalación-en-linux) más abajo.
 
@@ -118,8 +118,8 @@ src-tauri/target/release/bundle/
 ## Instalación en Linux
 
 > **¿Qué archivo descargar?** En cada release hay dos familias de paquetes Linux, según la versión de **FreeRDP** que trae tu distribución (no según la distro en sí):
-> - **`*_freerdp3.*`** → compilados contra **FreeRDP 3** (`libfreerdp3` / `libwinpr3`). Para distros modernas: **Ubuntu 25.04+, Debian 13+, Fedora 40+** y derivados.
-> - **`*_freerdp2.*`** → compilados contra **FreeRDP 2** (`libfreerdp2` / `libwinpr2`). Para distros antiguas: **Ubuntu 24.04 y anteriores, Debian 12, Linux Mint 22, Fedora 39 y anteriores**.
+> - **`*_support_freerdp3.*`** → compilados contra **FreeRDP 3** (`libfreerdp3` / `libwinpr3`). Para distros modernas: **Ubuntu 25.04+, Debian 13+, Fedora 40+** y derivados.
+> - **`*_support_freerdp2.*`** → compilados contra **FreeRDP 2** (`libfreerdp2` / `libwinpr2`). Para distros antiguas: **Ubuntu 24.04 y anteriores, Debian 12, Linux Mint 22, Fedora 39 y anteriores**.
 >
 > **¿Dudas?** Ejecuta `ldconfig -p | grep -E 'libfreerdp(2|3)'`: si ves `libfreerdp3` usa el archivo *freerdp3*; si ves `libfreerdp2`, el *freerdp2*.
 >
@@ -130,8 +130,8 @@ src-tauri/target/release/bundle/
 No requiere instalación ni dependencias adicionales. Funciona en cualquier distribución Linux x86_64.
 
 ```bash
-chmod +x OrbitalTerm_*_amd64_freerdp3.AppImage
-./OrbitalTerm_*_amd64_freerdp3.AppImage
+chmod +x OrbitalTerm_*_amd64_support_freerdp3.AppImage
+./OrbitalTerm_*_amd64_support_freerdp3.AppImage
 ```
 
 ### Opción 2 — Paquete .deb (Ubuntu / Debian)
@@ -139,13 +139,13 @@ chmod +x OrbitalTerm_*_amd64_freerdp3.AppImage
 > Usa `apt install` (no `dpkg -i`) para que las dependencias se resuelvan automáticamente.
 
 ```bash
-sudo apt install ./OrbitalTerm_*_amd64_freerdp3.deb
+sudo apt install ./OrbitalTerm_*_amd64_support_freerdp3.deb
 ```
 
 Si usas `dpkg -i` y falla al abrir la aplicación, instala las dependencias manualmente:
 
 ```bash
-sudo dpkg -i OrbitalTerm_*_amd64_freerdp3.deb
+sudo dpkg -i OrbitalTerm_*_amd64_support_freerdp3.deb
 sudo apt install libfreerdp-client3-3 libfreerdp3-3 libwinpr3-3 libwebkit2gtk-4.1-0
 ```
 
@@ -157,7 +157,7 @@ ldd /usr/bin/orbitalterm | grep "not found"
 ### Opción 3 — Paquete .rpm (Fedora / openSUSE)
 
 ```bash
-sudo rpm -i OrbitalTerm-*-1.x86_64_freerdp3.rpm
+sudo rpm -i OrbitalTerm-*-1.x86_64_support_freerdp3.rpm
 ```
 
 ---
