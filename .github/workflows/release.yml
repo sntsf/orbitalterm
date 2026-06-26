@@ -385,40 +385,47 @@ jobs:
               rows.push({ name: a.name, url: a.browser_download_url, sha, mb });
             }
             rows.sort((x, y) => x.name.localeCompare(y.name));
-            const tableRows = rows.map(
+
+            // Direct-link helpers for the compact download table (RustDesk-style).
+            const find = (re) => assets.find((a) => re.test(a.name));
+            const link = (a, label) =>
+              a ? `[${label}](${a.browser_download_url})` : '—';
+            const winMsi = find(/\.msi$/);
+            const winExe = find(/-setup\.exe$/) || find(/\.exe$/);
+            const deb3 = find(/_freerdp3\.deb$/),  deb2 = find(/_freerdp2\.deb$/);
+            const rpm3 = find(/_freerdp3\.rpm$/),  rpm2 = find(/_freerdp2\.rpm$/);
+            const app3 = find(/_freerdp3\.AppImage$/), app2 = find(/_freerdp2\.AppImage$/);
+
+            const downloads = [
+              '| Plataforma / Platform | Descarga / Download |',
+              '|---|---|',
+              `| **Windows** | ${link(winMsi, 'MSI ⭐')} · ${link(winExe, 'EXE')} |`,
+              `| **Linux** · Debian / Ubuntu / Mint (\`.deb\`) | ${link(deb3, 'FreeRDP 3')} · ${link(deb2, 'FreeRDP 2')} |`,
+              `| **Linux** · Fedora / RHEL / openSUSE (\`.rpm\`) | ${link(rpm3, 'FreeRDP 3')} · ${link(rpm2, 'FreeRDP 2')} |`,
+              `| **Linux** · AppImage (cualquier distro) | ${link(app3, 'FreeRDP 3')} · ${link(app2, 'FreeRDP 2')} |`,
+            ].join('\n');
+
+            const checksums = rows.map(
               (r) => `| [${r.name}](${r.url}) | ${r.mb} MB | \`${r.sha}\` |`).join('\n');
 
             const body = [
               `## OrbitalTerm ${tag}`,
               '',
-              '### ¿Qué archivo descargar? / Which file to download?',
-              '',
-              '**Windows:** `*_x64_en-US.msi` (recomendado / recommended) o `*_x64-setup.exe` (alternativo / alternative).',
-              '',
-              '**Linux** — elige según la versión de **FreeRDP** que trae tu distro / pick by the **FreeRDP** version your distro ships:',
-              '',
-              '| Paquete / Package | FreeRDP 3 (distros nuevas / newer) | FreeRDP 2 (distros antiguas / older) |',
-              '|---|---|---|',
-              '| Debian · Ubuntu · Mint · Pop!_OS (`.deb`) | `*_freerdp3.deb` | `*_freerdp2.deb` |',
-              '| Fedora · RHEL · CentOS · openSUSE (`.rpm`) | `*_freerdp3.rpm` | `*_freerdp2.rpm` |',
-              '| Cualquier distro / any distro (`.AppImage`) | `*_freerdp3.AppImage` | `*_freerdp2.AppImage` |',
-              '',
-              '> **Ejemplos:** Ubuntu 25.04+ · Debian 13+ · Fedora 40+ → **FreeRDP 3**.',
-              '> Ubuntu 24.04 y anteriores · Debian 12 · Linux Mint 22 · Fedora 39 y anteriores → **FreeRDP 2**.',
-              '>',
-              '> **¿Dudas? / Not sure?** Ejecuta / run:',
-              '> `ldconfig -p | grep -E "libfreerdp(2|3)"` — si ves `libfreerdp3` usa el archivo *freerdp3*; si ves `libfreerdp2`, el *freerdp2*.',
-              '',
               '### Descargas / Downloads',
+              '',
+              downloads,
+              '',
+              '<sub>⭐ recomendado / recommended. **¿FreeRDP 2 o 3?** Distros nuevas (Ubuntu 25.04+, Debian 13+, Fedora 40+) → **3**; antiguas (Ubuntu 24.04 y anteriores, Debian 12, Mint 22, Fedora 39 y anteriores) → **2**. ¿Dudas? Ejecuta `ldconfig -p | grep -E "libfreerdp(2|3)"`.</sub>',
+              '',
+              '<details><summary>🔒 SHA-256 checksums</summary>',
               '',
               '| Archivo / File | Tamaño / Size | SHA-256 |',
               '|---|---|---|',
-              tableRows,
+              checksums,
               '',
-              '### Code signing',
+              '</details>',
               '',
-              'Windows builds are code-signed with a free certificate provided by the',
-              '[SignPath Foundation](https://signpath.org) (CA: [Certum](https://www.certum.eu)).',
+              '<sub>Windows builds are code-signed with a free certificate provided by the [SignPath Foundation](https://signpath.org) (CA: [Certum](https://www.certum.eu)).</sub>',
             ].join('\n');
 
             await github.rest.repos.updateRelease({ owner, repo, release_id, body });
