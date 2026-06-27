@@ -371,6 +371,13 @@ jobs:
             const { owner, repo } = context.repo;
             const release_id = ${{ needs.create-release.outputs.release_id }};
 
+            // Build download URLs deterministically from the TAG. The asset's
+            // own browser_download_url uses a temporary "untagged-<id>" slug
+            // while the release is still a draft, which 404s once published —
+            // the tag-based URL is correct for the published release.
+            const dlBase = `https://github.com/${owner}/${repo}/releases/download/${tag}`;
+            const dl = (name) => `${dlBase}/${encodeURIComponent(name)}`;
+
             const assets = await github.paginate(
               github.rest.repos.listReleaseAssets, { owner, repo, release_id });
 
@@ -382,14 +389,14 @@ jobs:
                 { owner, repo, asset_id: a.id, headers: { accept: 'application/octet-stream' } });
               const sha = crypto.createHash('sha256').update(Buffer.from(res.data)).digest('hex');
               const mb = (a.size / (1024 * 1024)).toFixed(1);
-              rows.push({ name: a.name, url: a.browser_download_url, sha, mb });
+              rows.push({ name: a.name, url: dl(a.name), sha, mb });
             }
             rows.sort((x, y) => x.name.localeCompare(y.name));
 
             // Direct-link helpers for the compact download table (RustDesk-style).
             const find = (re) => assets.find((a) => re.test(a.name));
             const link = (a, label) =>
-              a ? `[${label}](${a.browser_download_url})` : '—';
+              a ? `[${label}](${dl(a.name)})` : '—';
             const winMsi = find(/\.msi$/);
             const winExe = find(/-setup\.exe$/) || find(/\.exe$/);
             const deb3 = find(/_support_freerdp3\.deb$/),  deb2 = find(/_support_freerdp2\.deb$/);
