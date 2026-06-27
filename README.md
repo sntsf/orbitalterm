@@ -3,6 +3,8 @@
 **Todas tus conexiones remotas en un mismo espacio de trabajo.**  
 **All your remote connections in one workspace.**
 
+🌐 [orbitalterm.com](https://orbitalterm.com) · 💼 [LinkedIn](https://www.linkedin.com/company/orbitalterm/) · ⬇️ [Descargas](https://github.com/sntsf/orbitalterm/releases/latest)
+
 OrbitalTerm es un gestor de conexiones remotas de escritorio construido con [Tauri 2](https://tauri.app/) + React. Organiza y gestiona sesiones SSH, RDP, VNC, FTP, SFTP y navegador desde una sola interfaz, con soporte para carpetas, fuentes de datos y búsqueda rápida.
 
 ---
@@ -198,6 +200,16 @@ version. This program is distributed in the hope that it will be useful, but
 WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
 FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
 details.
+
+---
+
+## Novedades y comunidad
+
+- 🌐 **Web:** [orbitalterm.com](https://orbitalterm.com)
+- 💼 **LinkedIn (novedades y anuncios):** [linkedin.com/company/orbitalterm](https://www.linkedin.com/company/orbitalterm/)
+- ⬇️ **Descargas:** [Releases](https://github.com/sntsf/orbitalterm/releases/latest)
+
+Síguenos en LinkedIn para enterarte de nuevas versiones y novedades.
 
 ---
 
