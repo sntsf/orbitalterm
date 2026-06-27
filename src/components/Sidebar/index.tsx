@@ -1152,9 +1152,11 @@ export function Sidebar() {
                 </button>
               )}
 
-              {/* Group contents */}
+              {/* Group contents — indented so the whole subtree nests clearly
+                  under the data-source (BD) header instead of sitting at almost
+                  the same level. */}
               {expanded && (
-                <div>
+                <div style={{ paddingLeft: 12 }}>
                   {/* Inline root folder creation for this group */}
                   {creatingFolder && newFolderParentId === null && newFolderGroupId === group.id && (
                     <div className="flex items-center gap-1 py-0.5 pr-2">
@@ -1607,6 +1609,9 @@ function ConnItem({
       ].join(" ")}
     >
       <TreePrefix continuations={continuations} isLast={isLast} />
+      {/* Spacer matching a folder's expand toggle, so connection icons line up
+          with folder icons at the same tree level. */}
+      <span className="shrink-0 mr-1" style={{ width: 12 }} />
       <ConnIconDisplay iconKey={iconKey} size={16} />
       <span className="text-[13px] truncate flex-1 ml-1">{conn.name}</span>
       <span className={`text-[10px] uppercase font-semibold px-1 rounded shrink-0 ml-1 ${connTypeColors[conn.type] ?? "text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)]"}`}>
