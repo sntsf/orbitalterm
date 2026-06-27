@@ -33,10 +33,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Target Ubuntu series. Adjust to the ones you want to support; each
-        # must ship rustc >= 1.77 (or have a Rust PPA configured as a build
-        # dependency of your PPA).
-        series: [plucky, oracular, noble]
+        # Target Ubuntu series — only CURRENTLY SUPPORTED ones (Launchpad
+        # rejects uploads to EOL series). Each must ship rustc >= 1.77, OR have
+        # a newer Rust configured as a build dependency of your PPA.
+        # Start with the current LTS; add newer codenames (e.g. the latest
+        # interim/LTS, which ship a modern Rust) once the first build is green.
+        series: [noble]
     steps:
       - uses: actions/checkout@v4
         with:
