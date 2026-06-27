@@ -193,7 +193,7 @@ jobs:
         # No releaseId → tauri-action only builds; we rename + upload below so
         # the artifacts carry a clear "_freerdp3" suffix.
 
-      - name: Add "_freerdp3" suffix to the artifacts
+      - name: Add "_support_freerdp3" suffix to the artifacts
         shell: bash
         run: |
           cd src-tauri/target/release/bundle
@@ -202,9 +202,9 @@ jobs:
             ext="${f##*.}"
             dir="$(dirname "$f")"
             base="$(basename "$f" ".$ext")"
-            case "$base" in *_freerdp3) continue;; esac
-            mv "$f" "$dir/${base}_freerdp3.${ext}"
-            echo "Renamed -> $dir/${base}_freerdp3.${ext}"
+            case "$base" in *_support_freerdp3) continue;; esac
+            mv "$f" "$dir/${base}_support_freerdp3.${ext}"
+            echo "Renamed -> $dir/${base}_support_freerdp3.${ext}"
           done
 
       - name: Upload FreeRDP 3 assets to the release
@@ -307,7 +307,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         # No releaseId → tauri-action only builds; we upload renamed assets below.
 
-      - name: Add "_freerdp2" suffix to the artifacts
+      - name: Add "_support_freerdp2" suffix to the artifacts
         shell: bash
         run: |
           cd src-tauri/target/release/bundle
@@ -316,9 +316,9 @@ jobs:
             ext="${f##*.}"
             dir="$(dirname "$f")"
             base="$(basename "$f" ".$ext")"
-            case "$base" in *_freerdp2) continue;; esac
-            mv "$f" "$dir/${base}_freerdp2.${ext}"
-            echo "Renamed -> $dir/${base}_freerdp2.${ext}"
+            case "$base" in *_support_freerdp2) continue;; esac
+            mv "$f" "$dir/${base}_support_freerdp2.${ext}"
+            echo "Renamed -> $dir/${base}_support_freerdp2.${ext}"
           done
 
       - name: Upload FreeRDP 2 assets to the release
@@ -392,9 +392,9 @@ jobs:
               a ? `[${label}](${a.browser_download_url})` : '—';
             const winMsi = find(/\.msi$/);
             const winExe = find(/-setup\.exe$/) || find(/\.exe$/);
-            const deb3 = find(/_freerdp3\.deb$/),  deb2 = find(/_freerdp2\.deb$/);
-            const rpm3 = find(/_freerdp3\.rpm$/),  rpm2 = find(/_freerdp2\.rpm$/);
-            const app3 = find(/_freerdp3\.AppImage$/), app2 = find(/_freerdp2\.AppImage$/);
+            const deb3 = find(/_support_freerdp3\.deb$/),  deb2 = find(/_support_freerdp2\.deb$/);
+            const rpm3 = find(/_support_freerdp3\.rpm$/),  rpm2 = find(/_support_freerdp2\.rpm$/);
+            const app3 = find(/_support_freerdp3\.AppImage$/), app2 = find(/_support_freerdp2\.AppImage$/);
 
             const downloads = [
               '| Plataforma / Platform | Descarga / Download |',

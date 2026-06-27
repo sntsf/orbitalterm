@@ -1,0 +1,34 @@
+#!/usr/bin/make -f
+# Debian build rules for OrbitalTerm (PPA / Launchpad source build).
+#
+# The frontend (dist/) is pre-built and the Rust crates are vendored into the
+# SOURCE package by CI before upload (see packaging/ppa/README.md and
+# .github/workflows/ppa.yml). Launchpad builders have NO network, so the build
+# below only compiles the Rust binary fully offline; Tauri embeds the prebuilt
+# dist/ at compile time, so Node is NOT needed on the builder.
+
+export DH_VERBOSE = 1
+export CARGO_HOME = $(CURDIR)/.cargo
+export CARGO_NET_OFFLINE = true
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cd src-tauri && cargo build --release --offline --locked
+
+override_dh_auto_install:
+	install -Dm755 src-tauri/target/release/orbitalterm \
+		debian/orbitalterm/usr/bin/orbitalterm
+	install -Dm644 packaging/ppa/orbitalterm.desktop \
+		debian/orbitalterm/usr/share/applications/orbitalterm.desktop
+	install -Dm644 src-tauri/icons/128x128.png \
+		debian/orbitalterm/usr/share/icons/hicolor/128x128/apps/orbitalterm.png
+	install -Dm644 src-tauri/icons/icon.png \
+		debian/orbitalterm/usr/share/icons/hicolor/512x512/apps/orbitalterm.png
+
+# No Rust unit tests to run for the bundled webview binary.
+override_dh_auto_test:
+
+override_dh_auto_clean:
+	rm -rf src-tauri/target

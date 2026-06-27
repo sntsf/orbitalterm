@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.orbitalterm.OrbitalTerm</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>OrbitalTerm</name>
+  <summary>All your remote connections in one workspace</summary>
+  <summary xml:lang="es">Todas tus conexiones remotas en un mismo espacio de trabajo</summary>
+
+  <description>
+    <p>
+      OrbitalTerm is a remote connection manager for the desktop. Organize and
+      open SSH, RDP, VNC, FTP, SFTP and embedded-browser sessions from a single
+      tabbed workspace, with folders, data sources and quick search.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>SSH terminal (password or key authentication)</li>
+      <li>RDP and VNC remote desktops</li>
+      <li>FTP and SFTP dual-pane file transfer</li>
+      <li>Embedded browser with per-connection custom DNS</li>
+      <li>Saved passwords encrypted at rest (AES-256-GCM) with an optional master password</li>
+      <li>Data stored locally — no accounts, no cloud</li>
+    </ul>
+    <p xml:lang="es">
+      OrbitalTerm es un gestor de conexiones remotas de escritorio: abre sesiones
+      SSH, RDP, VNC, FTP, SFTP y navegador desde una sola interfaz con pestañas.
+      Las contraseñas se guardan cifradas (AES-256-GCM) y los datos viven solo en
+      tu equipo.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">com.orbitalterm.OrbitalTerm.desktop</launchable>
+  <developer id="com.orbitalterm">
+    <name>OrbitalTerm</name>
+  </developer>
+
+  <url type="homepage">https://orbitalterm.com</url>
+  <url type="bugtracker">https://github.com/sntsf/orbitalterm/issues</url>
+  <url type="vcs-browser">https://github.com/sntsf/orbitalterm</url>
+
+  <content_rating type="oars-1.1" />
+
+  <!-- TODO: add real screenshots hosted over HTTPS (Flathub requires at least one). -->
+  <screenshots>
+    <screenshot type="default">
+      <caption>OrbitalTerm main window</caption>
+      <image>https://orbitalterm.com/screenshots/main.png</image>
+    </screenshot>
+  </screenshots>
+
+  <releases>
+    <release version="1.0.0" date="2026-06-26"/>
+  </releases>
+</component>

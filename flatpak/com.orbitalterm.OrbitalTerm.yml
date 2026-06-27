@@ -1,0 +1,81 @@
+# Flatpak manifest for OrbitalTerm (Flathub submission scaffold).
+#
+# Flathub builds from source with NO network access, so two sets of
+# dependency sources must be GENERATED before this builds (see flatpak/README.md):
+#   1. cargo-sources.json  -> flatpak-cargo-generator (Rust crates)
+#   2. node-sources.json   -> flatpak-node-generator  (pnpm packages)
+#
+# The GNOME runtime already ships WebKitGTK; FreeRDP is built as a module below.
+
+id: com.orbitalterm.OrbitalTerm
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node20
+command: orbitalterm
+
+finish-args:
+  # Remote connection manager: needs the network and the display server.
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --socket=pulseaudio          # RDP / audio redirection
+  - --talk-name=org.freedesktop.secrets   # optional keyring integration
+  - --filesystem=home            # SSH keys, file transfer (SFTP/FTP), exports
+
+modules:
+  # ---- FreeRDP 3 (RDP backend) -------------------------------------------
+  # Built from source so RDP works inside the sandbox. Pin to a stable tag.
+  - name: freerdp
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DWITH_SERVER=OFF
+      - -DWITH_SAMPLE=OFF
+      - -DWITH_MANPAGES=OFF
+      - -DWITH_CLIENT_SDL=OFF
+      - -DWITH_X11=ON
+    sources:
+      - type: git
+        url: https://github.com/FreeRDP/FreeRDP.git
+        tag: 3.9.0   # TODO: align with the FreeRDP version you build against
+    # NOTE: FreeRDP pulls in winpr; depending on the runtime you may also need
+    # modules for: openh264 (optional), cjson, etc. Validate with a local build.
+
+  # ---- OrbitalTerm -------------------------------------------------------
+  - name: orbitalterm
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node20/bin
+      env:
+        CARGO_HOME: /run/build/orbitalterm/cargo
+    build-commands:
+      # Frontend (offline, from the generated node sources)
+      - npm install -g pnpm
+      - pnpm install --offline --frozen-lockfile
+      - pnpm build
+      # Rust / Tauri binary (offline, from the vendored cargo sources)
+      - cargo build --release --manifest-path src-tauri/Cargo.toml --offline
+      # Install binary + desktop entry + icons
+      - install -Dm755 src-tauri/target/release/orbitalterm /app/bin/orbitalterm
+      - install -Dm644 flatpak/com.orbitalterm.OrbitalTerm.desktop
+          /app/share/applications/com.orbitalterm.OrbitalTerm.desktop
+      - install -Dm644 flatpak/com.orbitalterm.OrbitalTerm.metainfo.xml
+          /app/share/metainfo/com.orbitalterm.OrbitalTerm.metainfo.xml
+      - install -Dm644 src-tauri/icons/128x128.png
+          /app/share/icons/hicolor/128x128/apps/com.orbitalterm.OrbitalTerm.png
+      - install -Dm644 src-tauri/icons/icon.png
+          /app/share/icons/hicolor/512x512/apps/com.orbitalterm.OrbitalTerm.png
+    sources:
+      - type: git
+        url: https://github.com/sntsf/orbitalterm.git
+        tag: v1.0.0   # TODO: bump per release
+      # Offline dependency sources. Generated into this folder by the CI
+      # workflow (.github/workflows/flatpak.yml) or manually (see README) before
+      # building. flatpak-builder reads a string entry as a path to a JSON list.
+      - cargo-sources.json
+      - node-sources.json

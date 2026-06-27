@@ -1,0 +1,58 @@
+name: Build Flatpak
+
+# Generates the offline dependency sources (Rust crates + Node packages) and
+# builds the Flatpak with flatpak-builder to validate it. The resulting bundle
+# is uploaded as a workflow artifact. Flathub submission itself is done via a
+# PR to flathub/flathub (see flatpak/README.md) — this workflow is for building
+# and validating locally in CI.
+#
+# Dormant until you opt in: set repository variable ENABLE_FLATPAK = true.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'flatpak/**'
+      - '.github/workflows/flatpak.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  flatpak:
+    if: vars.ENABLE_FLATPAK == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-47
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync version with the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Building OrbitalTerm $VERSION"
+          node -e "for (const f of ['src-tauri/tauri.conf.json','package.json']) { const j=require('./'+f); j.version=process.argv[1]; require('fs').writeFileSync(f, JSON.stringify(j, null, 2) + '\n'); }" "$VERSION" || true
+
+      - name: Generate offline Rust crate sources
+        run: |
+          python3 -m pip install --break-system-packages --upgrade aiohttp toml
+          curl -fsSL -o /tmp/flatpak-cargo-generator.py \
+            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
+          python3 /tmp/flatpak-cargo-generator.py src-tauri/Cargo.lock -o flatpak/cargo-sources.json
+
+      - name: Generate offline Node sources
+        run: |
+          python3 -m pip install --break-system-packages \
+            "git+https://github.com/flatpak/flatpak-builder-tools.git#subdirectory=node"
+          flatpak-node-generator pnpm pnpm-lock.yaml -o flatpak/node-sources.json
+
+      - name: Build Flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: orbitalterm.flatpak
+          manifest-path: flatpak/com.orbitalterm.OrbitalTerm.yml
+          cache-key: flatpak-builder-${{ github.sha }}

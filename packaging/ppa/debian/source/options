@@ -1,0 +1,6 @@
+# Keep the source tarball lean: the prebuilt frontend (dist/) and vendored
+# Rust crates (vendor/) ARE included, but build caches are not.
+tar-ignore = .git
+tar-ignore = node_modules
+tar-ignore = src-tauri/target
+tar-ignore = .github

@@ -1,0 +1,41 @@
+Source: orbitalterm
+Section: net
+Priority: optional
+Maintainer: OrbitalTerm <anderson.sflorez@gmail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ ca-certificates,
+ pkg-config,
+ libssl-dev,
+ libgtk-3-dev,
+ libwebkit2gtk-4.1-dev,
+ librsvg2-dev,
+ patchelf,
+# FreeRDP dev headers — the alternative lets each Ubuntu series pick the
+# version it actually ships, so the same source builds against FreeRDP 2
+# (e.g. noble) or FreeRDP 3 (e.g. plucky) automatically:
+ freerdp3-dev | freerdp2-dev,
+ libwinpr3-dev | libwinpr2-dev,
+# Rust: Tauri 2 needs rustc >= 1.77. If the target series ships an older
+# toolchain, configure the PPA to also pull build-deps from a newer Rust PPA
+# (PPA settings → "Dependencies"), or this build will fail to compile.
+ cargo,
+ rustc
+Standards-Version: 4.6.2
+Homepage: https://orbitalterm.com
+Vcs-Browser: https://github.com/sntsf/orbitalterm
+Vcs-Git: https://github.com/sntsf/orbitalterm.git
+Rules-Requires-Root: no
+
+Package: orbitalterm
+Architecture: amd64
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends}
+Description: Remote connection manager (SSH, RDP, VNC, FTP, SFTP)
+ OrbitalTerm is a desktop remote-connection manager. It organizes and opens
+ SSH, RDP, VNC, FTP, SFTP and embedded-browser sessions from a single tabbed
+ workspace, with folders, data sources and quick search.
+ .
+ Saved passwords are encrypted at rest (AES-256-GCM) and all data is stored
+ locally — no accounts, no cloud.
