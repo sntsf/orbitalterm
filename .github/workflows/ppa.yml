@@ -97,9 +97,11 @@ jobs:
           cp -r packaging/ppa/debian ./debian
           rm -f debian/changelog
           # 3.0 (native) versions must NOT contain a hyphen — use '+' for the
-          # PPA marker and '~series' so each series upload is unique.
+          # PPA marker and '~series' so each series upload is unique. The run
+          # number keeps the version strictly increasing so retries aren't
+          # rejected by Launchpad as "version already exists".
           DEBFULLNAME="OrbitalTerm" dch --create --package orbitalterm \
-            -v "${VERSION}+ppa1~${{ matrix.series }}1" \
+            -v "${VERSION}+ppa${{ github.run_number }}~${{ matrix.series }}1" \
             --distribution "${{ matrix.series }}" \
             "Automated PPA build of ${VERSION} for ${{ matrix.series }}."
 
