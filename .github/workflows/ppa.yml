@@ -107,6 +107,9 @@ jobs:
 
       - name: Build signed source package
         run: |
+          # node_modules is no longer needed (dist/ is already built) and we no
+          # longer tar-ignore it, so drop it to keep the source tarball lean.
+          rm -rf node_modules
           # debuild options (--no-lintian) MUST come before dpkg-buildpackage
           # options (-S …); the passphrase is cached in the gpg-agent above.
           debuild --no-lintian -S -d -k"${DEBSIGN_KEYID}"

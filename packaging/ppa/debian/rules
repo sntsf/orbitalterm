@@ -33,9 +33,9 @@ override_dh_auto_test:
 override_dh_auto_clean:
 	rm -rf src-tauri/target
 
-# `cargo vendor` emits Cargo.toml.orig files that cargo needs at build time
-# (they are referenced in each crate's .cargo-checksum.json). dh_clean deletes
-# *.orig by default, which would strip them from the source tarball and break
-# the offline build on Launchpad — exclude them from the purge.
+# Vendored crates contain files (Cargo.toml.orig, .github/*, etc.) that cargo
+# verifies against each crate's .cargo-checksum.json. dh_clean would purge some
+# of them (*.orig, *.rej, …) and break the offline build on Launchpad, so
+# protect the ENTIRE vendor/ tree from dh_clean's cruft removal.
 override_dh_clean:
-	dh_clean -X.orig
+	dh_clean -Xvendor/

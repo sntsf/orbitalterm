@@ -1,6 +1,6 @@
-# Keep the source tarball lean: the prebuilt frontend (dist/) and vendored
-# Rust crates (vendor/) ARE included, but build caches are not.
+# Keep the repository's own VCS metadata out of the source tarball, but DO NOT
+# use patterns that could match files INSIDE vendored crates (vendor/*) — those
+# files are referenced in each crate's .cargo-checksum.json and cargo needs them
+# for the offline build. (node_modules is removed in CI before the build; the
+# whole vendor/ dir is protected from dh_clean via `dh_clean -Xvendor`.)
 tar-ignore = .git
-tar-ignore = node_modules
-tar-ignore = src-tauri/target
-tar-ignore = .github
