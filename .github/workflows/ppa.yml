@@ -34,11 +34,10 @@ jobs:
       fail-fast: false
       matrix:
         # Target Ubuntu series — only CURRENTLY SUPPORTED ones (Launchpad
-        # rejects uploads to EOL series). Each must ship rustc >= 1.77, OR have
-        # a newer Rust configured as a build dependency of your PPA.
-        # Start with the current LTS; add newer codenames (e.g. the latest
-        # interim/LTS, which ship a modern Rust) once the first build is green.
-        series: [noble]
+        # rejects uploads to EOL series) that ship a modern Rust (>= 1.77).
+        # resolute = 26.04 LTS (current stable). noble (24.04) is intentionally
+        # excluded: it ships rustc 1.75, which is too old for the build.
+        series: [resolute]
     steps:
       - uses: actions/checkout@v4
         with:
