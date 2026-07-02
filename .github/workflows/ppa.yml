@@ -76,14 +76,19 @@ jobs:
       - name: Import GPG signing key
         env:
           GPG_KEY: ${{ secrets.PPA_GPG_PRIVATE_KEY }}
+          PASSPHRASE: ${{ secrets.PPA_GPG_PASSPHRASE }}
         run: |
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          printf 'allow-loopback-pinentry\nallow-preset-passphrase\n' >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent || true
           echo "$GPG_KEY" | gpg --batch --import
           KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')
           echo "DEBSIGN_KEYID=$KEYID" >> "$GITHUB_ENV"
-          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
-          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
-          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
-          gpgconf --kill gpg-agent || true
+          # Cache the passphrase in the agent so debuild can sign non-interactively.
+          gpg-connect-agent reloadagent /bye
+          for KG in $(gpg --batch --with-colons --with-keygrip --list-secret-keys | awk -F: '$1=="grp"{print $10}'); do
+            /usr/lib/gnupg/gpg-preset-passphrase --preset --passphrase "$PASSPHRASE" "$KG"
+          done
 
       - name: Assemble debian/ for ${{ matrix.series }}
         env:
@@ -92,17 +97,19 @@ jobs:
           rm -rf debian
           cp -r packaging/ppa/debian ./debian
           rm -f debian/changelog
+          # 3.0 (native) versions must NOT contain a hyphen — use '+' for the
+          # PPA marker and '~series' so each series upload is unique.
           DEBFULLNAME="OrbitalTerm" dch --create --package orbitalterm \
-            -v "${VERSION}-0ppa1~${{ matrix.series }}1" \
+            -v "${VERSION}+ppa1~${{ matrix.series }}1" \
             --distribution "${{ matrix.series }}" \
             "Automated PPA build of ${VERSION} for ${{ matrix.series }}."
 
       - name: Build signed source package
         run: |
-          debuild -S -sa -d -k"${DEBSIGN_KEYID}" --no-lintian \
-            -p"gpg --batch --pinentry-mode loopback --passphrase ${{ secrets.PPA_GPG_PASSPHRASE }}"
+          # debuild options (--no-lintian) MUST come before dpkg-buildpackage
+          # options (-S …); the passphrase is cached in the gpg-agent above.
+          debuild --no-lintian -S -d -k"${DEBSIGN_KEYID}"
 
       - name: Upload to the PPA
         run: |
-          dput "ppa:${{ secrets.PPA_NAME }}" \
-            "../orbitalterm_${VERSION}-0ppa1~${{ matrix.series }}1_source.changes"
+          dput "ppa:${{ secrets.PPA_NAME }}" ../orbitalterm_*_source.changes
